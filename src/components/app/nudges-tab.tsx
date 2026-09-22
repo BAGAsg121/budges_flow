@@ -1,0 +1,452 @@
+'use client'
+
+import { useCallback, useEffect, useState } from 'react'
+import {
+  Play, Eye, Pencil, Trash2, Plus, Send, RefreshCcw, Loader2, AlertCircle,
+} from 'lucide-react'
+import { Card, CardContent } from '@/components/ui/card'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Switch } from '@/components/ui/switch'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Textarea } from '@/components/ui/textarea'
+import { Separator } from '@/components/ui/separator'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
+  AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
+import { useToast } from '@/hooks/use-toast'
+import type { NudgeDto, PreviewDto, RunSummaryDto } from '@/lib/app-types'
+
+const TEMPLATE_VARS =
+  '{{first_name}}, {{full_name}}, {{email}}, {{company}}, {{lead_status}}, {{kyc_document_upload_count}}, {{owner_name}}, {{city}}, {{email_number}}, {{today}}'
+
+const emptyForm = {
+  key: '',
+  name: '',
+  description: '',
+  enabled: true,
+  zohoCriteria: '',
+  filters: '{\n  "requireEmail": true,\n  "excludeStatuses": ["Closed Won", "Closed Lost", "Unqualified"]\n}',
+  subjectTemplate: '',
+  bodyTemplate: '<p>Hi {{first_name}},</p>\n<p>...</p>\n<p>Thanks,<br/>Eko Team</p>',
+  maxEmailsPerLead: 1,
+  followUpDays: 0,
+}
+
+type FormState = typeof emptyForm
+
+function reasonBadge(reason: string, detail?: string) {
+  switch (reason) {
+    case 'replied':
+      return <Badge className="bg-emerald-600 hover:bg-emerald-600">replied</Badge>
+    case 'max_reached':
+      return <Badge variant="secondary">max reached{detail ? ` · ${detail}` : ''}</Badge>
+    case 'waiting_followup':
+      return <Badge className="bg-amber-500 hover:bg-amber-500">waiting{detail ? ` · ${detail}` : ''}</Badge>
+    case 'no_email':
+      return <Badge variant="destructive">no email</Badge>
+    default:
+      return <Badge variant="outline">{reason}{detail ? ` · ${detail}` : ''}</Badge>
+  }
+}
+
+export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onChanged: () => void }) {
+  const { toast } = useToast()
+  const [nudges, setNudges] = useState<NudgeDto[]>([])
+  const [loading, setLoading] = useState(true)
+
+  const [formOpen, setFormOpen] = useState(false)
+  const [editing, setEditing] = useState<NudgeDto | null>(null)
+  const [form, setForm] = useState<FormState>(emptyForm)
+  const [saving, setSaving] = useState(false)
+
+  const [runTarget, setRunTarget] = useState<NudgeDto | null>(null)
+  const [runWithSync, setRunWithSync] = useState(true)
+  const [running, setRunning] = useState<string | null>(null)
+  const [runResult, setRunResult] = useState<RunSummaryDto | null>(null)
+  const [preview, setPreview] = useState<PreviewDto | null>(null)
+  const [previewLoading, setPreviewLoading] = useState(false)
+
+  const load = useCallback(async () => {
+    try {
+      const res = await fetch('/api/nudges')
+      const data = (await res.json()) as { nudges: NudgeDto[] }
+      setNudges(data.nudges || [])
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    load()
+  }, [load, refreshKey])
+
+  const openCreate = () => {
+    setEditing(null)
+    setForm(emptyForm)
+    setFormOpen(true)
+  }
+
+  const openEdit = (n: NudgeDto) => {
+    setEditing(n)
+    setForm({
+      key: n.key,
+      name: n.name,
+      description: n.description || '',
+      enabled: n.enabled,
+      zohoCriteria: n.zohoCriteria || '',
+      filters: n.filters,
+      subjectTemplate: n.subjectTemplate,
+      bodyTemplate: n.bodyTemplate,
+      maxEmailsPerLead: n.maxEmailsPerLead,
+      followUpDays: n.followUpDays,
+    })
+    setFormOpen(true)
+  }
+
+  const save = async () => {
+    setSaving(true)
+    try {
+      const res = await fetch(editing ? `/api/nudges/${editing.id}` : '/api/nudges', {
+        method: editing ? 'PATCH' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(form),
+      })
+      const data = (await res.json()) as { ok: boolean; error?: string }
+      if (!data.ok) {
+        toast({ title: 'Save failed', description: data.error, variant: 'destructive' })
+        return
+      }
+      toast({ title: editing ? 'Nudge updated' : 'Nudge created', description: form.name })
+      setFormOpen(false)
+      load()
+      onChanged()
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const toggleEnabled = async (n: NudgeDto, enabled: boolean) => {
+    setNudges((prev) => prev.map((x) => (x.id === n.id ? { ...x, enabled } : x)))
+    await fetch(`/api/nudges/${n.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    })
+  }
+
+  const run = async (n: NudgeDto) => {
+    setRunning(n.id)
+    try {
+      const res = await fetch(`/api/nudges/${n.id}/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sync: runWithSync }),
+      })
+      const data = (await res.json()) as { ok: boolean; summary?: RunSummaryDto; error?: string }
+      if (!data.ok || !data.summary) {
+        toast({ title: 'Run failed', description: data.error, variant: 'destructive' })
+        return
+      }
+      setRunResult(data.summary)
+      load()
+      onChanged()
+    } finally {
+      setRunning(null)
+      setRunTarget(null)
+    }
+  }
+
+  const openPreview = async (n: NudgeDto) => {
+    setPreviewLoading(true)
+    setPreview(null)
+    try {
+      const res = await fetch(`/api/nudges/${n.id}/preview`)
+      const data = (await res.json()) as PreviewDto & { ok: boolean; error?: string }
+      if (!data.ok) {
+        toast({ title: 'Preview failed', description: data.error, variant: 'destructive' })
+        return
+      }
+      setPreview(data)
+    } finally {
+      setPreviewLoading(false)
+    }
+  }
+
+  const remove = async (n: NudgeDto) => {
+    if (!confirm(`Delete nudge "${n.name}" and all its email logs?`)) return
+    await fetch(`/api/nudges/${n.id}`, { method: 'DELETE' })
+    toast({ title: 'Nudge deleted', description: n.name })
+    load()
+    onChanged()
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="text-sm font-medium">Nudges</h3>
+          <p className="text-xs text-muted-foreground">
+            One nudge = one reusable flow (Zoho criteria + lead filters + email template + sequence). Create a new row to add a new flow.
+          </p>
+        </div>
+        <Button onClick={openCreate} size="sm">
+          <Plus className="h-4 w-4 mr-1" /> New Nudge
+        </Button>
+      </div>
+
+      {loading ? (
+        <Card><CardContent className="p-8 text-center text-sm text-muted-foreground">loading…</CardContent></Card>
+      ) : nudges.length === 0 ? (
+        <Card><CardContent className="p-8 text-center text-sm text-muted-foreground">No nudges yet — create one.</CardContent></Card>
+      ) : (
+        <div className="grid gap-4 lg:grid-cols-2">
+          {nudges.map((n) => (
+            <Card key={n.id}>
+              <CardContent className="p-4 sm:p-6 space-y-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h4 className="font-medium truncate">{n.name}</h4>
+                      <Badge variant="outline" className="font-mono text-xs">{n.key}</Badge>
+                      {!n.enabled && <Badge variant="secondary">disabled</Badge>}
+                    </div>
+                    {n.description ? (
+                      <p className="text-xs text-muted-foreground mt-1 line-clamp-2">{n.description}</p>
+                    ) : null}
+                  </div>
+                  <Switch checked={n.enabled} onCheckedChange={(v) => toggleEnabled(n, v)} aria-label="Enable nudge" />
+                </div>
+
+                <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-muted-foreground">
+                  <span><Send className="inline h-3 w-3 mr-1" />{n.emailsSent} emails sent</span>
+                  <span><RefreshCcw className="inline h-3 w-3 mr-1" />max {n.maxEmailsPerLead}/lead</span>
+                  <span>follow-up every {n.followUpDays}d</span>
+                  <span>last run: {n.lastRunAt ? new Date(n.lastRunAt).toLocaleString() : 'never'}</span>
+                </div>
+
+                <Separator />
+
+                <div className="flex flex-wrap gap-2">
+                  <Button size="sm" onClick={() => { setRunWithSync(true); setRunTarget(n) }} disabled={!n.enabled}>
+                    {running === n.id ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Play className="h-4 w-4 mr-1" />}
+                    Run
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => openPreview(n)}>
+                    <Eye className="h-4 w-4 mr-1" /> Preview
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => openEdit(n)}>
+                    <Pencil className="h-4 w-4 mr-1" /> Edit
+                  </Button>
+                  <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" onClick={() => remove(n)}>
+                    <Trash2 className="h-4 w-4 mr-1" /> Delete
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
+
+      {/* Create / Edit dialog */}
+      <Dialog open={formOpen} onOpenChange={setFormOpen}>
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>{editing ? `Edit nudge: ${editing.name}` : 'Create a new nudge'}</DialogTitle>
+            <DialogDescription>
+              A nudge is a reusable flow: optional Zoho criteria → local lead filters → email template → send sequence.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="grid gap-4 py-2">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="grid gap-1.5">
+                <Label htmlFor="n-name">Name</Label>
+                <Input id="n-name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Payment Reminder" />
+              </div>
+              <div className="grid gap-1.5">
+                <Label htmlFor="n-key">Key (unique slug)</Label>
+                <Input id="n-key" value={form.key} disabled={!!editing} onChange={(e) => setForm({ ...form, key: e.target.value })} placeholder="payment_reminder" />
+              </div>
+            </div>
+
+            <div className="grid gap-1.5">
+              <Label htmlFor="n-desc">Description</Label>
+              <Input id="n-desc" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="What this nudge is for" />
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-3">
+              <div className="grid gap-1.5">
+                <Label htmlFor="n-max">Max emails / lead</Label>
+                <Input id="n-max" type="number" min={1} value={form.maxEmailsPerLead} onChange={(e) => setForm({ ...form, maxEmailsPerLead: Number(e.target.value) })} />
+              </div>
+              <div className="grid gap-1.5">
+                <Label htmlFor="n-fup">Follow-up gap (days)</Label>
+                <Input id="n-fup" type="number" min={0} value={form.followUpDays} onChange={(e) => setForm({ ...form, followUpDays: Number(e.target.value) })} />
+              </div>
+              <div className="flex items-end gap-2 pb-1">
+                <Switch id="n-enabled" checked={form.enabled} onCheckedChange={(v) => setForm({ ...form, enabled: v })} />
+                <Label htmlFor="n-enabled">Enabled</Label>
+              </div>
+            </div>
+
+            <div className="grid gap-1.5">
+              <Label htmlFor="n-subject">Subject template</Label>
+              <Input id="n-subject" value={form.subjectTemplate} onChange={(e) => setForm({ ...form, subjectTemplate: e.target.value })} placeholder="Action pending: complete your documents" />
+            </div>
+
+            <div className="grid gap-1.5">
+              <Label htmlFor="n-body">Email body (HTML)</Label>
+              <Textarea id="n-body" rows={8} className="font-mono text-xs" value={form.bodyTemplate} onChange={(e) => setForm({ ...form, bodyTemplate: e.target.value })} />
+              <p className="text-xs text-muted-foreground">Variables: {TEMPLATE_VARS}. A tracking pixel is appended automatically.</p>
+            </div>
+
+            <Separator />
+
+            <div className="grid gap-1.5">
+              <Label htmlFor="n-criteria">Zoho criteria (optional — synced on each run)</Label>
+              <Textarea id="n-criteria" rows={3} className="font-mono text-xs" value={form.zohoCriteria} onChange={(e) => setForm({ ...form, zohoCriteria: e.target.value })} placeholder="((Business_vertical:equals:EPS)and(KYC_Document_Upload_Count:less_equal:11))" />
+              <p className="text-xs text-muted-foreground">If set, running the nudge first syncs matching leads from Zoho CRM.</p>
+            </div>
+
+            <div className="grid gap-1.5">
+              <Label htmlFor="n-filters">Local lead filters (JSON)</Label>
+              <Textarea id="n-filters" rows={5} className="font-mono text-xs" value={form.filters} onChange={(e) => setForm({ ...form, filters: e.target.value })} />
+              <p className="text-xs text-muted-foreground">
+                Keys: requireEmail, excludeStatuses[], businessVertical, minKycCount, maxKycCount, createdAfter (ISO date)
+              </p>
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setFormOpen(false)}>Cancel</Button>
+            <Button onClick={save} disabled={saving || !form.name || !form.key || !form.subjectTemplate || !form.bodyTemplate}>
+              {saving ? 'Saving…' : editing ? 'Save changes' : 'Create nudge'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Run confirmation */}
+      <AlertDialog open={!!runTarget} onOpenChange={(o) => !o && setRunTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Run nudge &ldquo;{runTarget?.name}&rdquo;?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will send emails to every eligible lead that hasn&apos;t hit the sequence limit.
+              Max {runTarget?.maxEmailsPerLead} email(s) per lead, {runTarget?.followUpDays} day(s) between follow-ups.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="flex items-center gap-2 py-1">
+            <Switch id="run-sync" checked={runWithSync} onCheckedChange={setRunWithSync} />
+            <Label htmlFor="run-sync" className="text-sm font-normal">
+              Sync from Zoho first
+              <span className="block text-xs text-muted-foreground">uncheck to send to already-synced leads (e.g. when the Zoho token is expired)</span>
+            </Label>
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={() => runTarget && run(runTarget)}>
+              {running ? 'Running…' : 'Send emails'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Run result */}
+      <Dialog open={!!runResult} onOpenChange={(o) => !o && setRunResult(null)}>
+        <DialogContent className="max-w-xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Run complete: {runResult?.nudgeKey}</DialogTitle>
+            <DialogDescription>
+              {runResult?.syncedFromZoho !== null && runResult?.syncedFromZoho !== undefined
+                ? `${runResult.syncedFromZoho} leads synced from Zoho · `
+                : ''}
+              {runResult?.leadsConsidered} leads considered ·{' '}
+              <b className="text-emerald-600">{runResult?.sent} sent</b> ·{' '}
+              {runResult?.failed ? <span className="text-red-600">{runResult.failed} failed</span> : '0 failed'}
+              {!runResult?.smtpConfigured && (
+                <span className="flex items-start gap-1.5 mt-2 text-amber-600">
+                  <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                  SMTP not configured — attempts were logged as failed. Set SMTP_USER / SMTP_PASS / MAIL_FROM in .env.
+                </span>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+
+          {runResult && runResult.skipped.length > 0 ? (
+            <div className="rounded-md border max-h-72 overflow-y-auto p-2 space-y-1">
+              {runResult.skipped.map((s, i) => (
+                <div key={i} className="flex items-center justify-between gap-2 rounded px-2 py-1.5 text-sm hover:bg-muted/60">
+                  <div className="min-w-0">
+                    <p className="truncate font-medium">{s.lead}</p>
+                    <p className="truncate text-xs text-muted-foreground">{s.email || 'no email'}</p>
+                  </div>
+                  {reasonBadge(s.reason, s.detail)}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">No skips — everyone eligible got an email.</p>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Preview */}
+      <Dialog open={!!preview || previewLoading} onOpenChange={(o) => !o && setPreview(null)}>
+        <DialogContent className="max-w-xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Preview (dry run — nothing sent)</DialogTitle>
+            <DialogDescription>
+              {preview ? `${preview.leadsConsidered} leads match the filters · ${preview.wouldSend.length} would receive an email now` : 'calculating…'}
+            </DialogDescription>
+          </DialogHeader>
+
+          {preview ? (
+            <div className="space-y-4">
+              <div>
+                <p className="text-xs font-medium mb-1.5 text-emerald-700">Would send ({preview.wouldSend.length})</p>
+                <div className="rounded-md border max-h-56 overflow-y-auto p-2 space-y-1">
+                  {preview.wouldSend.length === 0 ? (
+                    <p className="text-sm text-muted-foreground p-2">No one is due for an email right now.</p>
+                  ) : (
+                    preview.wouldSend.map((s, i) => (
+                      <div key={i} className="flex items-center justify-between gap-2 rounded px-2 py-1.5 text-sm hover:bg-muted/60">
+                        <div className="min-w-0">
+                          <p className="truncate font-medium">{s.lead}</p>
+                          <p className="truncate text-xs text-muted-foreground">{s.email}</p>
+                        </div>
+                        <Badge variant="outline">#{s.emailNumber}</Badge>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+              {preview.wouldSkip.length > 0 && (
+                <div>
+                  <p className="text-xs font-medium mb-1.5 text-muted-foreground">Skipped ({preview.wouldSkip.length})</p>
+                  <div className="rounded-md border max-h-56 overflow-y-auto p-2 space-y-1">
+                    {preview.wouldSkip.map((s, i) => (
+                      <div key={i} className="flex items-center justify-between gap-2 rounded px-2 py-1.5 text-sm hover:bg-muted/60">
+                        <div className="min-w-0">
+                          <p className="truncate font-medium">{s.lead}</p>
+                          <p className="truncate text-xs text-muted-foreground">{s.email || 'no email'}</p>
+                        </div>
+                        {reasonBadge(s.reason, s.detail)}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="py-8 text-center text-sm text-muted-foreground">loading preview…</div>
+          )}
+        </DialogContent>
+      </Dialog>
+    </div>
+  )
+}

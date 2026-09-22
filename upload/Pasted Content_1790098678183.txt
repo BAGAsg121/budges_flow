@@ -1,0 +1,1181 @@
+{
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "2a090aa0-3c2b-40f2-a06b-544508df60ab",
+      "name": "Manual Test Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -7140,
+        1600
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "b8cfd74c-e8e5-4095-9b0b-2a14ff196ebd",
+              "name": "zoho_client_id",
+              "value": "1000.H70DLTD3P20IIUVGTQ91NHHUVM3OHS",
+              "type": "string"
+            },
+            {
+              "id": "dfd74218-849d-4bec-b416-dd93f261a620",
+              "name": "zoho_client_secret",
+              "value": "4a446e765c32dd1a1e4d92109af04f27065ae9214d",
+              "type": "string"
+            },
+            {
+              "id": "64ff07e5-258d-41a4-aa12-04e189f5c070",
+              "name": "zoho_refresh_token",
+              "value": "1000.e31a20983e1e6c670c28c5ecc8f75126.8ac7ebaca230eac95c0796a7454a166d",
+              "type": "string"
+            },
+            {
+              "id": "c58d5a91-f9ab-4e57-8321-2d050c9db65e",
+              "name": "mail_account_id",
+              "value": "1211051000000002002",
+              "type": "string"
+            },
+            {
+              "id": "989b1861-2ccb-47c7-8074-c92413a24730",
+              "name": "from_address",
+              "value": "do.not.reply@eko.co.in",
+              "type": "string"
+            },
+            {
+              "id": "27eaa33a-88e0-48e5-9c35-e685c438f8f1",
+              "name": "sender_name",
+              "value": "Eko Support",
+              "type": "string"
+            },
+            {
+              "id": "b3f8010b-f45e-44b4-ba20-8a1035b15bdd",
+              "name": "n8n_base_url",
+              "value": "https://automaton8n.eko.in",
+              "type": "string"
+            },
+            {
+              "id": "a609bb7e-a005-4bea-9445-b983be4cf764",
+              "name": "reminder_gap_days",
+              "value": "2",
+              "type": "string"
+            },
+            {
+              "id": "b4013071-6dab-4b32-8a61-18ada587f2f3",
+              "name": "max_emails_per_lead",
+              "value": "3",
+              "type": "string"
+            },
+            {
+              "id": "8a0fc25e-e52a-4130-916b-2daf7f7782d8",
+              "name": "stop_after_reply",
+              "value": "yes",
+              "type": "string"
+            },
+            {
+              "id": "6f155ea5-a862-464d-bd9a-43fc57059d8f",
+              "name": "mail_refresh_token",
+              "value": "1000.abeb5577d460856699efd856c085eee7.6588ae492e9605a548d192ac5e46a548",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "80c842fe-6923-4140-bdb4-99e0a4f4fcf0",
+      "name": "Config (Send)1",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -6940,
+        1600
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://accounts.zoho.in/oauth/v2/token",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "refresh_token",
+              "value": "={{ $('Config (Send)1').first().json.zoho_refresh_token }}"
+            },
+            {
+              "name": "client_id",
+              "value": "={{ $('Config (Send)1').first().json.zoho_client_id }}"
+            },
+            {
+              "name": "client_secret",
+              "value": "={{ $('Config (Send)1').first().json.zoho_client_secret }}"
+            },
+            {
+              "name": "grant_type",
+              "value": "refresh_token"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "886bc78d-2d8a-4190-853c-707130bcc5df",
+      "name": "Refresh Zoho Access Token1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -6740,
+        1600
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "url": "https://www.zohoapis.in/crm/v8/Leads/109211000427650034",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Zoho-oauthtoken ' + $('Refresh Zoho Access Token1').first().json.access_token }}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          },
+          "pagination": {
+            "pagination": {
+              "parameters": {
+                "parameters": [
+                  {
+                    "name": "page",
+                    "value": "={{ $pageCount + 1 }}"
+                  }
+                ]
+              },
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ !($response.body && $response.body.info && $response.body.info.more_records) }}",
+              "requestInterval": 500
+            }
+          }
+        }
+      },
+      "id": "ce185c85-2cac-4970-b17a-c26dccfa8448",
+      "name": "Get Leads from Zoho CRM1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -6540,
+        1600
+      ],
+      "executeOnce": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Config (Send)1').first().json;\nconst gapMs = Number(cfg.reminder_gap_days || 2) * 86400000;\nconst maxEmails = Number(cfg.max_emails_per_lead || 3);\nconst stopAfterReply = String(cfg.stop_after_reply || 'yes').toLowerCase() === 'yes';\nconst now = Date.now();\nconst nowIso = new Date(now).toISOString();\nconst emailRe = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/;\n\n// 1) Email history per lead, from the Email Log sheet\nconst hist = {};\nfor (const item of $('Read Email Log2').all()) {\n  const r = item.json;\n  const id = String(r.lead_id ?? '').trim();\n  if (!id) continue;\n  (hist[id] = hist[id] || []).push(r);\n}\n\n// 2) Fresh lead data from the CRM (one item per page)\nconst leads = [];\nfor (const page of $('Get Leads from Zoho CRM1').all()) {\n  if (Array.isArray(page.json.data)) leads.push(...page.json.data);\n}\n\nconst seen = new Set();\nconst out = [];\nfor (const lead of leads) {\n  const leadId = String(lead.id ?? '').trim();\n  if (!leadId || seen.has(leadId)) continue;\n  seen.add(leadId);\n\n  const email = String(lead.Email ?? '').trim().toLowerCase();\n  const raw = lead.KYC_Document_Upload_Count;\n  const count = (raw === null || raw === undefined || raw === '') ? 0 : Number(raw);   // empty == nothing uploaded\n  const kycStatus = count >= 11 ? 'complete' : (count > 0 ? 'partial' : 'none');\n\n  const rows = (hist[leadId] || []).slice().sort((a, b) => Date.parse(a.sent_at) - Date.parse(b.sent_at));\n  const last = rows[rows.length - 1];\n  const lastSentTs = last ? Date.parse(last.sent_at) : NaN;\n  const everOpened = rows.some(r => Number(r.opened) === 1) ? 1 : 0;\n  const everReplied = rows.some(r => Number(r.replied) === 1) ? 1 : 0;\n\n  let decision = 'email_due';\n  if (Number.isNaN(count) || count < 0) decision = 'bad_kyc_value';\n  else if (count >= 11) decision = 'kyc_complete';\n  else if (!emailRe.test(email)) decision = 'no_valid_email';\n  else if (rows.length >= maxEmails) decision = 'max_emails_reached';\n  else if (everReplied && stopAfterReply) decision = 'replied_stop';\n  else if (!Number.isNaN(lastSentTs) && now - lastSentTs < gapMs) decision = 'wait_for_gap';\n\n  const sendEmail = decision === 'email_due';\n  out.push({ json: {\n    lead_id: leadId,\n    full_name: lead.Full_Name || [lead.First_Name, lead.Last_Name].filter(Boolean).join(' '),\n    email,\n    phone: lead.Phone || lead.Mobile || '',\n    company: lead.Company || lead.Org_Name || '',\n    lead_status: lead.Lead_Status || '',\n    kyc_document_upload_count: count,\n    kyc_status: kycStatus,\n    last_synced_at: nowIso,\n    email_count: rows.length,\n    last_email_type: last ? (last.email_type || '') : '',\n    last_email_sent_at: last ? (last.sent_at || '') : '',\n    last_engagement_status: last ? (last.engagement_status || '') : '',\n    ever_opened: everOpened,\n    ever_replied: everReplied,\n    email_decision: decision,\n    send_email: sendEmail,\n    email_type: sendEmail ? (count === 0 ? 'submit_documents' : 'pending_documents') : ''\n  }});\n}\nreturn out;"
+      },
+      "id": "d061a07b-e156-4bf0-ad0f-7b84cdabe9a9",
+      "name": "Decide Emails1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -6140,
+        1600
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1ksbyWNVn73B0YGC2GlrynAXflhf2cdESciyVhngIGQc",
+          "mode": "list",
+          "cachedResultName": "FEVERRRRRRRR",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ksbyWNVn73B0YGC2GlrynAXflhf2cdESciyVhngIGQc/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1123500508,
+          "mode": "list",
+          "cachedResultName": "Sheet4",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ksbyWNVn73B0YGC2GlrynAXflhf2cdESciyVhngIGQc/edit#gid=1123500508"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "lead_id"
+          ],
+          "schema": [
+            {
+              "id": "lead_id",
+              "displayName": "lead_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "full_name",
+              "displayName": "full_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "email",
+              "displayName": "email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "phone",
+              "displayName": "phone",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "company",
+              "displayName": "company",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "lead_status",
+              "displayName": "lead_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "kyc_document_upload_count",
+              "displayName": "kyc_document_upload_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "kyc_status",
+              "displayName": "kyc_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "last_synced_at",
+              "displayName": "last_synced_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "email_count",
+              "displayName": "email_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "last_email_type",
+              "displayName": "last_email_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "last_email_sent_at",
+              "displayName": "last_email_sent_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "last_engagement_status",
+              "displayName": "last_engagement_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "ever_opened",
+              "displayName": "ever_opened",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "ever_replied",
+              "displayName": "ever_replied",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "email_decision",
+              "displayName": "email_decision",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "send_email",
+              "displayName": "send_email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "email_type",
+              "displayName": "email_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "sent_ok",
+              "displayName": "sent_ok",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "send_error",
+              "displayName": "send_error",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "tracking_id",
+              "displayName": "tracking_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "email_number",
+              "displayName": "email_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "subject",
+              "displayName": "subject",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "message_id",
+              "displayName": "message_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "sent_at",
+              "displayName": "sent_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "5c297b59-4b65-42de-8134-c9dd2e929fe2",
+      "name": "Upsert Lead Emails1",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -5920,
+        1400
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "sjywVjfxY0RjtQ9Y",
+          "name": "Shlok GS"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "9fa2c39e-a6f9-4d16-81ef-0d85ac70c8e3",
+              "leftValue": "={{ $json.send_email }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "25ebe3c3-a0e2-4180-a063-802dce1e4b5e",
+      "name": "Needs Email?1",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -5960,
+        1800
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Config (Send)1').first().json;\nconst base = String(cfg.n8n_base_url).replace(/\\/+$/, '');\nconst esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;');\n\nreturn $input.all().map(item => {\n  const l = item.json;\n  const emailNumber = Number(l.email_count || 0) + 1;\n  const trackingId = `${l.lead_id}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;\n  const name = esc(l.full_name || 'there');\n  const remaining = Math.max(0, 11 - Number(l.kyc_document_upload_count || 0));\n\n  let subject, body;\n  if (l.email_type === 'submit_documents') {\n    subject = emailNumber === 1 ? 'Action Required: Submit Your KYC Documents' : 'Reminder: Please Submit Your KYC Documents';\n    body = `<p>Hi ${name},</p><p>We don't see any KYC documents on file for your account yet. Please submit your documents at the earliest so we can continue processing your onboarding.</p><p>Simply reply to this email if you need any help.</p>`;\n  } else {\n    subject = 'Reminder: Your KYC Documents Are Incomplete';\n    body = `<p>Hi ${name},</p><p>You've submitted ${esc(l.kyc_document_upload_count)} out of 11 required KYC documents (${remaining} remaining). Please complete the remaining uploads to avoid delays in your onboarding.</p><p>Simply reply to this email if you need any help.</p>`;\n  }\n\n  const pixel = `<img src=\"${base}/webhook/email-open?tid=${encodeURIComponent(trackingId)}\" width=\"1\" height=\"1\" alt=\"\" style=\"border:0\">`;\n  const html = `<div style=\"font-family:Arial,sans-serif;font-size:14px;line-height:1.5\">${body}<p>Regards,<br>${esc(cfg.sender_name)}</p></div>${pixel}`;\n\n  return { json: { ...l, tracking_id: trackingId, email_number: emailNumber, subject, html } };\n});"
+      },
+      "id": "f909f3db-9cd8-4af8-a7f1-7dcd14f80af4",
+      "name": "Build Email1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -5700,
+        1780
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://mail.zoho.in/api/accounts/' + $('Config (Send)1').first().json.mail_account_id + '/messages' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Zoho-oauthtoken ' + $('Refresh Zoho Mail Access Token').first().json.access_token }}"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ fromAddress: $('Config (Send)1').first().json.from_address, toAddress: $('Build Email1').item.json.email, subject: $('Build Email1').item.json.subject, content: $('Build Email1').item.json.html, mailFormat: 'html', askReceipt: 'no' }) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 1500
+            }
+          }
+        }
+      },
+      "id": "2693de42-c947-4718-ad08-8bebb007ce98",
+      "name": "Send Email via Zoho Mail1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -5380,
+        1440
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Pair each API response with the email we built (same order).\nconst responses = $input.all();\nconst built = $('Build Email1').all();\nconst now = new Date().toISOString();\n\nreturn responses.map((r, i) => {\n  const o = built[i].json;\n  const body = r.json || {};\n  const ok = !!(body.status && Number(body.status.code) === 200);\n  const messageId = body.data ? (body.data.messageId ?? body.data.mailId ?? '') : '';\n  return { json: {\n    sent_ok: ok,\n    send_error: ok ? '' : JSON.stringify(body.error || body.status || body).slice(0, 300),\n    tracking_id: o.tracking_id,\n    lead_id: o.lead_id,\n    full_name: o.full_name,\n    email: o.email,\n    email_type: o.email_type,\n    email_number: o.email_number,\n    subject: o.subject,\n    message_id: String(messageId),\n    sent_at: now\n  }};\n});"
+      },
+      "id": "4b88946b-cca9-4b93-a136-0df8bafd36a8",
+      "name": "Prepare Log Rows1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -5120,
+        1560
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "76104320-eda8-448b-8524-4034efca1b83",
+              "leftValue": "={{ $json.sent_ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c0e03a0c-8ca2-48f1-bde6-9187d1a5c513",
+      "name": "Email Sent OK?1",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -4800,
+        1440
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1ksbyWNVn73B0YGC2GlrynAXflhf2cdESciyVhngIGQc",
+          "mode": "list",
+          "cachedResultName": "FEVERRRRRRRR",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ksbyWNVn73B0YGC2GlrynAXflhf2cdESciyVhngIGQc/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 555284901,
+          "mode": "list",
+          "cachedResultName": "EMAIL CONFIGURATION",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ksbyWNVn73B0YGC2GlrynAXflhf2cdESciyVhngIGQc/edit#gid=555284901"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "access_token",
+              "displayName": "access_token",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "scope",
+              "displayName": "scope",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "api_domain",
+              "displayName": "api_domain",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "token_type",
+              "displayName": "token_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "expires_in",
+              "displayName": "expires_in",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "228e2dd5-10f5-44ce-8453-f1011325f688",
+      "name": "Append Email Log1",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -4320,
+        940
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "sjywVjfxY0RjtQ9Y",
+          "name": "Shlok GS"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1ksbyWNVn73B0YGC2GlrynAXflhf2cdESciyVhngIGQc",
+          "mode": "list",
+          "cachedResultName": "FEVERRRRRRRR",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ksbyWNVn73B0YGC2GlrynAXflhf2cdESciyVhngIGQc/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1123500508,
+          "mode": "list",
+          "cachedResultName": "Sheet4",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ksbyWNVn73B0YGC2GlrynAXflhf2cdESciyVhngIGQc/edit#gid=1123500508"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "lead_id"
+          ],
+          "schema": [
+            {
+              "id": "lead_id",
+              "displayName": "lead_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "full_name",
+              "displayName": "full_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "email",
+              "displayName": "email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "phone",
+              "displayName": "phone",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "company",
+              "displayName": "company",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "lead_status",
+              "displayName": "lead_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "kyc_document_upload_count",
+              "displayName": "kyc_document_upload_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "kyc_status",
+              "displayName": "kyc_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "last_synced_at",
+              "displayName": "last_synced_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "email_count",
+              "displayName": "email_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "last_email_type",
+              "displayName": "last_email_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "last_email_sent_at",
+              "displayName": "last_email_sent_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "last_engagement_status",
+              "displayName": "last_engagement_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "ever_opened",
+              "displayName": "ever_opened",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "ever_replied",
+              "displayName": "ever_replied",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "email_decision",
+              "displayName": "email_decision",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "send_email",
+              "displayName": "send_email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "email_type",
+              "displayName": "email_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "34900641-b44b-4cc3-807d-51944635a46a",
+      "name": "Update Lead Email Count1",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -4240,
+        1420
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "sjywVjfxY0RjtQ9Y",
+          "name": "Shlok GS"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## Single Lead Test Flow\nRestricted to Lead ID 109211000427650034.\nCRM uses the existing CRM refresh token. Zoho Mail sending uses a separate Mail OAuth refresh token and access token for account 1211051000000002002.",
+        "height": 170,
+        "width": 700
+      },
+      "id": "b00f559b-9cd7-4278-a0f7-38861f3049b4",
+      "name": "Note - Flows1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -7240,
+        1400
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1ksbyWNVn73B0YGC2GlrynAXflhf2cdESciyVhngIGQc",
+          "mode": "list",
+          "cachedResultName": "FEVERRRRRRRR",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ksbyWNVn73B0YGC2GlrynAXflhf2cdESciyVhngIGQc/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1123500508,
+          "mode": "list",
+          "cachedResultName": "Sheet4",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ksbyWNVn73B0YGC2GlrynAXflhf2cdESciyVhngIGQc/edit#gid=1123500508"
+        },
+        "options": {}
+      },
+      "id": "ece13535-3065-4d6f-9ed8-0bd338df8616",
+      "name": "Read Email Log2",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -6320,
+        1600
+      ],
+      "executeOnce": true,
+      "alwaysOutputData": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "sjywVjfxY0RjtQ9Y",
+          "name": "Shlok GS"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://accounts.zoho.in/oauth/v2/token",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "refresh_token",
+              "value": "1000.abeb5577d460856699efd856c085eee7.6588ae492e9605a548d192ac5e46a548"
+            },
+            {
+              "name": "client_id",
+              "value": "1000.40GDBUGT36VITIK2FSIXLUBM5YE51C"
+            },
+            {
+              "name": "client_secret",
+              "value": "b6f5b6ddc5dece76937cd68d2a5a2bdd601e8f205c"
+            },
+            {
+              "name": "grant_type",
+              "value": "refresh_token"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "18ac787c-1d00-4dc2-b593-0ecbca648e53",
+      "name": "Refresh Zoho Mail Access Token",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -5540,
+        2040
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    }
+  ],
+  "connections": {
+    "Manual Test Trigger": {
+      "main": [
+        [
+          {
+            "node": "Config (Send)1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config (Send)1": {
+      "main": [
+        [
+          {
+            "node": "Refresh Zoho Access Token1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Refresh Zoho Access Token1": {
+      "main": [
+        [
+          {
+            "node": "Get Leads from Zoho CRM1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Leads from Zoho CRM1": {
+      "main": [
+        [
+          {
+            "node": "Read Email Log2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decide Emails1": {
+      "main": [
+        [
+          {
+            "node": "Upsert Lead Emails1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Needs Email?1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs Email?1": {
+      "main": [
+        [
+          {
+            "node": "Build Email1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Email1": {
+      "main": [
+        [
+          {
+            "node": "Refresh Zoho Mail Access Token",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Email via Zoho Mail1": {
+      "main": [
+        [
+          {
+            "node": "Prepare Log Rows1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Log Rows1": {
+      "main": [
+        [
+          {
+            "node": "Email Sent OK?1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Email Sent OK?1": {
+      "main": [
+        [
+          {
+            "node": "Append Email Log1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Update Lead Email Count1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Email Log2": {
+      "main": [
+        [
+          {
+            "node": "Decide Emails1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Refresh Zoho Mail Access Token": {
+      "main": [
+        [
+          {
+            "node": "Send Email via Zoho Mail1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "7b6ad63e08c2b2b0c7cce55143e5c230b43cba4fb8a2ab79ecd9a04af45d7a01"
+  }
+}

@@ -1,0 +1,89 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// Leads synced from Zoho CRM
+model Lead {
+  id                     String    @id @default(cuid())
+  zohoId                 String    @unique
+  fullName               String?
+  firstName              String?
+  lastName               String?
+  email                  String?
+  phone                  String?
+  mobile                 String?
+  company                String?
+  businessVertical       String?
+  leadStatus             String?
+  createdTime            DateTime?
+  kycDocumentUploadCount Int?
+  ekoCode                String?
+  ownerName              String?
+  city                   String?
+  state                  String?
+  country                String?
+  leadSource             String?
+  lastActivityTime       DateTime?
+  lastSyncedAt           DateTime  @default(now())
+  createdAt              DateTime  @default(now())
+
+  emailLogs EmailLog[]
+
+  @@index([leadStatus])
+  @@index([businessVertical])
+}
+
+// A reusable nudge definition (e.g. documents_pending). Create a new row = new nudge flow.
+model Nudge {
+  id               String    @id @default(cuid())
+  key              String    @unique
+  name             String
+  description      String?
+  enabled          Boolean   @default(true)
+  // Zoho search criteria string; when set, running the nudge syncs leads with it first
+  zohoCriteria     String?
+  // JSON lead-selection filters applied on local DB:
+  // { requireEmail, excludeStatuses[], businessVertical, maxKycCount, minKycCount, createdAfter }
+  filters          String    @default("{}")
+  subjectTemplate  String
+  bodyTemplate     String
+  maxEmailsPerLead Int       @default(1)
+  followUpDays     Int       @default(0)
+  lastRunAt        DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  emailLogs EmailLog[]
+}
+
+// One row per email sent (replaces the Google Sheet log)
+model EmailLog {
+  id               String    @id @default(cuid())
+  leadId           String
+  lead             Lead      @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  nudgeId          String
+  nudge            Nudge     @relation(fields: [nudgeId], references: [id], onDelete: Cascade)
+  emailNumber      Int       @default(1)
+  toEmail          String
+  subject          String
+  messageId        String?
+  trackingId       String    @unique
+  sentOk           Boolean   @default(false)
+  sendError        String?
+  sentAt           DateTime?
+  opened           Boolean   @default(false)
+  opensCount       Int       @default(0)
+  openedAt         DateTime?
+  replied          Boolean   @default(false)
+  repliedAt        DateTime?
+  engagementStatus String    @default("sent") // sent | opened | replied
+  createdAt        DateTime  @default(now())
+
+  @@index([leadId, nudgeId])
+  @@index([nudgeId, createdAt])
+}
