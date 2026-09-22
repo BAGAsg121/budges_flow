@@ -1,16 +1,21 @@
 /**
- * Nudge engine: selects eligible leads, decides sequence position, sends, logs.
- * Mirrors the n8n/Sheets logic: per-lead email history decides whether to send the
- * first email, a follow-up (after followUpDays), or skip (replied / max reached / waiting).
+ * Nudge engine: selects eligible leads, decides sequence position, sends (email or
+ * whatsapp), logs. Shared sequence logic across channels: per-lead message history
+ * decides first send, follow-up (after followUpDays), or skip
+ * (replied / max reached / waiting).
  */
 import { randomUUID } from 'crypto'
 import { db } from '@/lib/db'
 import { searchAllLeads, mapZohoLead } from '@/lib/zoho'
 import { sendEmail, isMailerConfigured } from '@/lib/mailer'
+import { sendWhatsAppTemplate, isWhatsAppConfigured, normalizePhone } from '@/lib/whatsapp'
 import { renderTemplate, injectTrackingPixel, htmlToText } from '@/lib/template'
+
+export type Channel = 'email' | 'whatsapp'
 
 export interface NudgeFilters {
   requireEmail?: boolean
+  requirePhone?: boolean
   excludeStatuses?: string[]
   businessVertical?: string
   maxKycCount?: number
@@ -21,18 +26,21 @@ export interface NudgeFilters {
 export interface RunSkipped {
   lead: string
   email: string | null
+  phone: string | null
   reason: string
   detail?: string
 }
 
 export interface RunSummary {
   nudgeKey: string
+  channel: Channel
   syncedFromZoho: number | null
   leadsConsidered: number
   sent: number
   failed: number
   skipped: RunSkipped[]
   smtpConfigured: boolean
+  whatsappConfigured: boolean
 }
 
 export function parseFilters(raw: string): NudgeFilters {
@@ -44,11 +52,17 @@ export function parseFilters(raw: string): NudgeFilters {
   }
 }
 
-function buildWhere(filters: NudgeFilters) {
+function buildWhere(filters: NudgeFilters, channel: Channel) {
   const where: Record<string, unknown> = {}
-  if (filters.requireEmail !== false) {
-    where.email = { not: null }
+
+  if (channel === 'email') {
+    if (filters.requireEmail !== false) where.email = { not: null }
+  } else {
+    if (filters.requirePhone !== false) {
+      where.OR = [{ mobile: { not: null } }, { phone: { not: null } }]
+    }
   }
+
   if (filters.excludeStatuses?.length) {
     where.leadStatus = { notIn: filters.excludeStatuses }
   }
@@ -75,7 +89,10 @@ export async function selectEligibleLeads(nudgeId: string) {
   const nudge = await db.nudge.findUnique({ where: { id: nudgeId } })
   if (!nudge) throw new Error('Nudge not found')
   const filters = parseFilters(nudge.filters)
-  return db.lead.findMany({ where: buildWhere(filters), orderBy: { createdAt: 'desc' } })
+  return db.lead.findMany({
+    where: buildWhere(filters, nudge.channel === 'whatsapp' ? 'whatsapp' : 'email'),
+    orderBy: { createdAt: 'desc' },
+  })
 }
 
 /** Upsert leads fetched from Zoho into the local DB. */
@@ -96,7 +113,7 @@ interface SendDecision {
   action: 'send' | 'skip'
   reason?: string
   detail?: string
-  emailNumber?: number
+  messageNumber?: number
 }
 
 function decideSend(
@@ -126,7 +143,38 @@ function decideSend(
     }
   }
 
-  return { action: 'send', emailNumber: sentOkLogs.length + 1 }
+  return { action: 'send', messageNumber: sentOkLogs.length + 1 }
+}
+
+function buildLeadVars(lead: {
+  fullName: string | null
+  firstName: string | null
+  lastName: string | null
+  email: string | null
+  phone: string | null
+  mobile: string | null
+  company: string | null
+  leadStatus: string | null
+  kycDocumentUploadCount: number | null
+  businessVertical: string | null
+  city: string | null
+  ownerName: string | null
+}, messageNumber: number, now: Date) {
+  return {
+    full_name: lead.fullName,
+    first_name: lead.firstName || lead.fullName,
+    last_name: lead.lastName,
+    email: lead.email,
+    phone: lead.phone || lead.mobile,
+    company: lead.company,
+    lead_status: lead.leadStatus,
+    kyc_document_upload_count: lead.kycDocumentUploadCount,
+    business_vertical: lead.businessVertical,
+    city: lead.city,
+    owner_name: lead.ownerName,
+    message_number: messageNumber,
+    today: now.toISOString().slice(0, 10),
+  }
 }
 
 /** Run a nudge end-to-end. Set opts.sync=false to skip the Zoho refresh and send to already-synced leads. */
@@ -135,92 +183,137 @@ export async function runNudge(nudgeId: string, baseUrl: string, opts: { sync: b
   if (!nudge) throw new Error('Nudge not found')
   if (!nudge.enabled) throw new Error('Nudge is disabled')
 
+  const channel: Channel = nudge.channel === 'whatsapp' ? 'whatsapp' : 'email'
   const filters = parseFilters(nudge.filters)
-  const smtpConfigured = isMailerConfigured()
-
-  // 1. Optional Zoho sync for this nudge's criteria
-  let syncedFromZoho: number | null = null
-  if (opts.sync && nudge.zohoCriteria && nudge.zohoCriteria.trim()) {
-    syncedFromZoho = await syncLeadsFromCriteria(nudge.zohoCriteria.trim())
-  }
-
-  // 2. Select locally
-  const leads = await db.lead.findMany({ where: buildWhere(filters), orderBy: { createdAt: 'desc' } })
 
   const summary: RunSummary = {
     nudgeKey: nudge.key,
-    syncedFromZoho,
-    leadsConsidered: leads.length,
+    channel,
+    syncedFromZoho: null,
+    leadsConsidered: 0,
     sent: 0,
     failed: 0,
     skipped: [],
-    smtpConfigured,
+    smtpConfigured: isMailerConfigured(),
+    whatsappConfigured: isWhatsAppConfigured(),
   }
+
+  // 1. Optional Zoho sync for this nudge's criteria
+  if (opts.sync && nudge.zohoCriteria && nudge.zohoCriteria.trim()) {
+    summary.syncedFromZoho = await syncLeadsFromCriteria(nudge.zohoCriteria.trim())
+  }
+
+  // 2. Select locally
+  const leads = await db.lead.findMany({
+    where: buildWhere(filters, channel),
+    orderBy: { createdAt: 'desc' },
+  })
+  summary.leadsConsidered = leads.length
 
   const now = new Date()
 
   for (const lead of leads) {
-    const logs = await db.emailLog.findMany({ where: { nudgeId: nudge.id, leadId: lead.id } })
+    const logs = await db.messageLog.findMany({ where: { nudgeId: nudge.id, leadId: lead.id } })
     const decision = decideSend(logs, nudge.maxEmailsPerLead, nudge.followUpDays, now)
 
     if (decision.action === 'skip') {
       summary.skipped.push({
         lead: lead.fullName || lead.email || lead.zohoId,
         email: lead.email,
+        phone: lead.phone || lead.mobile,
         reason: decision.reason!,
         detail: decision.detail,
       })
       continue
     }
 
-    if (!lead.email) {
-      summary.skipped.push({ lead: lead.fullName || lead.zohoId, email: null, reason: 'no_email' })
-      continue
+    const messageNumber = decision.messageNumber ?? 1
+    const vars = buildLeadVars(lead, messageNumber, now)
+
+    if (channel === 'whatsapp') {
+      const rawPhone = lead.mobile || lead.phone
+      const toPhone = normalizePhone(rawPhone)
+      if (!toPhone) {
+        summary.skipped.push({
+          lead: lead.fullName || lead.zohoId,
+          email: lead.email,
+          phone: rawPhone,
+          reason: 'no_valid_phone',
+        })
+        continue
+      }
+
+      let params: string[] = []
+      try {
+        const parsed = JSON.parse(nudge.whatsappParams || '[]')
+        if (Array.isArray(parsed)) params = parsed
+      } catch {
+        // bad config -> send without params; Meta will reject if template requires them
+      }
+      const paramValues = params
+        .map((p) => String(vars[p as keyof typeof vars] ?? ''))
+        .filter((v) => v !== '')
+
+      const result = await sendWhatsAppTemplate({
+        to: toPhone,
+        templateName: nudge.whatsappTemplateName || '',
+        language: nudge.whatsappLanguage || 'en',
+        params: paramValues,
+      })
+
+      await db.messageLog.create({
+        data: {
+          leadId: lead.id,
+          nudgeId: nudge.id,
+          channel: 'whatsapp',
+          messageNumber,
+          toPhone,
+          templateName: nudge.whatsappTemplateName,
+          messageId: result.waMessageId ?? null,
+          trackingId: randomUUID(),
+          sentOk: result.ok,
+          sendError: result.error ?? null,
+          sentAt: result.ok ? new Date() : null,
+          engagementStatus: 'sent',
+        },
+      })
+
+      if (result.ok) summary.sent++
+      else summary.failed++
+    } else {
+      if (!lead.email) {
+        summary.skipped.push({ lead: lead.fullName || lead.zohoId, email: null, phone: lead.phone, reason: 'no_email' })
+        continue
+      }
+
+      const trackingId = randomUUID()
+      const subject = renderTemplate(nudge.subjectTemplate || '', vars)
+      const bodyHtml = injectTrackingPixel(renderTemplate(nudge.bodyTemplate || '', vars), baseUrl, trackingId)
+
+      const result = await sendEmail({ to: lead.email, subject, html: bodyHtml, text: htmlToText(bodyHtml) })
+
+      await db.messageLog.create({
+        data: {
+          leadId: lead.id,
+          nudgeId: nudge.id,
+          channel: 'email',
+          messageNumber,
+          toEmail: lead.email,
+          subject,
+          messageId: result.messageId ?? null,
+          trackingId,
+          sentOk: result.ok,
+          sendError: result.error ?? null,
+          sentAt: result.ok ? new Date() : null,
+          engagementStatus: 'sent',
+        },
+      })
+
+      if (result.ok) summary.sent++
+      else summary.failed++
     }
 
-    const trackingId = randomUUID()
-    const emailNumber = decision.emailNumber ?? 1
-    const vars = {
-      full_name: lead.fullName,
-      first_name: lead.firstName || lead.fullName,
-      last_name: lead.lastName,
-      email: lead.email,
-      phone: lead.phone || lead.mobile,
-      company: lead.company,
-      lead_status: lead.leadStatus,
-      kyc_document_upload_count: lead.kycDocumentUploadCount,
-      business_vertical: lead.businessVertical,
-      city: lead.city,
-      owner_name: lead.ownerName,
-      email_number: emailNumber,
-      today: now.toISOString().slice(0, 10),
-    }
-
-    const subject = renderTemplate(nudge.subjectTemplate, vars)
-    const bodyHtml = injectTrackingPixel(renderTemplate(nudge.bodyTemplate, vars), baseUrl, trackingId)
-
-    const result = await sendEmail({ to: lead.email, subject, html: bodyHtml, text: htmlToText(bodyHtml) })
-
-    await db.emailLog.create({
-      data: {
-        leadId: lead.id,
-        nudgeId: nudge.id,
-        emailNumber,
-        toEmail: lead.email,
-        subject,
-        messageId: result.messageId ?? null,
-        trackingId,
-        sentOk: result.ok,
-        sendError: result.error ?? null,
-        sentAt: result.ok ? new Date() : null,
-        engagementStatus: 'sent',
-      },
-    })
-
-    if (result.ok) summary.sent++
-    else summary.failed++
-
-    // small delay to stay SMTP-friendly
+    // small delay to stay API/SMTP-friendly
     await new Promise((r) => setTimeout(r, 250))
   }
 
@@ -232,26 +325,32 @@ export async function runNudge(nudgeId: string, baseUrl: string, opts: { sync: b
 export async function previewNudge(nudgeId: string) {
   const nudge = await db.nudge.findUnique({ where: { id: nudgeId } })
   if (!nudge) throw new Error('Nudge not found')
+  const channel: Channel = nudge.channel === 'whatsapp' ? 'whatsapp' : 'email'
   const filters = parseFilters(nudge.filters)
-  const leads = await db.lead.findMany({ where: buildWhere(filters), orderBy: { createdAt: 'desc' } })
+  const leads = await db.lead.findMany({
+    where: buildWhere(filters, channel),
+    orderBy: { createdAt: 'desc' },
+  })
   const now = new Date()
 
-  const wouldSend: { lead: string; email: string | null; emailNumber: number }[] = []
+  const wouldSend: { lead: string; email: string | null; phone: string | null; messageNumber: number }[] = []
   const wouldSkip: RunSkipped[] = []
 
   for (const lead of leads) {
-    const logs = await db.emailLog.findMany({ where: { nudgeId: nudge.id, leadId: lead.id } })
+    const logs = await db.messageLog.findMany({ where: { nudgeId: nudge.id, leadId: lead.id } })
     const decision = decideSend(logs, nudge.maxEmailsPerLead, nudge.followUpDays, now)
     if (decision.action === 'send') {
       wouldSend.push({
         lead: lead.fullName || lead.email || lead.zohoId,
         email: lead.email,
-        emailNumber: decision.emailNumber ?? 1,
+        phone: lead.phone || lead.mobile,
+        messageNumber: decision.messageNumber ?? 1,
       })
     } else {
       wouldSkip.push({
         lead: lead.fullName || lead.email || lead.zohoId,
         email: lead.email,
+        phone: lead.phone || lead.mobile,
         reason: decision.reason!,
         detail: decision.detail,
       })
@@ -260,9 +359,11 @@ export async function previewNudge(nudgeId: string) {
 
   return {
     nudgeKey: nudge.key,
+    channel,
     leadsConsidered: leads.length,
     wouldSend,
     wouldSkip,
     smtpConfigured: isMailerConfigured(),
+    whatsappConfigured: isWhatsAppConfigured(),
   }
 }

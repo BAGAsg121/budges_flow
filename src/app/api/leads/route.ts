@@ -27,7 +27,7 @@ export async function GET(req: NextRequest) {
     where,
     orderBy: { createdAt: 'desc' },
     take: limit,
-    include: { _count: { select: { emailLogs: true } } },
+    include: { _count: { select: { messageLogs: true } } },
   })
 
   return NextResponse.json({
@@ -47,7 +47,7 @@ export async function GET(req: NextRequest) {
       city: l.city,
       createdTime: l.createdTime,
       lastSyncedAt: l.lastSyncedAt,
-      emailsSent: l._count.emailLogs,
+      messagesSent: l._count.messageLogs,
     })),
   })
 }

@@ -36,3 +36,25 @@ Stage Summary:
 - Extensibility: a new nudge = one config row (key + optional Zoho criteria + local filters JSON + subject/body template + sequence limits); no new flows to build
 - User must add: ZOHO_CLIENT_ID/SECRET/REFRESH_TOKEN (token from curl already expired), SMTP_USER/PASS/MAIL_FROM to actually send
 - Known behavior: Zoho sync fails loudly with 401 until refresh-token env vars are set; runs can be done with sync=false on already-synced leads
+
+---
+Task ID: 2
+Agent: Main agent (Super Z)
+Task: Add WhatsApp nudge support (Meta WhatsApp Business Cloud API) alongside email, using the user's number 9599722251 (to be registered as +91 95997 22251 in Meta).
+
+Work Log:
+- Schema migration: EmailLog -> MessageLog (channel-aware: email|whatsapp; toPhone, templateName added; subject/toEmail nullable; messageId indexed for webhook lookups; messageNumber renamed from emailNumber). Nudge gains channel, whatsappTemplateName, whatsappLanguage, whatsappParams; subjectTemplate/bodyTemplate now nullable (WhatsApp uses bodyTemplate as reference copy only). Pushed via db:push --accept-data-loss (no real data yet).
+- New src/lib/whatsapp.ts: Meta Cloud API sender (graph.facebook.com/{version}/{phone_number_id}/messages, template + positional body params), isWhatsAppConfigured, normalizePhone (strips non-digits, 10-digit -> default CC 91, e.g. 8899112233 -> 918899112233), applyWhatsAppStatus (read->opened with first-read timestamp kept, failed->sendError), applyWhatsAppInbound (latest log for that phone -> replied).
+- New webhook /api/track/whatsapp: GET = Meta subscription verification handshake (hub.mode/hub.verify_token/hub.challenge, WHATSAPP_VERIFY_TOKEN); POST = statuses (sent/delivered/read/failed) + inbound messages, always 200 to Meta.
+- nudge-engine: buildWhere(filters, channel) — email requires email not null (requireEmail), whatsapp requires phone-or-mobile (requirePhone); run/preview branch per channel; WhatsApp params JSON array of variable sources rendered through the same lead vars and sent positionally as {{1}}, {{2}}...; RunSummary/Preview now carry channel + whatsappConfigured.
+- API routes: nudges CRUD validates per-channel (email needs subject+body; whatsapp needs approved template name + params array); nudges GET seeds both default nudges on empty table; logs route adds channel filter + toPhone; stats renamed to messagesSent/Failed; pixel routes use messageLog; leads route relation fix.
+- UI: channel select in nudge form with per-channel fields (Meta template name/language/params vs subject/body), green setup-hint box showing the Meta webhook URL (origin + /api/track/whatsapp) and required env vars; channel badges on cards and log rows; Logs tab gets channel filter; Dashboard recent activity shows channel icons; footer lists both tracking endpoints.
+- .env: WHATSAPP_DISPLAY_NUMBER=919599722251, WHATSAPP_DEFAULT_CC=91, WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_VERIFY_TOKEN=mytesttoken (placeholder to change), WHATSAPP_API_VERSION=v21.0.
+- scripts/seed-whatsapp-nudge.ts: idempotent seed of disabled 'documents_pending_wa' nudge (same Zoho criteria + filters as email twin, template name placeholder 'documents_pending_reminder', params [first_name, company, kyc_document_upload_count]).
+- Fixed during dev: dev server held stale Prisma client after EmailLog->MessageLog rename; restarted dev process tree to reload generated client.
+- Verified end-to-end: WA run with sync=false -> lead considered, phone normalized, failed log with clear not-configured error; simulated sent -> webhook POST status 'read' -> opened=true opensCount=1; webhook POST inbound from 918899112233 -> replied=true engagement 'replied'; preview then skips with reason 'replied'; verification handshake returns challenge for correct token, 403 for wrong token; email nudge regression passed; lint clean; browser-verified both nudge cards with channel badges, WA form + setup hint, no console errors.
+
+Stage Summary:
+- App is now dual-channel: email (SMTP) and WhatsApp (Meta Cloud API) nudges share one engine, one log table, one UI, same sequence logic (replied/max_reached/waiting/retry).
+- User actions to go live on WhatsApp: register 9599722251 in Meta WhatsApp Manager, approve a template (e.g. documents_pending_reminder with 3 body params), fill WHATSAPP_TOKEN + WHATSAPP_PHONE_NUMBER_ID + change WHATSAPP_VERIFY_TOKEN in .env, set webhook URL in Meta app dashboard, enable documents_pending_wa nudge, fill in its template name.
+- Reply tracking is FREE on WhatsApp (inbound webhook) vs email (not yet implemented for email).

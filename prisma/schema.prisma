@@ -32,47 +32,57 @@ model Lead {
   lastSyncedAt           DateTime  @default(now())
   createdAt              DateTime  @default(now())
 
-  emailLogs EmailLog[]
+  messageLogs MessageLog[]
 
   @@index([leadStatus])
   @@index([businessVertical])
 }
 
-// A reusable nudge definition (e.g. documents_pending). Create a new row = new nudge flow.
+// A reusable nudge definition. channel decides how it is delivered:
+// email (SMTP) or whatsapp (Meta Cloud API, pre-approved template).
 model Nudge {
-  id               String    @id @default(cuid())
-  key              String    @unique
-  name             String
-  description      String?
-  enabled          Boolean   @default(true)
+  id                   String    @id @default(cuid())
+  key                  String    @unique
+  name                 String
+  description          String?
+  enabled              Boolean   @default(true)
+  channel              String    @default("email") // email | whatsapp
   // Zoho search criteria string; when set, running the nudge syncs leads with it first
-  zohoCriteria     String?
+  zohoCriteria         String?
   // JSON lead-selection filters applied on local DB:
-  // { requireEmail, excludeStatuses[], businessVertical, maxKycCount, minKycCount, createdAfter }
-  filters          String    @default("{}")
-  subjectTemplate  String
-  bodyTemplate     String
-  maxEmailsPerLead Int       @default(1)
-  followUpDays     Int       @default(0)
-  lastRunAt        DateTime?
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
+  // { requireEmail, requirePhone, excludeStatuses[], businessVertical, maxKycCount, minKycCount, createdAfter }
+  filters              String    @default("{}")
+  // email channel
+  subjectTemplate      String?
+  bodyTemplate         String? // email: HTML body; whatsapp: reference copy of the Meta template body
+  // whatsapp channel
+  whatsappTemplateName String? // Meta-approved template name
+  whatsappLanguage     String? // template language code, e.g. "en"
+  whatsappParams       String? // JSON array of variable sources: ["first_name","company"] -> {{1}}, {{2}}
+  maxEmailsPerLead     Int       @default(1)
+  followUpDays         Int       @default(0)
+  lastRunAt            DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
 
-  emailLogs EmailLog[]
+  messageLogs MessageLog[]
 }
 
-// One row per email sent (replaces the Google Sheet log)
-model EmailLog {
+// One row per message sent (email or whatsapp)
+model MessageLog {
   id               String    @id @default(cuid())
   leadId           String
   lead             Lead      @relation(fields: [leadId], references: [id], onDelete: Cascade)
   nudgeId          String
   nudge            Nudge     @relation(fields: [nudgeId], references: [id], onDelete: Cascade)
-  emailNumber      Int       @default(1)
-  toEmail          String
-  subject          String
-  messageId        String?
-  trackingId       String    @unique
+  channel          String    @default("email") // email | whatsapp
+  messageNumber    Int       @default(1)
+  toEmail          String?
+  toPhone          String?
+  subject          String? // email only
+  templateName     String? // whatsapp template used
+  messageId        String? // SMTP message-id or WhatsApp wamid (indexed for webhook lookups)
+  trackingId       String    @unique // email: pixel id; whatsapp: internal id
   sentOk           Boolean   @default(false)
   sendError        String?
   sentAt           DateTime?
@@ -86,4 +96,5 @@ model EmailLog {
 
   @@index([leadId, nudgeId])
   @@index([nudgeId, createdAt])
+  @@index([messageId])
 }

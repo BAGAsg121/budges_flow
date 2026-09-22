@@ -1,17 +1,23 @@
+export type NudgeChannel = 'email' | 'whatsapp'
+
 export interface NudgeDto {
   id: string
   key: string
   name: string
   description: string | null
   enabled: boolean
+  channel: NudgeChannel
   zohoCriteria: string | null
   filters: string
-  subjectTemplate: string
-  bodyTemplate: string
+  subjectTemplate: string | null
+  bodyTemplate: string | null
+  whatsappTemplateName: string | null
+  whatsappLanguage: string | null
+  whatsappParams: string | null
   maxEmailsPerLead: number
   followUpDays: number
   lastRunAt: string | null
-  emailsSent: number
+  messagesSent: number
 }
 
 export interface LeadDto {
@@ -28,18 +34,21 @@ export interface LeadDto {
   city: string | null
   createdTime: string | null
   lastSyncedAt: string
-  emailsSent: number
+  messagesSent: number
 }
 
 export interface LogDto {
   id: string
   lead: string
   company: string | null
-  toEmail: string
+  channel: NudgeChannel
+  toEmail: string | null
+  toPhone: string | null
   nudge: string
   nudgeKey: string
-  emailNumber: number
-  subject: string
+  messageNumber: number
+  subject: string | null
+  templateName: string | null
   sentOk: boolean
   sendError: string | null
   sentAt: string | null
@@ -54,17 +63,18 @@ export interface LogDto {
 export interface StatsDto {
   leads: number
   nudges: number
-  emailsSent: number
-  emailsFailed: number
+  messagesSent: number
+  messagesFailed: number
   opened: number
   replied: number
   openRate: number
   recentLogs: {
     id: string
+    channel: NudgeChannel
     lead: string
     nudge: string
-    emailNumber: number
-    subject: string
+    messageNumber: number
+    subject: string | null
     sentOk: boolean
     sendError: string | null
     engagementStatus: string
@@ -77,24 +87,29 @@ export interface StatsDto {
 export interface RunSkippedDto {
   lead: string
   email: string | null
+  phone: string | null
   reason: string
   detail?: string
 }
 
 export interface RunSummaryDto {
   nudgeKey: string
+  channel: NudgeChannel
   syncedFromZoho: number | null
   leadsConsidered: number
   sent: number
   failed: number
   skipped: RunSkippedDto[]
   smtpConfigured: boolean
+  whatsappConfigured: boolean
 }
 
 export interface PreviewDto {
   nudgeKey: string
+  channel: NudgeChannel
   leadsConsidered: number
-  wouldSend: { lead: string; email: string | null; emailNumber: number }[]
+  wouldSend: { lead: string; email: string | null; phone: string | null; messageNumber: number }[]
   wouldSkip: RunSkippedDto[]
   smtpConfigured: boolean
+  whatsappConfigured: boolean
 }

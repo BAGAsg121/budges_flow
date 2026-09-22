@@ -32,9 +32,9 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ tra
 
   if (tid) {
     try {
-      const log = await db.emailLog.findUnique({ where: { trackingId: tid } })
+      const log = await db.messageLog.findUnique({ where: { trackingId: tid } })
       if (log) {
-        await db.emailLog.update({
+        await db.messageLog.update({
           where: { trackingId: tid },
           data: {
             opensCount: { increment: 1 },

@@ -1,0 +1,2235 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Sending Whatsapp Message if the customer hasnt proceeded with the quick signup ",
+        "height": 880,
+        "width": 1420
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -1020,
+        -380
+      ],
+      "id": "11d65d1f-4df2-43f3-8033-0daa56af6bba",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT *\nFROM csp_application\nWHERE submittedAt >= DATE_SUB(NOW(), INTERVAL 3 HOUR)\n  AND submittedAt < NOW()\nORDER BY submittedAt DESC;",
+        "options": {}
+      },
+      "id": "232f09e6-ab03-477d-9a1c-53b48126efe1",
+      "name": "Get CSP Applications",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        -620,
+        700
+      ],
+      "credentials": {
+        "mySql": {
+          "id": "KghwpFLA8zQ48H1l",
+          "name": "Simplibank"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return items.map(item => {\n  let data = item.json.cspdata_json;\n\n  if (typeof data === 'string') {\n    try {\n      data = JSON.parse(data);\n    } catch (error) {\n      data = {};\n    }\n  }\n\n  if (!data || typeof data !== 'object') {\n    data = {};\n  }\n\n  return {\n    json: {\n      ...item.json,\n      current_address_pincode: data.current_address_pincode ?? null,\n      alternate_mobile: data.alternate_mobile ?? null,\n      shop_address_line1: data.shop_address_line1 ?? null,\n      shop_address_line2: data.shop_address_line2 ?? null,\n      shop_address_state: data.shop_address_state ?? null\n    }\n  };\n});"
+      },
+      "id": "0591397d-ccdd-47f2-87d9-ad9ce93ab9a2",
+      "name": "Parse CSP Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -380,
+        700
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "check-details",
+              "leftValue": "={{ !$json.current_address_pincode || !$json.alternate_mobile || !$json.shop_address_line1 || !$json.shop_address_line2 || !$json.shop_address_state }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "47c5affb-384a-4190-b229-36123c70ce43",
+      "name": "Check Application Details",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -140,
+        700
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.goinfinito.com/unified/v2/send",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJJbmZpbml0byIsImlhdCI6MTc3NjkyNTg1NSwic3ViIjoiRWtvX3dhYmFpbzhveHI2OGI4NTZ1OTloIn0.3LwJuVoYfv3_0M6kDlFRq5GS6QSlk9TZbmshOyYAMAM  "
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={\n  \"apiver\": \"1.0\",\n  \"whatsapp\": {\n    \"ver\": \"2.0\",\n    \"dlr\": {\n      \"url\": \"https://his-server.com/dlr-webhook\"\n    },\n    \"messages\": [\n      {\n        \"coding\": \"1\",\n        \"id\": \"={{ 'MOB' + $json.Id.toString() + Date.now().toString().slice(-15) }}\",\n        \"msgtype\": \"1\",\n        \"text\": \"\",\n        \"templateinfo\": \"1797806\",\n        \"type\": \"\",\n        \"filename\": \"\",\n        \"contenttype\": \"\",\n        \"mediadata\": \"\",\n        \"b_urlinfo\": \"\",\n        \"addresses\": [\n          {\n            \"seq\": \"\",\n            \"to\": \"91{{$json.csp_number}}\",\n            \"from\": \"917428655377\",\n            \"tag\": \"\"\n          }\n        ]\n      }\n    ]\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        120,
+        600
+      ],
+      "id": "e67a79ed-4907-4d2d-9e02-119d71398930",
+      "name": "WhatsApp - Mobile Pending1"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1jvB3UUeLPO6IdSvZ5arxTWzBfaaMBU4fP54PO7Wzzo0",
+          "mode": "list",
+          "cachedResultName": "No Company Details",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1jvB3UUeLPO6IdSvZ5arxTWzBfaaMBU4fP54PO7Wzzo0/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ksbyWNVn73B0YGC2GlrynAXflhf2cdESciyVhngIGQc/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {
+            "Id": "={{ $json.Id }}",
+            "csp_number": "={{ $json.csp_number }}",
+            "customer_id": "={{ $json.customer_id }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Id",
+              "displayName": "Id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "csp_number",
+              "displayName": "csp_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "customer_id",
+              "displayName": "customer_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "ekotid",
+              "displayName": "ekotid",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "error_json",
+              "displayName": "error_json",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "app_status",
+              "displayName": "app_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "submittedAt",
+              "displayName": "submittedAt",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "foscell",
+              "displayName": "foscell",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "cspdata_json",
+              "displayName": "cspdata_json",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "comment",
+              "displayName": "comment",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "feestatus",
+              "displayName": "feestatus",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "agreementstatus",
+              "displayName": "agreementstatus",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "merchant_type",
+              "displayName": "merchant_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "uatstatus",
+              "displayName": "uatstatus",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "developer_key_status",
+              "displayName": "developer_key_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "activation_source",
+              "displayName": "activation_source",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "activation_fee_tid",
+              "displayName": "activation_fee_tid",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "BCID",
+              "displayName": "BCID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "current_address_pincode",
+              "displayName": "current_address_pincode",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "alternate_mobile",
+              "displayName": "alternate_mobile",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "shop_address_line1",
+              "displayName": "shop_address_line1",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "shop_address_line2",
+              "displayName": "shop_address_line2",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "shop_address_state",
+              "displayName": "shop_address_state",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        120,
+        860
+      ],
+      "id": "ad115bcc-0157-43cb-8f50-39613ee87b04",
+      "name": "Google Sheets",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "sjywVjfxY0RjtQ9Y",
+          "name": "Shlok GS"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1jvB3UUeLPO6IdSvZ5arxTWzBfaaMBU4fP54PO7Wzzo0",
+          "mode": "list",
+          "cachedResultName": "No Company Details",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1jvB3UUeLPO6IdSvZ5arxTWzBfaaMBU4fP54PO7Wzzo0/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1475044135,
+          "mode": "list",
+          "cachedResultName": "Sign agreement done",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1jvB3UUeLPO6IdSvZ5arxTWzBfaaMBU4fP54PO7Wzzo0/edit#gid=1475044135"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "csp_number",
+              "displayName": "csp_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "customer_id",
+              "displayName": "customer_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "agreement_id",
+              "displayName": "agreement_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "document_id",
+              "displayName": "document_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "agreement_status",
+              "displayName": "agreement_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "signed_at",
+              "displayName": "signed_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "signatory",
+              "displayName": "signatory",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "signatory_identifier",
+              "displayName": "signatory_identifier",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "provider",
+              "displayName": "provider",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "signed_contract_url",
+              "displayName": "signed_contract_url",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "timestamp",
+              "displayName": "timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Readable date",
+              "displayName": "Readable date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Readable time",
+              "displayName": "Readable time",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Day of week",
+              "displayName": "Day of week",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Year",
+              "displayName": "Year",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Month",
+              "displayName": "Month",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Day of month",
+              "displayName": "Day of month",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Hour",
+              "displayName": "Hour",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Minute",
+              "displayName": "Minute",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Second",
+              "displayName": "Second",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Timezone",
+              "displayName": "Timezone",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "5b9774ef-8b83-4af6-af47-9a9a54ec6a9a",
+      "name": "Save Signed Agreement",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        160,
+        1080
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "sjywVjfxY0RjtQ9Y",
+          "name": "Shlok GS"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 12
+            }
+          ]
+        }
+      },
+      "id": "9e798e05-ac80-4556-97f5-a106abe284c0",
+      "name": "Every 2 Hours1",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -1120,
+        1240
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1jvB3UUeLPO6IdSvZ5arxTWzBfaaMBU4fP54PO7Wzzo0",
+          "mode": "list",
+          "cachedResultName": "No Company Details",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1jvB3UUeLPO6IdSvZ5arxTWzBfaaMBU4fP54PO7Wzzo0/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1"
+        },
+        "options": {}
+      },
+      "id": "d1866d28-a77c-4ad4-820b-fba6092a80e2",
+      "name": "Get Pending CSPs1",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -880,
+        1240
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "sjywVjfxY0RjtQ9Y",
+          "name": "Shlok GS"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n  '{{ $json.csp_number }}' AS csp_number,\n  (\n    SELECT customer_id\n    FROM customer_agreement_history\n    WHERE customer_identifier = '{{ $json.csp_number }}'\n    ORDER BY created_at DESC, id DESC\n    LIMIT 1\n  ) AS customer_id,\n  '{{ $json.row_number }}' AS row_number,\n  (\n    SELECT id\n    FROM customer_agreement_history\n    WHERE customer_identifier = '{{ $json.csp_number }}'\n    ORDER BY created_at DESC, id DESC\n    LIMIT 1\n  ) AS agreement_id,\n  (\n    SELECT document_id\n    FROM customer_agreement_history\n    WHERE customer_identifier = '{{ $json.csp_number }}'\n    ORDER BY created_at DESC, id DESC\n    LIMIT 1\n  ) AS document_id,\n  (\n    SELECT status\n    FROM customer_agreement_history\n    WHERE customer_identifier = '{{ $json.csp_number }}'\n    ORDER BY created_at DESC, id DESC\n    LIMIT 1\n  ) AS agreement_status,\n  (\n    SELECT signed_at\n    FROM customer_agreement_history\n    WHERE customer_identifier = '{{ $json.csp_number }}'\n    ORDER BY created_at DESC, id DESC\n    LIMIT 1\n  ) AS signed_at,\n  (\n    SELECT signatory\n    FROM customer_agreement_history\n    WHERE customer_identifier = '{{ $json.csp_number }}'\n    ORDER BY created_at DESC, id DESC\n    LIMIT 1\n  ) AS signatory,\n  (\n    SELECT signatory_identifier\n    FROM customer_agreement_history\n    WHERE customer_identifier = '{{ $json.csp_number }}'\n    ORDER BY created_at DESC, id DESC\n    LIMIT 1\n  ) AS signatory_identifier,\n  (\n    SELECT provider\n    FROM customer_agreement_history\n    WHERE customer_identifier = '{{ $json.csp_number }}'\n    ORDER BY created_at DESC, id DESC\n    LIMIT 1\n  ) AS provider,\n  (\n    SELECT signed_contract_url\n    FROM customer_agreement_history\n    WHERE customer_identifier = '{{ $json.csp_number }}'\n    ORDER BY created_at DESC, id DESC\n    LIMIT 1\n  ) AS signed_contract_url;",
+        "options": {}
+      },
+      "id": "1ab02a0d-bcc9-48a2-927d-5db8563691bb",
+      "name": "Check Latest Agreement1",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        -620,
+        1240
+      ],
+      "credentials": {
+        "mySql": {
+          "id": "KghwpFLA8zQ48H1l",
+          "name": "Simplibank"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "agreement-signed",
+              "leftValue": "={{ Number($json.agreement_status) }}",
+              "rightValue": 1,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "dc40fd71-4f3c-4c18-9294-d4303414b1f5",
+      "name": "Agreement Signed?1",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -360,
+        1240
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return items.sort((a, b) => {\n  return Number(b.json.row_number) - Number(a.json.row_number);\n});"
+      },
+      "id": "700574ea-3a19-46d5-94c0-5d7967d4caa6",
+      "name": "Sort Rows Bottom to Top1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -100,
+        1080
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "delete",
+        "documentId": {
+          "__rl": true,
+          "value": "1jvB3UUeLPO6IdSvZ5arxTWzBfaaMBU4fP54PO7Wzzo0",
+          "mode": "list",
+          "cachedResultName": "No Company Details"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1"
+        },
+        "startIndex": "={{ Number($json.row_number) }}"
+      },
+      "id": "d02ce857-bcd8-47fa-9357-27bf62ad53c6",
+      "name": "Delete Signed CSP1",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        420,
+        1080
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "sjywVjfxY0RjtQ9Y",
+          "name": "Shlok GS"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.goinfinito.com/unified/v2/send",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJJbmZpbml0byIsImlhdCI6MTc3NjkyNTg1NSwic3ViIjoiRWtvX3dhYmFpbzhveHI2OGI4NTZ1OTloIn0.3LwJuVoYfv3_0M6kDlFRq5GS6QSlk9TZbmshOyYAMAM  "
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={\n  \"apiver\": \"1.0\",\n  \"whatsapp\": {\n    \"ver\": \"2.0\",\n    \"dlr\": {\n      \"url\": \"https://his-server.com/dlr-webhook\"\n    },\n    \"messages\": [\n      {\n        \"coding\": \"1\",\n        \"id\": \"={{ 'AGREEMENT_PENDING_' + $json.csp_number + '_' + Date.now() }}\",\n        \"msgtype\": \"1\",\n        \"text\": \"\",\n        \"templateinfo\": \"1797804\",\n        \"type\": \"\",\n        \"filename\": \"\",\n        \"contenttype\": \"\",\n        \"mediadata\": \"\",\n        \"b_urlinfo\": \"\",\n        \"addresses\": [\n          {\n            \"seq\": \"\",\n            \"to\": \"={{ '91' + $json.csp_number }}\",\n            \"from\": \"917428655377\",\n            \"tag\": \"\"\n          }\n        ]\n      }\n    ]\n  }\n}",
+        "options": {}
+      },
+      "id": "8cf251d6-e591-407f-abfb-0f4e7add3211",
+      "name": "WhatsApp - Agreement Pending1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -100,
+        1400
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 12
+            }
+          ]
+        }
+      },
+      "id": "5cfa9b86-24e9-43c6-8c4f-157fd9f3df5b",
+      "name": "Every 2 Hours3",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -1160,
+        1940
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1jvB3UUeLPO6IdSvZ5arxTWzBfaaMBU4fP54PO7Wzzo0",
+          "mode": "list",
+          "cachedResultName": "No Company Details",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1jvB3UUeLPO6IdSvZ5arxTWzBfaaMBU4fP54PO7Wzzo0/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 968885633,
+          "mode": "list",
+          "cachedResultName": "Doc Status",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1jvB3UUeLPO6IdSvZ5arxTWzBfaaMBU4fP54PO7Wzzo0/edit#gid=968885633"
+        },
+        "options": {}
+      },
+      "id": "754a45eb-d32b-44e0-ad29-3397a2a08e07",
+      "name": "Get Existing Document Status",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -1040,
+        1700
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "sjywVjfxY0RjtQ9Y",
+          "name": "Shlok GS"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1jvB3UUeLPO6IdSvZ5arxTWzBfaaMBU4fP54PO7Wzzo0",
+          "mode": "list",
+          "cachedResultName": "No Company Details",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1jvB3UUeLPO6IdSvZ5arxTWzBfaaMBU4fP54PO7Wzzo0/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1475044135,
+          "mode": "list",
+          "cachedResultName": "Sign agreement done",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1jvB3UUeLPO6IdSvZ5arxTWzBfaaMBU4fP54PO7Wzzo0/edit#gid=1475044135"
+        },
+        "options": {}
+      },
+      "id": "624a7bc1-94c2-49d7-9d4a-570462e01993",
+      "name": "Get Signed Agreements2",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -920,
+        1940
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "sjywVjfxY0RjtQ9Y",
+          "name": "Shlok GS"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n  '{{ $json.customer_id }}' AS customer_id,\n  '{{ $json.csp_number }}' AS csp_number,\n  d.Id,\n  d.csp_id,\n  d.doc_type,\n  d.doc_name,\n  d.doc_status,\n  d.submittedAt,\n  d.updated_at,\n  d.CREATED_AT,\n  d.master_doc_type_id\nFROM\n  (SELECT 1 AS dummy) AS base\nLEFT JOIN csp_docs d\n  ON d.csp_id = '{{ $json.customer_id }}';",
+        "options": {}
+      },
+      "id": "f6fbd0f7-9cfa-4174-a652-78762795ae44",
+      "name": "Get Customer Documents2",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        -660,
+        1940
+      ],
+      "credentials": {
+        "mySql": {
+          "id": "KghwpFLA8zQ48H1l",
+          "name": "Simplibank"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const existingStatusItems = $items('Get Existing Document Status');\nconst notificationState = {};\n\nfor (const item of existingStatusItems) {\n  const data = item.json;\n  const customerId = String(data.customer_id ?? '').trim();\n  if (!customerId) continue;\n\n  notificationState[customerId] = {\n    pending_notification_sent: Number(data.pending_notification_sent) === 1 ? 1 : 0,\n    reupload_notification_sent: Number(data.reupload_notification_sent) === 1 ? 1 : 0\n  };\n}\n\nconst requiredDocs = [\n  {\n    key: 'aadhaar',\n    name: 'Aadhaar Card',\n    id: 1,\n    aliases: ['aadhaar card', 'aadhar card']\n  },\n  {\n    key: 'address_proof',\n    name: 'Address Proof',\n    id: 9,\n    aliases: ['address proof']\n  },\n  {\n    key: 'bank_statement',\n    name: 'Bank statement',\n    id: 7,\n    aliases: ['bank statement']\n  },\n  {\n    key: 'board_resolution',\n    name: 'Board Resolution (BR)',\n    id: null,\n    aliases: ['board resolution', 'board resolution (br)', 'br']\n  },\n  {\n    key: 'coi',\n    name: 'Certificate of Incorporation (COI)',\n    id: 6,\n    aliases: [\n      'certificate of incorporation',\n      'certificate of incorporation (coi)',\n      'coi'\n    ]\n  },\n  {\n    key: 'aoa',\n    name: 'Company Articles of Association (AOA)',\n    id: 5,\n    aliases: [\n      'aoa',\n      'company articles of association',\n      'aoa - company articles of association'\n    ]\n  },\n  {\n    key: 'company_pan',\n    name: 'Company PAN',\n    id: 8,\n    aliases: ['company pan']\n  },\n  {\n    key: 'director_pan',\n    name: 'Director PAN Card',\n    id: 15,\n    aliases: [\n      'director pan card',\n      'directors pan card',\n      'director pan'\n    ]\n  },\n  {\n    key: 'director_live_photo',\n    name: \"Directors' Live Photograph\",\n    id: 24,\n    aliases: [\n      'directors live photograph',\n      \"directors' live photograph\",\n      'director live photograph',\n      'director live photo'\n    ]\n  },\n  {\n    key: 'gst',\n    name: 'GST Registration (or, Udyam) Certificate',\n    id: 25,\n    aliases: [\n      'gst registration certificate',\n      'gst registration',\n      'udyam registration certificate',\n      'udyam certificate'\n    ]\n  },\n  {\n    key: 'moa',\n    name: 'Memorandum of Association (MOA)',\n    id: 4,\n    aliases: [\n      'moa',\n      'memorandum of association',\n      'moa - memorandum of association'\n    ]\n  }\n];\n\nfunction normalize(value) {\n  return String(value ?? '')\n    .toLowerCase()\n    .replace(/[’']/g, '')\n    .replace(/[^a-z0-9]+/g, ' ')\n    .trim();\n}\n\nfunction findRequiredDocument(doc) {\n  const masterId = Number(doc.master_doc_type_id);\n  const normalizedType = normalize(doc.doc_type);\n\n  for (const required of requiredDocs) {\n    if (required.id !== null && masterId === required.id) {\n      return required;\n    }\n\n    if (required.aliases.some(alias => normalize(alias) === normalizedType)) {\n      return required;\n    }\n  }\n\n  return null;\n}\n\nconst grouped = {};\n\nfor (const item of items) {\n  const data = item.json;\n  const customerId = String(data.customer_id ?? data.csp_id ?? '').trim();\n\n  if (!customerId) {\n    continue;\n  }\n\n  if (!grouped[customerId]) {\n    grouped[customerId] = {\n      customer_id: customerId,\n      csp_number: String(data.csp_number ?? '').trim(),\n      documents: {}\n    };\n  }\n\n  const required = findRequiredDocument(data);\n\n  if (!required) {\n    continue;\n  }\n\n  const status = Number(data.doc_status);\n\n  const documentRecord = {\n    status,\n    doc_type: data.doc_type,\n    doc_name: data.doc_name,\n    master_doc_type_id: data.master_doc_type_id,\n    submittedAt: data.submittedAt,\n    updated_at: data.updated_at\n  };\n\n  if (!grouped[customerId].documents[required.key]) {\n    grouped[customerId].documents[required.key] = documentRecord;\n  } else {\n    // If duplicate records exist, a valid/approved record takes priority.\n    // Priority: manually approved (2) > submitted (1) > rejected (3).\n    const existingStatus = Number(\n      grouped[customerId].documents[required.key].status\n    );\n\n    if (\n      status === 2 ||\n      (status === 1 && existingStatus === 3)\n    ) {\n      grouped[customerId].documents[required.key] = documentRecord;\n    }\n  }\n}\n\nconst output = [];\n\nfor (const customer of Object.values(grouped)) {\n  const pending = [];\n  const submitted = [];\n  const reupload = [];\n\n  const result = {\n    customer_id: customer.customer_id,\n    csp_number: customer.csp_number,\n    pending_notification_sent:\n      notificationState[customer.customer_id]?.pending_notification_sent ?? 0,\n    reupload_notification_sent:\n      notificationState[customer.customer_id]?.reupload_notification_sent ?? 0\n  };\n\n  for (const required of requiredDocs) {\n    const doc = customer.documents[required.key];\n\n    // No document exists\n    if (!doc) {\n      result[required.name] = 'PENDING - Please upload';\n      pending.push(required.name);\n      continue;\n    }\n\n    const status = Number(doc.status);\n\n    // Status 1 = submitted, waiting for verification\n    if (status === 1) {\n      result[required.name] = 'SUBMITTED - Awaiting Verification';\n      submitted.push(required.name);\n      continue;\n    }\n\n    // Status 2 = manually approved\n    if (status === 2) {\n      result[required.name] = 'APPROVED MANUALLY';\n      continue;\n    }\n\n    // Status 3 = rejected\n    if (status === 3) {\n      result[required.name] = 'REUPLOAD REQUIRED';\n      reupload.push(required.name);\n      continue;\n    }\n\n    // Any unexpected status is treated as requiring re-upload/review\n    result[required.name] = 'REUPLOAD REQUIRED';\n    reupload.push(required.name);\n  }\n\n  result.pending_documents = pending.join(', ');\n  result.submitted_documents = submitted.join(', ');\n  result.reupload_documents = reupload.join(', ');\n\n  // A document is considered completed only when it is approved.\n  // Both status 1 (submitted) and status 3 (rejected) mean the\n  // customer has not completed the document verification process.\n  result.overall_status =\n    pending.length === 0 &&\n    submitted.length === 0 &&\n    reupload.length === 0\n      ? 'completed'\n      : 'pending';\n\n  result.checked_at = new Date().toISOString();\n\n  // Machine-readable arrays for downstream nodes.\n  result._pending_documents = pending;\n  result._submitted_documents = submitted;\n  result._reupload_documents = reupload;\n\n  output.push({ json: result });\n}\n\nreturn output;"
+      },
+      "id": "6657b676-fc65-4b07-89d5-e0dcf4d4a250",
+      "name": "Check All Mandatory Documents2",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -380,
+        1940
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1jvB3UUeLPO6IdSvZ5arxTWzBfaaMBU4fP54PO7Wzzo0",
+          "mode": "list",
+          "cachedResultName": "No Company Details",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1jvB3UUeLPO6IdSvZ5arxTWzBfaaMBU4fP54PO7Wzzo0/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 968885633,
+          "mode": "list",
+          "cachedResultName": "Doc Status",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1jvB3UUeLPO6IdSvZ5arxTWzBfaaMBU4fP54PO7Wzzo0/edit#gid=968885633"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "csp_number": "={{ $json.csp_number }}",
+            "customer_id": "={{ $json.customer_id }}",
+            "Aadhaar Card": "={{ $json['Aadhaar Card'] }}",
+            "Address Proof": "={{ $json['Address Proof'] }}",
+            "Bank statement": "={{ $json['Bank statement'] }}",
+            "Board Resolution (BR)": "={{ $json['Board Resolution (BR)'] }}",
+            "Certificate of Incorporation (COI)": "={{ $json['Certificate of Incorporation (COI)'] }}",
+            "Company Articles of Association (AOA)": "={{ $json['Company Articles of Association (AOA)'] }}",
+            "Company PAN": "={{ $json['Company PAN'] }}",
+            "Director PAN Card": "={{ $json['Director PAN Card'] }}",
+            "Directors' Live Photograph": "={{ $json['Directors\\' Live Photograph'] }}",
+            "GST Registration (or, Udyam) Certificate": "={{ $json['GST Registration (or, Udyam) Certificate'] }}",
+            "Memorandum of Association (MOA)": "={{ $json['Memorandum of Association (MOA)'] }}",
+            "pending_documents": "={{ $json.pending_documents }}",
+            "reupload_documents": "={{ $json.reupload_documents }}",
+            "submitted_documents": "={{ $json.submitted_documents }}",
+            "overall_status": "={{ $json.overall_status }}",
+            "_reupload_documents": "={{ $json.reupload_documents }}",
+            "_pending_documents": "={{ $json._pending_documents }}",
+            "checked_at": "={{ $json.checked_at }}",
+            "_submitted_documents": "={{ $json._submitted_documents }}",
+            "pending_notification_sent": "={{ $json.pending_notification_sent }}",
+            "reupload_notification_sent": "={{ $json.reupload_notification_sent }}"
+          },
+          "matchingColumns": [
+            "customer_id"
+          ],
+          "schema": [
+            {
+              "id": "customer_id",
+              "displayName": "customer_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "csp_number",
+              "displayName": "csp_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Aadhaar Card",
+              "displayName": "Aadhaar Card",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Address Proof",
+              "displayName": "Address Proof",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Bank statement",
+              "displayName": "Bank statement",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Board Resolution (BR)",
+              "displayName": "Board Resolution (BR)",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Certificate of Incorporation (COI)",
+              "displayName": "Certificate of Incorporation (COI)",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Company Articles of Association (AOA)",
+              "displayName": "Company Articles of Association (AOA)",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Company PAN",
+              "displayName": "Company PAN",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Director PAN Card",
+              "displayName": "Director PAN Card",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Directors' Live Photograph",
+              "displayName": "Directors' Live Photograph",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "GST Registration (or, Udyam) Certificate",
+              "displayName": "GST Registration (or, Udyam) Certificate",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Memorandum of Association (MOA)",
+              "displayName": "Memorandum of Association (MOA)",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "pending_documents",
+              "displayName": "pending_documents",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "reupload_documents",
+              "displayName": "reupload_documents",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "overall_status",
+              "displayName": "overall_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "checked_at",
+              "displayName": "checked_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "_pending_documents",
+              "displayName": "_pending_documents",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "_reupload_documents",
+              "displayName": "_reupload_documents",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "submitted_documents",
+              "displayName": "submitted_documents",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "_submitted_documents",
+              "displayName": "_submitted_documents",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "pending_notification_sent",
+              "displayName": "pending_notification_sent",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "reupload_notification_sent",
+              "displayName": "reupload_notification_sent",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "846e1390-e9ab-4057-a9d4-9c0ce85357ac",
+      "name": "Save Document Status3",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -100,
+        1740
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "sjywVjfxY0RjtQ9Y",
+          "name": "Shlok GS"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "pending-check",
+              "leftValue": "={{ String($json.pending_documents ?? '').trim() !== '' && Number($json.pending_notification_sent ?? 0) !== 1 }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "f93e1afd-1a8a-4dff-81c0-74e15b849c07",
+      "name": "Pending Documents?2",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -100,
+        1940
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.goinfinito.com/unified/v2/send",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJJbmZpbml0byIsImlhdCI6MTc3NjkyNTg1NSwic3ViIjoiRWtvX3dhYmFpbzhveHI2OGI4NTZ1OTloIn0.3LwJuVoYfv3_0M6kDlFRq5GS6QSlk9TZbmshOyYAMAM  "
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={\n  \"apiver\": \"1.0\",\n  \"whatsapp\": {\n    \"ver\": \"2.0\",\n    \"dlr\": {\n      \"url\": \"https://his-server.com/dlr-webhook\"\n    },\n    \"messages\": [\n      {\n        \"coding\": \"1\",\n        \"id\": \"={{ 'DOC_PENDING_' + $json.csp_number + '_' + Date.now() }}\",\n        \"msgtype\": \"1\",\n        \"text\": \"\",\n        \"templateinfo\": \"1797984\",\n        \"type\": \"\",\n        \"filename\": \"\",\n        \"contenttype\": \"\",\n        \"mediadata\": \"\",\n        \"b_urlinfo\": \"\",\n        \"addresses\": [\n          {\n            \"seq\": \"\",\n            \"to\": \"={{ '91' + $json.csp_number }}\",\n            \"from\": \"917428655377\",\n            \"tag\": \"\"\n          }\n        ]\n      }\n    ]\n  }\n}",
+        "options": {}
+      },
+      "id": "5c925cb9-0894-4a00-89ec-27a8c796cdf0",
+      "name": "WhatsApp - Documents Pending2",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        260,
+        1700
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "reupload-check",
+              "leftValue": "={{ String($json.reupload_documents ?? '').trim() !== '' && Number($json.reupload_notification_sent ?? 0) !== 1 }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "16e2af23-e3b4-4381-9ebb-a97824eed01b",
+      "name": "Reupload Documents?2",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        360,
+        1940
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.goinfinito.com/unified/v2/send",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_INFINITO_API_KEY"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={\n  \"apiver\": \"1.0\",\n  \"whatsapp\": {\n    \"ver\": \"2.0\",\n    \"dlr\": {\n      \"url\": \"https://his-server.com/dlr-webhook\"\n    },\n    \"messages\": [\n      {\n        \"coding\": \"1\",\n        \"id\": \"={{ 'DOC_REUPLOAD_' + $json.csp_number + '_' + Date.now() }}\",\n        \"msgtype\": \"1\",\n        \"text\": \"\",\n        \"templateinfo\": \"1797977\",\n        \"type\": \"\",\n        \"filename\": \"\",\n        \"contenttype\": \"\",\n        \"mediadata\": \"\",\n        \"b_urlinfo\": \"\",\n        \"addresses\": [\n          {\n            \"seq\": \"\",\n            \"to\": \"={{ '91' + $json.csp_number }}\",\n            \"from\": \"917428655377\",\n            \"tag\": \"\"\n          }\n        ]\n      }\n    ]\n  }\n}",
+        "options": {}
+      },
+      "id": "d40f95fb-a2d5-4461-9e0d-662e6f2a4123",
+      "name": "WhatsApp - Documents Reupload2",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        740,
+        1920
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1jvB3UUeLPO6IdSvZ5arxTWzBfaaMBU4fP54PO7Wzzo0",
+          "mode": "list",
+          "cachedResultName": "No Company Details",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1jvB3UUeLPO6IdSvZ5arxTWzBfaaMBU4fP54PO7Wzzo0/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 968885633,
+          "mode": "list",
+          "cachedResultName": "Doc Status",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1jvB3UUeLPO6IdSvZ5arxTWzBfaaMBU4fP54PO7Wzzo0/edit#gid=968885633"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "customer_id": "={{ $json.customer_id }}",
+            "pending_notification_sent": "1"
+          },
+          "matchingColumns": [
+            "customer_id"
+          ],
+          "schema": [
+            {
+              "id": "customer_id",
+              "displayName": "customer_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "pending_notification_sent",
+              "displayName": "pending_notification_sent",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "b64826d1-3bab-44c8-b286-6649486d7433",
+      "name": "Mark Pending Notification Sent",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        500,
+        1640
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "sjywVjfxY0RjtQ9Y",
+          "name": "Shlok GS"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1jvB3UUeLPO6IdSvZ5arxTWzBfaaMBU4fP54PO7Wzzo0",
+          "mode": "list",
+          "cachedResultName": "No Company Details",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1jvB3UUeLPO6IdSvZ5arxTWzBfaaMBU4fP54PO7Wzzo0/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 968885633,
+          "mode": "list",
+          "cachedResultName": "Doc Status",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1jvB3UUeLPO6IdSvZ5arxTWzBfaaMBU4fP54PO7Wzzo0/edit#gid=968885633"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "customer_id": "={{ $json.customer_id }}",
+            "reupload_notification_sent": "1"
+          },
+          "matchingColumns": [
+            "customer_id"
+          ],
+          "schema": [
+            {
+              "id": "customer_id",
+              "displayName": "customer_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "reupload_notification_sent",
+              "displayName": "reupload_notification_sent",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "125344b0-a2af-4675-9a7a-6a1c6e1fa244",
+      "name": "Mark Reupload Notification Sent",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        380,
+        2200
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "sjywVjfxY0RjtQ9Y",
+          "name": "Shlok GS"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1ksbyWNVn73B0YGC2GlrynAXflhf2cdESciyVhngIGQc",
+          "mode": "list",
+          "cachedResultName": "FEVERRRRRRRR",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ksbyWNVn73B0YGC2GlrynAXflhf2cdESciyVhngIGQc/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ksbyWNVn73B0YGC2GlrynAXflhf2cdESciyVhngIGQc/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {
+            "Id": "={{ $json.Id }}",
+            "fos_number": "={{ $json.fos_number }}",
+            "csp_number": "={{ $json.csp_number }}",
+            "mobile_verification_status": "={{ $json.mobile_verification_status }}",
+            "requestAt": "={{ $json.requestAt }}",
+            "verifyAt": "={{ $json.verifyAt }}",
+            "panNumber": "={{ $json.panNumber }}",
+            "customer_id": "={{ $json.customer_id }}",
+            "pan_verification_status": "={{ $json.pan_verification_status }}",
+            "merchant_creation_status": "={{ $json.merchant_creation_status }}"
+          },
+          "matchingColumns": [
+            "Id"
+          ],
+          "schema": [
+            {
+              "id": "Id",
+              "displayName": "Id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "fos_number",
+              "displayName": "fos_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "csp_number",
+              "displayName": "csp_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "otp",
+              "displayName": "otp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "mobile_verification_status",
+              "displayName": "mobile_verification_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "requestAt",
+              "displayName": "requestAt",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "verifyAt",
+              "displayName": "verifyAt",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "panNumber",
+              "displayName": "panNumber",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "merchant_creation_status",
+              "displayName": "merchant_creation_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "pan_verification_status",
+              "displayName": "pan_verification_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "customer_id",
+              "displayName": "customer_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "statuscode",
+              "displayName": "statuscode",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "statustext",
+              "displayName": "statustext",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "messageack",
+              "displayName": "messageack",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -260,
+        340
+      ],
+      "id": "0d972469-8301-4486-9644-d160e220d19d",
+      "name": "Save Nudge Candidates",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "sjywVjfxY0RjtQ9Y",
+          "name": "Shlok GS"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "One-time nudge flow: save all currently pending signups to Google Sheets and send one WhatsApp nudge. No reminder-status check is used yet.",
+        "height": 280,
+        "width": 700,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -360,
+        -100
+      ],
+      "id": "0bcf68f9-b2c6-4025-8d20-533036c315c9",
+      "name": "Nudge Flow Note"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "verify-at-empty",
+              "leftValue": "={{ $json.verifyAt == null || String($json.verifyAt).trim() === '' }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -260,
+        -260
+      ],
+      "id": "d5b17588-6c62-4b8d-922b-1cd2e6d6a324",
+      "name": "Check Mobile Verification2"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "pan-number-empty",
+              "leftValue": "={{ $json.panNumber == null || String($json.panNumber).trim() === '' }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -240,
+        0
+      ],
+      "id": "79d8f48b-aa47-4cbb-8501-b0ccdf36e208",
+      "name": "Check PAN2"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.goinfinito.com/unified/v2/send",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJJbmZpbml0byIsImlhdCI6MTc3NjkyNTg1NSwic3ViIjoiRWtvX3dhYmFpbzhveHI2OGI4NTZ1OTloIn0.3LwJuVoYfv3_0M6kDlFRq5GS6QSlk9TZbmshOyYAMAM  "
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={\n  \"apiver\": \"1.0\",\n  \"whatsapp\": {\n    \"ver\": \"2.0\",\n    \"dlr\": {\n      \"url\": \"https://his-server.com/dlr-webhook\"\n    },\n    \"messages\": [\n      {\n        \"coding\": \"1\",\n        \"id\": \"={{ 'MOB' + $json.Id.toString() + Date.now().toString().slice(-15) }}\",\n        \"msgtype\": \"1\",\n        \"text\": \"\",\n        \"templateinfo\": \"1794796\",\n        \"type\": \"\",\n        \"filename\": \"\",\n        \"contenttype\": \"\",\n        \"mediadata\": \"\",\n        \"b_urlinfo\": \"\",\n        \"addresses\": [\n          {\n            \"seq\": \"\",\n            \"to\": \"={{ '91' + String($json.csp_number ?? '') }}\",\n            \"from\": \"917428655377\",\n            \"tag\": \"\"\n          }\n        ]\n      }\n    ]\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        -300
+      ],
+      "id": "9ba6823b-0798-4eb1-ab5e-305ff6edd627",
+      "name": "WhatsApp - Mobile Pending4"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.goinfinito.com/unified/v2/send",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJJbmZpbml0byIsImlhdCI6MTc3NjkyNTg1NSwic3ViIjoiRWtvX3dhYmFpbzhveHI2OGI4NTZ1OTloIn0.3LwJuVoYfv3_0M6kDlFRq5GS6QSlk9TZbmshOyYAMAM  "
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={\n  \"apiver\": \"1.0\",\n  \"whatsapp\": {\n    \"ver\": \"2.0\",\n    \"dlr\": {\n      \"url\": \"https://his-server.com/dlr-webhook\"\n    },\n    \"messages\": [\n      {\n        \"coding\": \"1\",\n        \"id\": \"={{ 'PAN' + $json.Id.toString() + Date.now().toString().slice(-15) }}\",\n        \"msgtype\": \"1\",\n        \"text\": \"\",\n        \"templateinfo\": \"1797803\",\n        \"type\": \"\",\n        \"filename\": \"\",\n        \"contenttype\": \"\",\n        \"mediadata\": \"\",\n        \"b_urlinfo\": \"\",\n        \"addresses\": [\n          {\n            \"seq\": \"\",\n            \"to\": \"={{ '91' + String($json.csp_number ?? '') }}\",\n            \"from\": \"917428655377\",\n            \"tag\": \"\"\n          }\n        ]\n      }\n    ]\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        -40
+      ],
+      "id": "23b9ac1d-7555-4b4f-930e-e724a9a5d285",
+      "name": "WhatsApp - PAN Pending2"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 2
+            }
+          ]
+        }
+      },
+      "id": "1001047d-5ecc-4b21-a649-b0db3d972a54",
+      "name": "Every Hour3",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -900,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT *\nFROM verify_csp\nWHERE requestAt >= DATE_SUB(NOW(), INTERVAL 2 HOUR)\n  AND requestAt < NOW()\n  AND (\n    verifyAt IS NULL\n    OR panNumber IS NULL\n  )\nORDER BY requestAt DESC;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        -580,
+        120
+      ],
+      "id": "c50f11e1-f97f-4d7d-8692-95194f3b778f",
+      "name": "MySQL2",
+      "credentials": {
+        "mySql": {
+          "id": "KghwpFLA8zQ48H1l",
+          "name": "Simplibank"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 3
+            }
+          ]
+        }
+      },
+      "id": "fda7cf96-c733-4647-8d63-becf30d629c8",
+      "name": "Every Hour",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -880,
+        700
+      ]
+    }
+  ],
+  "connections": {
+    "Get CSP Applications": {
+      "main": [
+        [
+          {
+            "node": "Parse CSP Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse CSP Data": {
+      "main": [
+        [
+          {
+            "node": "Check Application Details",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Google Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Application Details": {
+      "main": [
+        [
+          {
+            "node": "WhatsApp - Mobile Pending1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Signed Agreement": {
+      "main": [
+        [
+          {
+            "node": "Delete Signed CSP1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every 2 Hours1": {
+      "main": [
+        [
+          {
+            "node": "Get Pending CSPs1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Pending CSPs1": {
+      "main": [
+        [
+          {
+            "node": "Check Latest Agreement1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Latest Agreement1": {
+      "main": [
+        [
+          {
+            "node": "Agreement Signed?1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Agreement Signed?1": {
+      "main": [
+        [
+          {
+            "node": "Sort Rows Bottom to Top1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "WhatsApp - Agreement Pending1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sort Rows Bottom to Top1": {
+      "main": [
+        [
+          {
+            "node": "Save Signed Agreement",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every 2 Hours3": {
+      "main": [
+        [
+          {
+            "node": "Get Existing Document Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Existing Document Status": {
+      "main": [
+        [
+          {
+            "node": "Get Signed Agreements2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Signed Agreements2": {
+      "main": [
+        [
+          {
+            "node": "Get Customer Documents2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Customer Documents2": {
+      "main": [
+        [
+          {
+            "node": "Check All Mandatory Documents2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check All Mandatory Documents2": {
+      "main": [
+        [
+          {
+            "node": "Save Document Status3",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Pending Documents?2",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Reupload Documents?2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pending Documents?2": {
+      "main": [
+        [
+          {
+            "node": "WhatsApp - Documents Pending2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "WhatsApp - Documents Pending2": {
+      "main": [
+        [
+          {
+            "node": "Mark Pending Notification Sent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reupload Documents?2": {
+      "main": [
+        [
+          {
+            "node": "WhatsApp - Documents Reupload2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "WhatsApp - Documents Reupload2": {
+      "main": [
+        [
+          {
+            "node": "Mark Reupload Notification Sent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Mobile Verification2": {
+      "main": [
+        [
+          {
+            "node": "WhatsApp - Mobile Pending4",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Check PAN2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check PAN2": {
+      "main": [
+        [
+          {
+            "node": "WhatsApp - PAN Pending2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "WhatsApp - Mobile Pending4": {
+      "main": [
+        []
+      ]
+    },
+    "WhatsApp - PAN Pending2": {
+      "main": [
+        []
+      ]
+    },
+    "Every Hour3": {
+      "main": [
+        [
+          {
+            "node": "MySQL2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "MySQL2": {
+      "main": [
+        [
+          {
+            "node": "Save Nudge Candidates",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Check Mobile Verification2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every Hour": {
+      "main": [
+        [
+          {
+            "node": "Get CSP Applications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "7b6ad63e08c2b2b0c7cce55143e5c230b43cba4fb8a2ab79ecd9a04af45d7a01"
+  }
+}

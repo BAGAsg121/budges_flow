@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import {
-  Play, Eye, Pencil, Trash2, Plus, Send, RefreshCcw, Loader2, AlertCircle,
+  Play, Eye, Pencil, Trash2, Plus, Send, RefreshCcw, Loader2, AlertCircle, Mail, MessageCircle, Info,
 } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -12,31 +12,51 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { Separator } from '@/components/ui/separator'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
   AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { useToast } from '@/hooks/use-toast'
-import type { NudgeDto, PreviewDto, RunSummaryDto } from '@/lib/app-types'
+import type { NudgeChannel, NudgeDto, PreviewDto, RunSummaryDto } from '@/lib/app-types'
 
 const TEMPLATE_VARS =
-  '{{first_name}}, {{full_name}}, {{email}}, {{company}}, {{lead_status}}, {{kyc_document_upload_count}}, {{owner_name}}, {{city}}, {{email_number}}, {{today}}'
+  '{{first_name}}, {{full_name}}, {{email}}, {{company}}, {{lead_status}}, {{kyc_document_upload_count}}, {{owner_name}}, {{city}}, {{message_number}}, {{today}}'
 
 const emptyForm = {
   key: '',
   name: '',
   description: '',
   enabled: true,
+  channel: 'email' as NudgeChannel,
   zohoCriteria: '',
   filters: '{\n  "requireEmail": true,\n  "excludeStatuses": ["Closed Won", "Closed Lost", "Unqualified"]\n}',
   subjectTemplate: '',
   bodyTemplate: '<p>Hi {{first_name}},</p>\n<p>...</p>\n<p>Thanks,<br/>Eko Team</p>',
+  whatsappTemplateName: '',
+  whatsappLanguage: 'en',
+  whatsappParams: '["first_name", "company"]',
   maxEmailsPerLead: 1,
   followUpDays: 0,
 }
 
 type FormState = typeof emptyForm
+
+function ChannelBadge({ channel }: { channel: NudgeChannel }) {
+  if (channel === 'whatsapp') {
+    return (
+      <Badge className="bg-emerald-600 hover:bg-emerald-600 gap-1">
+        <MessageCircle className="h-3 w-3" /> WhatsApp
+      </Badge>
+    )
+  }
+  return (
+    <Badge variant="secondary" className="gap-1">
+      <Mail className="h-3 w-3" /> Email
+    </Badge>
+  )
+}
 
 function reasonBadge(reason: string, detail?: string) {
   switch (reason) {
@@ -48,6 +68,8 @@ function reasonBadge(reason: string, detail?: string) {
       return <Badge className="bg-amber-500 hover:bg-amber-500">waiting{detail ? ` · ${detail}` : ''}</Badge>
     case 'no_email':
       return <Badge variant="destructive">no email</Badge>
+    case 'no_valid_phone':
+      return <Badge variant="destructive">no valid phone</Badge>
     default:
       return <Badge variant="outline">{reason}{detail ? ` · ${detail}` : ''}</Badge>
   }
@@ -97,15 +119,24 @@ export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onCha
       name: n.name,
       description: n.description || '',
       enabled: n.enabled,
+      channel: n.channel,
       zohoCriteria: n.zohoCriteria || '',
       filters: n.filters,
-      subjectTemplate: n.subjectTemplate,
-      bodyTemplate: n.bodyTemplate,
+      subjectTemplate: n.subjectTemplate || '',
+      bodyTemplate: n.bodyTemplate || '',
+      whatsappTemplateName: n.whatsappTemplateName || '',
+      whatsappLanguage: n.whatsappLanguage || 'en',
+      whatsappParams: n.whatsappParams || '[]',
       maxEmailsPerLead: n.maxEmailsPerLead,
       followUpDays: n.followUpDays,
     })
     setFormOpen(true)
   }
+
+  const canSave =
+    form.name.trim() &&
+    form.key.trim() &&
+    (form.channel === 'email' ? form.subjectTemplate.trim() && form.bodyTemplate.trim() : form.whatsappTemplateName.trim())
 
   const save = async () => {
     setSaving(true)
@@ -177,12 +208,14 @@ export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onCha
   }
 
   const remove = async (n: NudgeDto) => {
-    if (!confirm(`Delete nudge "${n.name}" and all its email logs?`)) return
+    if (!confirm(`Delete nudge "${n.name}" and all its message logs?`)) return
     await fetch(`/api/nudges/${n.id}`, { method: 'DELETE' })
     toast({ title: 'Nudge deleted', description: n.name })
     load()
     onChanged()
   }
+
+  const isWhatsApp = form.channel === 'whatsapp'
 
   return (
     <div className="space-y-4">
@@ -190,7 +223,7 @@ export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onCha
         <div>
           <h3 className="text-sm font-medium">Nudges</h3>
           <p className="text-xs text-muted-foreground">
-            One nudge = one reusable flow (Zoho criteria + lead filters + email template + sequence). Create a new row to add a new flow.
+            One nudge = one reusable flow (channel + Zoho criteria + lead filters + template + sequence). Create a new row to add a new flow.
           </p>
         </div>
         <Button onClick={openCreate} size="sm">
@@ -211,6 +244,7 @@ export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onCha
                   <div className="min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
                       <h4 className="font-medium truncate">{n.name}</h4>
+                      <ChannelBadge channel={n.channel} />
                       <Badge variant="outline" className="font-mono text-xs">{n.key}</Badge>
                       {!n.enabled && <Badge variant="secondary">disabled</Badge>}
                     </div>
@@ -222,7 +256,7 @@ export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onCha
                 </div>
 
                 <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-muted-foreground">
-                  <span><Send className="inline h-3 w-3 mr-1" />{n.emailsSent} emails sent</span>
+                  <span><Send className="inline h-3 w-3 mr-1" />{n.messagesSent} messages sent</span>
                   <span><RefreshCcw className="inline h-3 w-3 mr-1" />max {n.maxEmailsPerLead}/lead</span>
                   <span>follow-up every {n.followUpDays}d</span>
                   <span>last run: {n.lastRunAt ? new Date(n.lastRunAt).toLocaleString() : 'never'}</span>
@@ -257,7 +291,7 @@ export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onCha
           <DialogHeader>
             <DialogTitle>{editing ? `Edit nudge: ${editing.name}` : 'Create a new nudge'}</DialogTitle>
             <DialogDescription>
-              A nudge is a reusable flow: optional Zoho criteria → local lead filters → email template → send sequence.
+              A nudge is a reusable flow: channel → optional Zoho criteria → local lead filters → template → send sequence.
             </DialogDescription>
           </DialogHeader>
 
@@ -273,14 +307,36 @@ export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onCha
               </div>
             </div>
 
-            <div className="grid gap-1.5">
-              <Label htmlFor="n-desc">Description</Label>
-              <Input id="n-desc" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="What this nudge is for" />
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="grid gap-1.5">
+                <Label>Channel</Label>
+                <Select value={form.channel} onValueChange={(v: NudgeChannel) => setForm({ ...form, channel: v })}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="email">Email (SMTP)</SelectItem>
+                    <SelectItem value="whatsapp">WhatsApp (Meta Cloud API)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="grid gap-1.5">
+                <Label htmlFor="n-desc">Description</Label>
+                <Input id="n-desc" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="What this nudge is for" />
+              </div>
             </div>
+
+            {isWhatsApp && (
+              <div className="flex items-start gap-2 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-900">
+                <Info className="h-4 w-4 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <p><b>Meta setup required once:</b> register your WhatsApp number in Meta Business, approve the template, then set WHATSAPP_TOKEN + WHATSAPP_PHONE_NUMBER_ID in .env.</p>
+                  <p>Webhook URL for Meta: <code className="font-mono bg-white px-1 rounded">{typeof window !== 'undefined' ? `${window.location.origin}/api/track/whatsapp` : '/api/track/whatsapp'}</code> (set WHATSAPP_VERIFY_TOKEN too). Read receipts → opened, customer replies → replied.</p>
+                </div>
+              </div>
+            )}
 
             <div className="grid gap-4 sm:grid-cols-3">
               <div className="grid gap-1.5">
-                <Label htmlFor="n-max">Max emails / lead</Label>
+                <Label htmlFor="n-max">Max messages / lead</Label>
                 <Input id="n-max" type="number" min={1} value={form.maxEmailsPerLead} onChange={(e) => setForm({ ...form, maxEmailsPerLead: Number(e.target.value) })} />
               </div>
               <div className="grid gap-1.5">
@@ -293,16 +349,44 @@ export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onCha
               </div>
             </div>
 
-            <div className="grid gap-1.5">
-              <Label htmlFor="n-subject">Subject template</Label>
-              <Input id="n-subject" value={form.subjectTemplate} onChange={(e) => setForm({ ...form, subjectTemplate: e.target.value })} placeholder="Action pending: complete your documents" />
-            </div>
-
-            <div className="grid gap-1.5">
-              <Label htmlFor="n-body">Email body (HTML)</Label>
-              <Textarea id="n-body" rows={8} className="font-mono text-xs" value={form.bodyTemplate} onChange={(e) => setForm({ ...form, bodyTemplate: e.target.value })} />
-              <p className="text-xs text-muted-foreground">Variables: {TEMPLATE_VARS}. A tracking pixel is appended automatically.</p>
-            </div>
+            {isWhatsApp ? (
+              <>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="grid gap-1.5">
+                    <Label htmlFor="n-wa-tpl">Meta template name (approved)</Label>
+                    <Input id="n-wa-tpl" className="font-mono text-xs" value={form.whatsappTemplateName} onChange={(e) => setForm({ ...form, whatsappTemplateName: e.target.value })} placeholder="documents_pending_reminder" />
+                  </div>
+                  <div className="grid gap-1.5">
+                    <Label htmlFor="n-wa-lang">Template language</Label>
+                    <Input id="n-wa-lang" value={form.whatsappLanguage} onChange={(e) => setForm({ ...form, whatsappLanguage: e.target.value })} placeholder="en" />
+                  </div>
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="n-wa-params">Template parameters (JSON array)</Label>
+                  <Textarea id="n-wa-params" rows={2} className="font-mono text-xs" value={form.whatsappParams} onChange={(e) => setForm({ ...form, whatsappParams: e.target.value })} />
+                  <p className="text-xs text-muted-foreground">
+                    Order maps to Meta template variables: [&quot;first_name&quot;, &quot;company&quot;] → {'{{1}}'}, {'{{2}}'}. Available: {TEMPLATE_VARS}
+                  </p>
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="n-wa-body">Template body (reference copy, optional)</Label>
+                  <Textarea id="n-wa-body" rows={4} className="font-mono text-xs" value={form.bodyTemplate} onChange={(e) => setForm({ ...form, bodyTemplate: e.target.value })} placeholder="Hi {{1}}, your KYC documents are pending..." />
+                  <p className="text-xs text-muted-foreground">Paste the exact Meta template text here for team reference — not sent by this app.</p>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="n-subject">Subject template</Label>
+                  <Input id="n-subject" value={form.subjectTemplate} onChange={(e) => setForm({ ...form, subjectTemplate: e.target.value })} placeholder="Action pending: complete your documents" />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="n-body">Email body (HTML)</Label>
+                  <Textarea id="n-body" rows={8} className="font-mono text-xs" value={form.bodyTemplate} onChange={(e) => setForm({ ...form, bodyTemplate: e.target.value })} />
+                  <p className="text-xs text-muted-foreground">Variables: {TEMPLATE_VARS}. A tracking pixel is appended automatically.</p>
+                </div>
+              </>
+            )}
 
             <Separator />
 
@@ -316,14 +400,14 @@ export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onCha
               <Label htmlFor="n-filters">Local lead filters (JSON)</Label>
               <Textarea id="n-filters" rows={5} className="font-mono text-xs" value={form.filters} onChange={(e) => setForm({ ...form, filters: e.target.value })} />
               <p className="text-xs text-muted-foreground">
-                Keys: requireEmail, excludeStatuses[], businessVertical, minKycCount, maxKycCount, createdAfter (ISO date)
+                Keys: requireEmail / requirePhone, excludeStatuses[], businessVertical, minKycCount, maxKycCount, createdAfter (ISO date)
               </p>
             </div>
           </div>
 
           <DialogFooter>
             <Button variant="outline" onClick={() => setFormOpen(false)}>Cancel</Button>
-            <Button onClick={save} disabled={saving || !form.name || !form.key || !form.subjectTemplate || !form.bodyTemplate}>
+            <Button onClick={save} disabled={saving || !canSave}>
               {saving ? 'Saving…' : editing ? 'Save changes' : 'Create nudge'}
             </Button>
           </DialogFooter>
@@ -336,8 +420,10 @@ export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onCha
           <AlertDialogHeader>
             <AlertDialogTitle>Run nudge &ldquo;{runTarget?.name}&rdquo;?</AlertDialogTitle>
             <AlertDialogDescription>
-              This will send emails to every eligible lead that hasn&apos;t hit the sequence limit.
-              Max {runTarget?.maxEmailsPerLead} email(s) per lead, {runTarget?.followUpDays} day(s) between follow-ups.
+              {runTarget?.channel === 'whatsapp'
+                ? 'This will send WhatsApp template messages (Meta Cloud API) to every eligible lead that hasn\'t hit the sequence limit.'
+                : 'This will send emails to every eligible lead that hasn\'t hit the sequence limit.'}{' '}
+              Max {runTarget?.maxEmailsPerLead} message(s) per lead, {runTarget?.followUpDays} day(s) between follow-ups.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <div className="flex items-center gap-2 py-1">
@@ -350,7 +436,7 @@ export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onCha
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction onClick={() => runTarget && run(runTarget)}>
-              {running ? 'Running…' : 'Send emails'}
+              {running ? 'Running…' : runTarget?.channel === 'whatsapp' ? 'Send WhatsApp messages' : 'Send emails'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -368,10 +454,16 @@ export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onCha
               {runResult?.leadsConsidered} leads considered ·{' '}
               <b className="text-emerald-600">{runResult?.sent} sent</b> ·{' '}
               {runResult?.failed ? <span className="text-red-600">{runResult.failed} failed</span> : '0 failed'}
-              {!runResult?.smtpConfigured && (
+              {runResult?.channel === 'email' && !runResult?.smtpConfigured && (
                 <span className="flex items-start gap-1.5 mt-2 text-amber-600">
                   <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
                   SMTP not configured — attempts were logged as failed. Set SMTP_USER / SMTP_PASS / MAIL_FROM in .env.
+                </span>
+              )}
+              {runResult?.channel === 'whatsapp' && !runResult?.whatsappConfigured && (
+                <span className="flex items-start gap-1.5 mt-2 text-amber-600">
+                  <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                  WhatsApp not configured — attempts were logged as failed. Set WHATSAPP_TOKEN + WHATSAPP_PHONE_NUMBER_ID in .env (after Meta approves your number and template).
                 </span>
               )}
             </DialogDescription>
@@ -383,14 +475,14 @@ export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onCha
                 <div key={i} className="flex items-center justify-between gap-2 rounded px-2 py-1.5 text-sm hover:bg-muted/60">
                   <div className="min-w-0">
                     <p className="truncate font-medium">{s.lead}</p>
-                    <p className="truncate text-xs text-muted-foreground">{s.email || 'no email'}</p>
+                    <p className="truncate text-xs text-muted-foreground">{s.email || s.phone || 'no contact'}</p>
                   </div>
                   {reasonBadge(s.reason, s.detail)}
                 </div>
               ))}
             </div>
           ) : (
-            <p className="text-sm text-muted-foreground">No skips — everyone eligible got an email.</p>
+            <p className="text-sm text-muted-foreground">No skips — everyone eligible got a message.</p>
           )}
         </DialogContent>
       </Dialog>
@@ -401,7 +493,9 @@ export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onCha
           <DialogHeader>
             <DialogTitle>Preview (dry run — nothing sent)</DialogTitle>
             <DialogDescription>
-              {preview ? `${preview.leadsConsidered} leads match the filters · ${preview.wouldSend.length} would receive an email now` : 'calculating…'}
+              {preview
+                ? `${preview.leadsConsidered} leads match the filters · ${preview.wouldSend.length} would receive a ${preview.channel === 'whatsapp' ? 'WhatsApp message' : 'n email'} now`
+                : 'calculating…'}
             </DialogDescription>
           </DialogHeader>
 
@@ -411,15 +505,15 @@ export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onCha
                 <p className="text-xs font-medium mb-1.5 text-emerald-700">Would send ({preview.wouldSend.length})</p>
                 <div className="rounded-md border max-h-56 overflow-y-auto p-2 space-y-1">
                   {preview.wouldSend.length === 0 ? (
-                    <p className="text-sm text-muted-foreground p-2">No one is due for an email right now.</p>
+                    <p className="text-sm text-muted-foreground p-2">No one is due for a message right now.</p>
                   ) : (
                     preview.wouldSend.map((s, i) => (
                       <div key={i} className="flex items-center justify-between gap-2 rounded px-2 py-1.5 text-sm hover:bg-muted/60">
                         <div className="min-w-0">
                           <p className="truncate font-medium">{s.lead}</p>
-                          <p className="truncate text-xs text-muted-foreground">{s.email}</p>
+                          <p className="truncate text-xs text-muted-foreground">{s.phone || s.email}</p>
                         </div>
-                        <Badge variant="outline">#{s.emailNumber}</Badge>
+                        <Badge variant="outline">#{s.messageNumber}</Badge>
                       </div>
                     ))
                   )}
@@ -433,7 +527,7 @@ export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onCha
                       <div key={i} className="flex items-center justify-between gap-2 rounded px-2 py-1.5 text-sm hover:bg-muted/60">
                         <div className="min-w-0">
                           <p className="truncate font-medium">{s.lead}</p>
-                          <p className="truncate text-xs text-muted-foreground">{s.email || 'no email'}</p>
+                          <p className="truncate text-xs text-muted-foreground">{s.email || s.phone || 'no contact'}</p>
                         </div>
                         {reasonBadge(s.reason, s.detail)}
                       </div>

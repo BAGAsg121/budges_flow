@@ -73,7 +73,7 @@ export default function Home() {
             <TabsTrigger value="dashboard">Dashboard</TabsTrigger>
             <TabsTrigger value="leads">Leads</TabsTrigger>
             <TabsTrigger value="nudges">Nudges</TabsTrigger>
-            <TabsTrigger value="logs">Email Logs</TabsTrigger>
+            <TabsTrigger value="logs">Logs</TabsTrigger>
           </TabsList>
           <TabsContent value="dashboard"><DashboardTab refreshKey={refreshKey} /></TabsContent>
           <TabsContent value="leads"><LeadsTab refreshKey={refreshKey} /></TabsContent>
@@ -83,9 +83,9 @@ export default function Home() {
       </main>
 
       <footer className="border-t mt-auto">
-        <div className="max-w-7xl mx-auto w-full px-4 sm:px-6 py-3 flex items-center justify-between text-xs text-muted-foreground">
+        <div className="max-w-7xl mx-auto w-full px-4 sm:px-6 py-3 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
           <span className="flex items-center gap-1.5"><Database className="h-3.5 w-3.5" /> Logs stored in local database (Google Sheets replaced)</span>
-          <span>Open pixel: /api/track/open/&lt;tracking_id&gt;</span>
+          <span>Email pixel: /api/track/open/&lt;tracking_id&gt; · WhatsApp webhook: /api/track/whatsapp</span>
         </div>
       </footer>
     </div>

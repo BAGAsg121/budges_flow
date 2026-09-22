@@ -1,5 +1,5 @@
 /**
- * GET /api/stats — dashboard aggregates
+ * GET /api/stats — dashboard aggregates (email + whatsapp)
  */
 import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
@@ -10,14 +10,17 @@ export async function GET() {
   const [leads, nudges, sent, failed, opened, replied, recentLogs] = await Promise.all([
     db.lead.count(),
     db.nudge.count(),
-    db.emailLog.count({ where: { sentOk: true } }),
-    db.emailLog.count({ where: { sentOk: false } }),
-    db.emailLog.count({ where: { opened: true } }),
-    db.emailLog.count({ where: { replied: true } }),
-    db.emailLog.findMany({
+    db.messageLog.count({ where: { sentOk: true } }),
+    db.messageLog.count({ where: { sentOk: false } }),
+    db.messageLog.count({ where: { opened: true } }),
+    db.messageLog.count({ where: { replied: true } }),
+    db.messageLog.findMany({
       orderBy: { createdAt: 'desc' },
       take: 8,
-      include: { lead: { select: { fullName: true, email: true } }, nudge: { select: { name: true, key: true } } },
+      include: {
+        lead: { select: { fullName: true, email: true } },
+        nudge: { select: { name: true, key: true } },
+      },
     }),
   ])
 
@@ -27,16 +30,17 @@ export async function GET() {
     ok: true,
     leads,
     nudges,
-    emailsSent: sent,
-    emailsFailed: failed,
+    messagesSent: sent,
+    messagesFailed: failed,
     opened,
     replied,
     openRate,
     recentLogs: recentLogs.map((l) => ({
       id: l.id,
+      channel: l.channel,
       lead: l.lead.fullName || l.lead.email,
       nudge: l.nudge.name,
-      emailNumber: l.emailNumber,
+      messageNumber: l.messageNumber,
       subject: l.subject,
       sentOk: l.sentOk,
       sendError: l.sendError,

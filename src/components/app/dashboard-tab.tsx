@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { Users, Send, MailOpen, Reply, TrendingUp, RefreshCw } from 'lucide-react'
+import { Users, Send, MailOpen, Reply, TrendingUp, RefreshCw, Mail, MessageCircle } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -60,7 +60,7 @@ export function DashboardTab({ refreshKey }: { refreshKey: number }) {
   }, [load, refreshKey])
 
   useEffect(() => {
-    const t = setInterval(load, 20000) // open-tracking events arrive externally
+    const t = setInterval(load, 20000) // open-tracking / webhook events arrive externally
     return () => clearInterval(t)
   }, [load])
 
@@ -80,7 +80,7 @@ export function DashboardTab({ refreshKey }: { refreshKey: number }) {
     <div className="space-y-6">
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
         <StatCard icon={Users} label="Leads (synced)" value={stats.leads} sub="from Zoho CRM" />
-        <StatCard icon={Send} label="Emails sent" value={stats.emailsSent} sub={stats.emailsFailed ? `${stats.emailsFailed} failed` : 'all delivered'} />
+        <StatCard icon={Send} label="Messages sent" value={stats.messagesSent} sub={stats.messagesFailed ? `${stats.messagesFailed} failed` : 'email + WhatsApp'} />
         <StatCard icon={MailOpen} label="Opened" value={stats.opened} sub={`open rate ${stats.openRate}%`} />
         <StatCard icon={Reply} label="Replied" value={stats.replied} sub="replies detected" />
         <StatCard icon={TrendingUp} label="Nudges" value={stats.nudges} sub="configured flows" />
@@ -90,24 +90,29 @@ export function DashboardTab({ refreshKey }: { refreshKey: number }) {
         <CardContent className="p-4 sm:p-6">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-sm font-medium flex items-center gap-2">
-              <RefreshCw className="h-4 w-4 text-muted-foreground" /> Recent email activity
+              <RefreshCw className="h-4 w-4 text-muted-foreground" /> Recent message activity
             </h3>
             <span className="text-xs text-muted-foreground">auto-refreshes every 20s</span>
           </div>
           {stats.recentLogs.length === 0 ? (
             <p className="text-sm text-muted-foreground py-8 text-center">
-              No emails sent yet. Go to <b>Nudges</b> and run one, or <b>Sync leads</b> first.
+              No messages sent yet. Go to <b>Nudges</b> and run one, or <b>Sync leads</b> first.
             </p>
           ) : (
             <div className="max-h-96 overflow-y-auto">
               <div className="space-y-1">
                 {stats.recentLogs.map((l) => (
                   <div key={l.id} className="flex items-center gap-3 rounded-md px-3 py-2 text-sm hover:bg-muted/60">
+                    {l.channel === 'whatsapp' ? (
+                      <MessageCircle className="h-4 w-4 shrink-0 text-emerald-600" />
+                    ) : (
+                      <Mail className="h-4 w-4 shrink-0 text-muted-foreground" />
+                    )}
                     <div className="min-w-0 flex-1">
                       <p className="truncate font-medium">
-                        {l.lead} <span className="text-muted-foreground font-normal">· email #{l.emailNumber} · {l.nudge}</span>
+                        {l.lead} <span className="text-muted-foreground font-normal">· #{l.messageNumber} · {l.nudge}</span>
                       </p>
-                      <p className="truncate text-xs text-muted-foreground">{l.subject}</p>
+                      <p className="truncate text-xs text-muted-foreground">{l.subject || (l.channel === 'whatsapp' ? 'WhatsApp template' : '')}</p>
                     </div>
                     <span className="hidden sm:block text-xs text-muted-foreground whitespace-nowrap">
                       {new Date(l.sentAt || l.createdAt).toLocaleString()}
