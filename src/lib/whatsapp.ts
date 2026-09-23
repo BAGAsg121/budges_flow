@@ -24,17 +24,42 @@ export function whatsAppConfigStatus() {
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID || ''
   return {
     tokenPresent: Boolean(token),
+    // Length + prefix are enough to spot the classic mistakes without leaking the value.
+    tokenLength: token.length,
     tokenLooksValid: token.startsWith('EAA'),
     phoneNumberIdPresent: Boolean(phoneNumberId),
     phoneNumberIdLooksValid: /^\d{10,20}$/.test(phoneNumberId),
     appSecretPresent: Boolean(process.env.WHATSAPP_APP_SECRET),
+    wabaIdPresent: Boolean(process.env.WHATSAPP_WABA_ID),
+    templateLanguage: process.env.WHATSAPP_TEMPLATE_LANGUAGE || 'en_US (default)',
     displayNumber: process.env.WHATSAPP_DISPLAY_NUMBER || null,
     apiVersion: process.env.WHATSAPP_API_VERSION || 'v21.0',
   }
 }
 
+/** Human explanation for a token that is missing or the wrong kind of value. */
+export function describeTokenProblem(status: ReturnType<typeof whatsAppConfigStatus>): string | null {
+  if (!status.tokenPresent) return 'WHATSAPP_TOKEN is not set.'
+  if (status.tokenLooksValid) return null
+  if (status.tokenLength === 32)
+    return `WHATSAPP_TOKEN is 32 characters and does not start with "EAA" — that is the Meta App Secret, not an access token. The App Secret can only verify webhook signatures; it cannot send messages or read templates. Use the System User token instead.`
+  return `WHATSAPP_TOKEN is ${status.tokenLength} characters and does not start with "EAA", so it is not a WhatsApp access token. Paste the System User token (Business Settings → System Users → Generate token). Temporary tokens also start with "EAA" but expire within 24 hours.`
+}
+
 export function getWhatsAppDisplayNumber(): string {
   return process.env.WHATSAPP_DISPLAY_NUMBER || ''
+}
+
+/**
+ * Language code used when a nudge does not specify one.
+ *
+ * Meta matches templates by name AND language exactly: a template approved as `en_US`
+ * will not send when the request asks for `en`, and the failure is
+ * 132001 "template name does not exist in the translation", which reads like the
+ * template is missing. Defaulting to this account's actual locale avoids that.
+ */
+export function getDefaultTemplateLanguage(): string {
+  return (process.env.WHATSAPP_TEMPLATE_LANGUAGE || 'en_US').trim() || 'en_US'
 }
 
 /** Normalize a raw phone to Meta's expected format: digits only with country code. */

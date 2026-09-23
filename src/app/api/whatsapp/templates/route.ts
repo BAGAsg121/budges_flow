@@ -17,12 +17,14 @@ import {
   type CreateTemplateInput,
   type TemplateCategory,
 } from '@/lib/whatsapp-templates'
+import { whatsAppConfigStatus, describeTokenProblem } from '@/lib/whatsapp'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
 
 export async function GET() {
   const result = await listTemplates()
+  const status = whatsAppConfigStatus()
   return NextResponse.json(
     {
       ok: result.ok,
@@ -30,6 +32,9 @@ export async function GET() {
       count: result.templates.length,
       templates: result.templates,
       error: result.error ?? null,
+      // Lets the UI explain a bad token instead of showing Meta's raw message.
+      configStatus: status,
+      configHint: describeTokenProblem(status),
     },
     { status: result.ok ? 200 : result.configured ? 502 : 400 }
   )

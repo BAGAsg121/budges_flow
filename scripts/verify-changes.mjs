@@ -110,13 +110,20 @@ const wa = byKey['whatsapp_sample']
 checkTrue('whatsapp_sample exists', Boolean(wa))
 check('whatsapp_sample is a whatsapp nudge', wa.channel, 'whatsapp')
 check('whatsapp_sample ships disabled', wa.enabled, false)
-check('whatsapp_sample has no template name (=> free-form text mode)', wa.whatsappTemplateName, null)
+check('whatsapp_sample uses the approved hello_world template', wa.whatsappTemplateName, 'hello_world')
+check('whatsapp_sample language matches the approved locale', wa.whatsappLanguage, 'en_US')
+check('whatsapp_sample passes no params (hello_world has none)', JSON.parse(wa.whatsappParams || '[]').length, 0)
 check('whatsapp_sample targets only the test-lead status', filtersOf('whatsapp_sample').includeStatuses[0], WHATSAPP_TEST_STATUS)
 check('whatsapp_sample targets exactly one status', filtersOf('whatsapp_sample').includeStatuses.length, 1)
 checkTrue('whatsapp_sample asks for a phone', filtersOf('whatsapp_sample').requirePhone === true)
 check('whatsapp_sample is capped at 1 message/lead', wa.maxEmailsPerLead, 1)
 checkTrue('whatsapp_sample body renders first_name', renderTemplate(wa.bodyTemplate, { first_name: 'Asha' }).includes('Hi Asha'))
 check('documents_pending_wa is the only other whatsapp nudge', DEFAULT_NUDGES.filter((n) => n.channel === 'whatsapp').length, 2)
+const waDocs = byKey['documents_pending_wa']
+check('documents_pending_wa template language is en_US (not en)', waDocs.whatsappLanguage, 'en_US')
+check('documents_pending_wa supplies 3 params for its 3 variables', JSON.parse(waDocs.whatsappParams).length, countTemplateVars(waDocs.bodyTemplate))
+checkTrue('no nudge ships with the bare "en" locale', !JSON.stringify(DEFAULT_NUDGES).includes('"whatsappLanguage":"en"'))
+checkTrue('no Infinito references remain in the nudge definitions', !JSON.stringify(DEFAULT_NUDGES).toLowerCase().includes('infinito'))
 
 // --- WhatsApp template builder ----------------------------------------------
 check('countTemplateVars counts the highest placeholder', countTemplateVars('Hi {{1}}, {{2}} and {{3}}'), 3)

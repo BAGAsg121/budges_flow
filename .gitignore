@@ -59,8 +59,11 @@ local-*
 *.log
 dev.log
 dev.out.log
-test
-prompt
+# Anchored to the repo root. As bare words these matched ANY path segment named
+# "test"/"prompt", which silently excluded src/app/api/whatsapp/test/ from every
+# commit — the route existed locally but was never deployed.
+/test
+/prompt
 
 
 server.log

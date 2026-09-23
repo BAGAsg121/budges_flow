@@ -70,8 +70,11 @@ npm start                   # node .next/standalone/server.js  (PORT env, defaul
 | SMTP | `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` | `SMTP_USER`/`SMTP_PASS` must be filled in to send |
 | Reply tracking | `IMAP_ENABLED`, `IMAP_HOST`, `IMAP_PORT`, `IMAP_SECURE`, `IMAP_USER`, `IMAP_PASS`, `IMAP_MAILBOX`, `IMAP_REPLY_LOOKBACK_DAYS`, `EMAIL_WEBHOOK_SECRET` | |
 | Tracking URL | `APP_BASE_URL`, `APP_HOST` | Empty → derived from the request |
-| WhatsApp (Meta) | `WHATSAPP_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_API_VERSION`, `WHATSAPP_DEFAULT_CC`, `WHATSAPP_DISPLAY_NUMBER`, `WHATSAPP_EMPTY_PARAM_FALLBACK` | |
-| Legacy n8n / Infinito | `NUDGE_LEGACY_*`, `INFINITO_*` | Preserved values, not used by this app |
+| WhatsApp (Meta) | `WHATSAPP_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_WABA_ID`, `WHATSAPP_APP_SECRET`, `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_API_VERSION`, `WHATSAPP_TEMPLATE_LANGUAGE`, `WHATSAPP_DEFAULT_CC`, `WHATSAPP_DISPLAY_NUMBER`, `WHATSAPP_EMPTY_PARAM_FALLBACK` | Sending, webhooks and template management all go directly to the Meta Cloud API |
+
+There is **no third-party WhatsApp provider in this app** — no Infinito, no n8n. Every send,
+every delivery/read receipt and every template operation talks to `graph.facebook.com`. The old
+Infinito credentials from the n8n workflow have been removed from `.env`.
 
 **Never commit `.env`.** All credentials live here, not in source or in `upload/`.
 
@@ -296,8 +299,25 @@ Same operations from the CLI, using the identical module the API route calls:
 ```bash
 npm run wa:templates                      # list with status flags
 npm run wa:templates -- --create-test     # create + delete a self-test template
+npm run wa:templates -- --create-missing  # create any template a WhatsApp nudge references but that does not exist
 npm run wa:templates -- --delete NAME --lang en_US
 ```
+
+`--create-missing` builds each template from the nudge's own **reference body**, so the nudge and the
+Meta template cannot drift apart. It skips anything that already exists and refuses to create a
+duplicate when the name exists in a different language (that is a language-mismatch bug, not a
+missing template).
+
+### Auditing the WhatsApp flows
+
+```bash
+npm run wa:flows
+```
+
+Read-only audit of every WhatsApp nudge against the live WABA. It reports whether each nudge's
+template exists, is approved, has a matching language, and whether the nudge's parameter count
+matches the template's variable count — the four ways a WhatsApp nudge silently fails to send.
+Exits non-zero when something needs attention.
 
 ### Verify it works
 

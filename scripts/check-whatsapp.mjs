@@ -29,7 +29,7 @@ const wantTemplateList = args.includes('--list-templates')
 // Meta matches templates by name AND language code exactly. A template approved as
 // `en_US` will NOT send when the request asks for `en` — it fails with error 132001,
 // which reads like the template is missing. Always check with --list-templates.
-const language = flagValue('--lang') || process.env.WHATSAPP_TEMPLATE_LANGUAGE || 'en'
+const language = flagValue('--lang') || process.env.WHATSAPP_TEMPLATE_LANGUAGE || 'en_US'
 
 // Positional args are everything that is not a flag and not a flag's value.
 const valueFlags = ['--template', '--lang']

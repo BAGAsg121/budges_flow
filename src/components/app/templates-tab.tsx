@@ -86,6 +86,7 @@ export function TemplatesTab({ refreshKey }: { refreshKey: number }) {
   const [configured, setConfigured] = useState(true)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [configHint, setConfigHint] = useState<string | null>(null)
 
   const [createOpen, setCreateOpen] = useState(false)
   const [form, setForm] = useState(emptyForm)
@@ -103,10 +104,17 @@ export function TemplatesTab({ refreshKey }: { refreshKey: number }) {
     setLoading(true)
     try {
       const res = await fetch('/api/whatsapp/templates')
-      const data = (await res.json()) as { ok: boolean; configured: boolean; templates: WaTemplate[]; error?: string }
+      const data = (await res.json()) as {
+        ok: boolean
+        configured: boolean
+        templates: WaTemplate[]
+        error?: string
+        configHint?: string | null
+      }
       setTemplates(data.templates || [])
       setConfigured(data.configured)
       setError(data.ok ? null : data.error || 'Could not load templates')
+      setConfigHint(data.configHint || null)
     } finally {
       setLoading(false)
     }
@@ -246,7 +254,10 @@ export function TemplatesTab({ refreshKey }: { refreshKey: number }) {
       {error && configured && (
         <div className="flex items-start gap-2 rounded-md border border-red-200 bg-red-50 p-3 text-xs text-red-900">
           <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
-          <span>{error}</span>
+          <div className="space-y-1">
+            <p className="font-medium">{error}</p>
+            {configHint && <p>{configHint}</p>}
+          </div>
         </div>
       )}
 

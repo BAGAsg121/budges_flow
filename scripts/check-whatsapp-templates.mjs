@@ -4,18 +4,25 @@
  *
  *   node --env-file=.env scripts/check-whatsapp-templates.mjs                     # list
  *   node --env-file=.env scripts/check-whatsapp-templates.mjs --create-test       # create + delete a self-test template
+ *   node --env-file=.env scripts/check-whatsapp-templates.mjs --create-missing    # create templates the WhatsApp nudges reference but that do not exist
  *   node --env-file=.env scripts/check-whatsapp-templates.mjs --delete <name> [--lang <code>]
  *
  * List is read-only. --create-test submits a clearly-named template to Meta and then
- * deletes it again, proving the create/delete round trip works.
+ * deletes it again, proving the create/delete round trip works. --create-missing uses each
+ * nudge's own `bodyTemplate` (the reference copy of the Meta template body) as the template
+ * BODY, so the nudge and the template cannot drift apart.
  */
+import { PrismaClient } from '@prisma/client'
 import {
   listTemplates,
   createTemplate,
   deleteTemplate,
   isTemplateApiConfigured,
   validateTemplateInput,
+  countTemplateVars,
 } from '../src/lib/whatsapp-templates.ts'
+
+const db = new PrismaClient()
 
 const args = process.argv.slice(2)
 function flagValue(name) {
@@ -24,6 +31,7 @@ function flagValue(name) {
 }
 
 const doCreateTest = args.includes('--create-test')
+const createMissing = args.includes('--create-missing')
 const deleteName = flagValue('--delete')
 const deleteLang = flagValue('--lang')
 
@@ -72,12 +80,84 @@ async function main() {
     console.log(result.ok ? `\n✅ Deleted ${deleteName}${deleteLang ? ` (${deleteLang})` : ''}` : `\n❌ Delete failed: ${result.error}`)
     if (!result.ok) process.exitCode = 1
     await showList()
+    await db.$disconnect()
     return
   }
 
   await showList()
 
-  if (!doCreateTest) return
+  // ---- create templates the nudges reference but that do not exist ---------
+  if (createMissing) {
+    console.log('\n--- create templates referenced by WhatsApp nudges ---')
+    const existing = new Set((await listTemplates()).templates.map((t) => `${t.name}|${t.language}`))
+    const nudges = await db.nudge.findMany({ where: { channel: 'whatsapp' }, orderBy: { createdAt: 'asc' } })
+    let created = 0
+
+    for (const n of nudges) {
+      const name = (n.whatsappTemplateName || '').trim()
+      const language = (n.whatsappLanguage || process.env.WHATSAPP_TEMPLATE_LANGUAGE || 'en_US').trim()
+      if (!name) {
+        console.log(`  ${n.key}: free-form text mode, no template needed`)
+        continue
+      }
+      if (existing.has(`${name}|${language}`)) {
+        console.log(`  ${n.key}: template "${name}" (${language}) already exists — skipped`)
+        continue
+      }
+
+      // Same names in other languages usually means a language mismatch, not a missing template
+      const otherLang = (await listTemplates()).templates.filter((t) => t.name === name)
+      if (otherLang.length) {
+        console.log(`  ${n.key}: "${name}" exists in ${otherLang.map((t) => t.language).join(', ')} but not ${language} — NOT creating a duplicate.`)
+        console.log(`      → fix the nudge's template language instead (Meta matches it exactly).`)
+        continue
+      }
+
+      const body = (n.bodyTemplate || '').trim()
+      if (!body) {
+        console.log(`  ${n.key}: no bodyTemplate to build a template from — skipped`)
+        continue
+      }
+      const vars = countTemplateVars(body)
+      const input = {
+        name,
+        language,
+        category: 'UTILITY',
+        bodyText: body,
+        footerText: null,
+        headerText: null,
+        buttonText: null,
+        buttonUrl: null,
+      }
+      const { errors, warnings } = validateTemplateInput(input)
+      if (errors.length) {
+        console.log(`  ${n.key}: local validation failed — ${errors.join('; ')}`)
+        continue
+      }
+      if (warnings.length) console.log(`  ${n.key}: warnings — ${warnings.join(' ')}`)
+
+      const result = await createTemplate(input)
+      if (result.ok) {
+        created++
+        console.log(`  ✅ ${n.key}: created "${name}" (${language}) with ${vars} variable(s) → status ${result.status}`)
+      } else {
+        console.log(`  ❌ ${n.key}: create failed — ${result.error}`)
+      }
+    }
+    console.log(
+      created
+        ? `\n${created} template(s) submitted. They show as PENDING until Meta approves them — check back with \`npm run wa:templates\`.`
+        : '\nNothing to create.'
+    )
+    await showList()
+    await db.$disconnect()
+    return
+  }
+
+  if (!doCreateTest) {
+    await db.$disconnect()
+    return
+  }
 
   // ---- create + delete round trip ------------------------------------------
   console.log('\n--- create/delete self-test ---')

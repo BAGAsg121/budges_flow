@@ -8,7 +8,7 @@ import { randomUUID } from 'crypto'
 import { db } from '@/lib/db'
 import { searchAllLeads, mapZohoLead } from '@/lib/zoho'
 import { sendEmail, isMailerConfigured } from '@/lib/mailer'
-import { sendWhatsAppTemplate, sendWhatsAppText, isWhatsAppConfigured, normalizePhone } from '@/lib/whatsapp'
+import { sendWhatsAppTemplate, sendWhatsAppText, isWhatsAppConfigured, normalizePhone, getDefaultTemplateLanguage } from '@/lib/whatsapp'
 import { renderTemplate, injectTrackingPixel, htmlToText } from '@/lib/template'
 
 export type Channel = 'email' | 'whatsapp'
@@ -357,7 +357,7 @@ export async function runNudge(
         ? await sendWhatsAppTemplate({
             to: toPhone,
             templateName,
-            language: nudge.whatsappLanguage || 'en',
+            language: nudge.whatsappLanguage || getDefaultTemplateLanguage(),
             params: buildWhatsAppParams(nudge.whatsappParams, vars),
           })
         : await sendWhatsAppText({

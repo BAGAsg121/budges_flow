@@ -190,18 +190,19 @@ export const DEFAULT_NUDGES: NudgeSeed[] = [
     key: 'whatsapp_sample',
     name: 'WhatsApp test message (sample)',
     description:
-      'SAMPLE / integration check. Sends a plain-text WhatsApp message (no approved template needed). It is DISABLED by default and only ever targets leads whose status is exactly "WhatsApp Test" — i.e. the test lead created by scripts/create-test-lead.mjs. It therefore cannot message a real lead. Enable it and click Run to send a single test message. The quickest check with an arbitrary number is POST /api/whatsapp/test instead.',
+      'SAMPLE / integration check, wired to the approved "hello_world" template so it exercises the REAL Meta template path end to end (nudge → template → delivery receipt). DISABLED by default, and it only ever targets leads whose status is exactly "WhatsApp Test" — the test lead from scripts/create-test-lead.mjs — so it cannot reach a real lead. Enable it and click Run. Clear the template name to switch it to free-form text instead, which Meta only allows inside the 24h customer-service window. Attach a different approved template from the Templates tab.',
     enabled: false,
     channel: 'whatsapp',
     zohoCriteria: ZOHO_CRITERIA,
     // Only the test lead. Never widen this without checking who it would reach.
     filters: json({ requirePhone: true, includeStatuses: [WHATSAPP_TEST_STATUS] }),
-    // No whatsappTemplateName -> the sender falls back to free-form text.
+    // Reference copy of the free-form body (used only if the template name is cleared).
     bodyTemplate:
       'Hi {{first_name}}, this is a test message from the Eko Nudge Engine. If you received this, the WhatsApp integration is working. Reply to this message to confirm.',
-    whatsappTemplateName: null,
-    whatsappLanguage: 'en',
-    whatsappParams: null,
+    // The one template currently APPROVED on this WABA. hello_world takes no variables.
+    whatsappTemplateName: 'hello_world',
+    whatsappLanguage: 'en_US',
+    whatsappParams: json([]),
     maxEmailsPerLead: 1,
     followUpDays: 0,
   },
@@ -209,7 +210,7 @@ export const DEFAULT_NUDGES: NudgeSeed[] = [
     key: 'documents_pending_wa',
     name: 'Documents Pending (WhatsApp)',
     description:
-      'WhatsApp twin of the documents-pending nudge, delivered via Meta Cloud API. Disabled until the Meta number and template are approved.',
+      'WhatsApp twin of the documents-pending nudge, delivered via the Meta Cloud API. DISABLED until you create and approve the template. To go live: open the Templates tab, create a UTILITY template named "documents_pending_reminder" in language en_US with the body below, wait for approval, then enable this nudge. Its parameters are sent positionally as {{1}}={{first_name}}, {{2}}={{company}}, {{3}}={{kyc_document_upload_count}}. Template body: "Hi {{1}}, your KYC document upload for {{2}} is still pending ({{3}} document(s) uploaded). Please complete it to keep your onboarding moving. - Eko Onboarding Team"',
     enabled: false,
     channel: 'whatsapp',
     zohoCriteria: ZOHO_CRITERIA,
@@ -221,7 +222,8 @@ export const DEFAULT_NUDGES: NudgeSeed[] = [
     bodyTemplate:
       'Hi {{1}}, your KYC document upload for {{2}} is still pending ({{3}} document(s) uploaded). Please complete it to keep your onboarding moving. - Eko Onboarding Team',
     whatsappTemplateName: 'documents_pending_reminder',
-    whatsappLanguage: 'en',
+    // Must match the approved template exactly — "en" and "en_US" are different locales.
+    whatsappLanguage: 'en_US',
     whatsappParams: json(['first_name', 'company', 'kyc_document_upload_count']),
     maxEmailsPerLead: 3,
     followUpDays: 2,

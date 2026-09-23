@@ -5,6 +5,7 @@
  */
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
+import { getDefaultTemplateLanguage } from '@/lib/whatsapp'
 
 export const dynamic = 'force-dynamic'
 
@@ -62,7 +63,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     if (body.subjectTemplate !== undefined) data.subjectTemplate = body.subjectTemplate?.trim() || null
     if (body.bodyTemplate !== undefined) data.bodyTemplate = body.bodyTemplate?.trim() || null
     if (body.whatsappTemplateName !== undefined) data.whatsappTemplateName = body.whatsappTemplateName?.trim() || null
-    if (body.whatsappLanguage !== undefined) data.whatsappLanguage = body.whatsappLanguage?.trim() || 'en'
+    if (body.whatsappLanguage !== undefined) data.whatsappLanguage = body.whatsappLanguage?.trim() || getDefaultTemplateLanguage()
     if (body.whatsappParams !== undefined) data.whatsappParams = body.whatsappParams?.trim() || '[]'
     if (body.maxEmailsPerLead !== undefined) data.maxEmailsPerLead = Math.max(1, Number(body.maxEmailsPerLead) || 1)
     if (body.followUpDays !== undefined) data.followUpDays = Math.max(0, Number(body.followUpDays) || 0)

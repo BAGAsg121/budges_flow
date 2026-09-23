@@ -9,6 +9,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { DEFAULT_NUDGES } from '@/lib/nudge-defaults'
+import { getDefaultTemplateLanguage } from '@/lib/whatsapp'
 
 export const dynamic = 'force-dynamic'
 
@@ -124,7 +125,7 @@ export async function POST(req: NextRequest) {
         subjectTemplate: channel === 'email' ? body.subjectTemplate : null,
         bodyTemplate: body.bodyTemplate?.trim() || null,
         whatsappTemplateName: channel === 'whatsapp' ? body.whatsappTemplateName?.trim() : null,
-        whatsappLanguage: channel === 'whatsapp' ? body.whatsappLanguage?.trim() || 'en' : null,
+        whatsappLanguage: channel === 'whatsapp' ? body.whatsappLanguage?.trim() || getDefaultTemplateLanguage() : null,
         whatsappParams: channel === 'whatsapp' ? body.whatsappParams?.trim() || '[]' : null,
         maxEmailsPerLead: Number(body.maxEmailsPerLead) > 0 ? Number(body.maxEmailsPerLead) : 1,
         followUpDays: Number(body.followUpDays) > 0 ? Number(body.followUpDays) : 0,

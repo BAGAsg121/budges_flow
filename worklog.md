@@ -303,3 +303,44 @@ Work Log:
 Stage Summary:
 - Templates can now be added, reviewed and attached entirely inside the app; approval stays Meta-side and asynchronous, and the tab is where you watch it flip to Approved.
 - No more copying template names between Meta and the app by hand, and the en/en_US class of failure is surfaced in both the form and the CLI.
+
+---
+
+Task ID: 14
+Agent: Main agent (DeepSeek Harness)
+Task: Audit every WhatsApp flow, remove the Infinito configuration, and connect the WhatsApp nudges to Meta.
+
+Work Log:
+- AUDIT: grepped the whole project for Infinito/goinfinito/NUDGE_LEGACY. Result — NO application code ever referenced Infinito. It existed only as dead config in .env and .env.example, one README table row, and historical mentions in worklog.md and the redacted n8n paste. All five WhatsApp code paths (src/lib/whatsapp.ts, /api/track/whatsapp, /api/whatsapp/test, /api/whatsapp/templates, the whatsapp branch of nudge-engine) already talk to graph.facebook.com and nothing else.
+- Removed from .env and .env.example: the whole INFINITO_* block including the API key, plus the equally-dead NUDGE_LEGACY_* n8n parity values (nothing read them either). README now states there is no third-party WhatsApp provider in the app.
+- Root-caused the en/en_US trap at its source: the fallback language was hardcoded as 'en' in three places (nudge-engine, POST /api/nudges, PATCH /api/nudges/[id]). Added getDefaultTemplateLanguage() reading the new WHATSAPP_TEMPLATE_LANGUAGE env var (default en_US) and used it in all three, so a nudge that omits a language now defaults to the locale this account actually uses instead of one that guarantees 132001.
+- Re-pointed the WhatsApp nudges at the live Meta config:
+  * whatsapp_sample: now uses the APPROVED hello_world template (en_US, 0 params) so it exercises the real template path end to end — nudge → template → delivery receipt. Clearing its template name switches it back to free-form text. Still disabled and still scoped to only the "WhatsApp Test" lead.
+  * documents_pending_wa: language corrected en → en_US, and its description now spells out exactly what to create and how the three parameters map.
+- New scripts/check-whatsapp-flows.mjs + `npm run wa:flows` — a read-only audit of every WhatsApp nudge against the live WABA, checking the four ways these silently fail: template missing, not approved, language mismatch, and parameter-count mismatch (plus blank parameters that would shift the positional mapping). Exits non-zero when anything needs attention.
+- New `--create-missing` mode on check-whatsapp-templates.mjs: creates any template a WhatsApp nudge references but that does not exist, building the BODY from the nudge's own reference bodyTemplate so the two cannot drift apart. It skips existing templates and refuses to create a duplicate when the name exists in a different language (that is a mismatch bug, not a missing template).
+- RAN IT: created `documents_pending_reminder` (en_US, UTILITY, 3 variables) from the nudge body → status PENDING. Re-ran the audit: every WhatsApp flow now verified — whatsapp_sample APPROVED with 0/0 params, documents_pending_wa PENDING with 3/3 params matching, audit exits 0.
+- verify-changes.mjs now 85 assertions (added the WhatsApp wiring checks: hello_world attached, en_US locale, param/variable parity, no nudge using bare "en", no Infinito left). tsc clean, eslint clean.
+
+Stage Summary:
+- The app is Meta-only for WhatsApp: sending, templating, webhooks and template management all go to graph.facebook.com.
+- Both WhatsApp nudges are correctly wired. documents_pending_wa becomes sendable the moment Meta approves the submitted template.
+- Scheduler remains PAUSED (all nudges off).
+
+---
+
+Task ID: 15
+Agent: Main agent (DeepSeek Harness)
+Task: Diagnose the Templates tab error on the deployed app.
+
+Work Log:
+- Probed the live deployment with the app password. GET /api/whatsapp/templates returns 502 with `configured: true` and Meta's `Invalid OAuth access token - Cannot parse access token (code 190)`. Because `configured` is true, BOTH WHATSAPP_TOKEN and WHATSAPP_WABA_ID are set in Render — but the token value is malformed. "Cannot parse access token" is the malformed-token error (distinct from an expired session), and the exact message obtained earlier when the 32-character App Secret was used as a bearer token. So Render's WHATSAPP_TOKEN is almost certainly the App Secret rather than a System User token.
+- Second, separate finding: GET /api/whatsapp/test returns 404 on the deployment even though it exists locally. `git ls-files src/app/api/whatsapp` showed only templates/route.ts was ever tracked. Root cause: .gitignore line 62 was a bare `test`, a scaffold leftover. A bare pattern matches ANY path segment of that name, so `src/app/api/whatsapp/test/route.ts` was silently excluded from every commit since it was created in Task 8 — the file existed locally and worked locally, but was never deployed. `git check-ignore -v` confirmed `.gitignore:62:test`.
+- Fixed by anchoring the two scaffold rules to the repository root (`/test`, `/prompt`) with a comment explaining the trap. Re-ran check-ignore (no longer ignored) and `git ls-files --others --ignored --exclude-standard -- src scripts` to prove no OTHER source file is being silently excluded — that was the only casualty.
+- Made the app explain this class of failure instead of surfacing Meta's raw message: whatsAppConfigStatus() now also reports tokenLength, wabaIdPresent and templateLanguage, plus a new describeTokenProblem() that names the 32-character App Secret case specifically ("that is the Meta App Secret, not an access token"). GET /api/whatsapp/templates returns configStatus + configHint, and the Templates tab renders the hint under the error.
+- Discovered the deployment is therefore a partial build: endpoints for Tasks 4/5/13 are live (health, scheduler, db health, templates) but the Task 8 route never shipped. Fixed at the source rather than by adding another workaround.
+- 85 assertions still pass; tsc clean; eslint clean.
+
+Stage Summary:
+- Two independent causes for what looked like one bug: a wrong token in Render, and a .gitignore rule that had been silently dropping a route from every commit.
+- User actions: (1) replace WHATSAPP_TOKEN in Render with the permanent System User token; (2) commit — src/app/api/whatsapp/test/ now shows as untracked and will be included; (3) add the remaining WhatsApp env vars (WABA id, template language, app secret, verify token) to Render.

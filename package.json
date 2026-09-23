@@ -18,6 +18,7 @@
     "wa:check": "node --env-file=.env scripts/check-whatsapp.mjs",
     "wa:webhook": "node --env-file=.env scripts/check-whatsapp-webhook.mjs",
     "wa:templates": "node --env-file=.env scripts/check-whatsapp-templates.mjs",
+    "wa:flows": "node --env-file=.env scripts/check-whatsapp-flows.mjs",
     "postinstall": "prisma generate",
     "db:push": "node scripts/refuse-schema-push.mjs",
     "db:push:force": "node scripts/refuse-schema-push.mjs",
