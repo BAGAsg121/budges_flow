@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import {
-  RefreshCw, Plus, Loader2, AlertCircle, CheckCircle2, Clock, XCircle, Trash2, Send, Info, Copy, Check,
+  RefreshCw, Plus, Loader2, AlertCircle, CheckCircle2, Clock, XCircle, Trash2, Send, Info, Copy, Check, Pencil, Mail,
 } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -25,7 +25,12 @@ interface WaTemplate {
   language: string
   category: string
   rejected_reason?: string | null
-  components?: { type?: string; text?: string; format?: string }[]
+  components?: {
+    type?: string
+    text?: string
+    format?: string
+    buttons?: { type?: string; text?: string; url?: string }[]
+  }[]
 }
 
 const CATEGORIES = ['UTILITY', 'MARKETING', 'AUTHENTICATION']
@@ -39,6 +44,24 @@ const emptyForm = {
   footerText: 'Eko Onboarding Team',
   buttonText: '',
   buttonUrl: '',
+}
+
+/** Pull the editable fields back out of a Meta template definition. */
+function formFromTemplate(t: WaTemplate) {
+  const header = t.components?.find((c) => c.type === 'HEADER')
+  const body = t.components?.find((c) => c.type === 'BODY')
+  const footer = t.components?.find((c) => c.type === 'FOOTER')
+  const button = t.components?.find((c) => c.type === 'BUTTONS')?.buttons?.find((b) => b.type === 'URL')
+  return {
+    name: t.name,
+    language: t.language,
+    category: t.category || 'UTILITY',
+    headerText: header?.text || '',
+    bodyText: body?.text || '',
+    footerText: footer?.text || '',
+    buttonText: button?.text || '',
+    buttonUrl: button?.url || '',
+  }
 }
 
 function StatusBadge({ t }: { t: WaTemplate }) {
@@ -80,7 +103,14 @@ function StatusBadge({ t }: { t: WaTemplate }) {
   )
 }
 
-export function TemplatesTab({ refreshKey }: { refreshKey: number }) {
+export function TemplatesTab({
+  refreshKey,
+  onEditNudge,
+}: {
+  refreshKey: number
+  /** Jump to the Nudges tab with that nudge's editor open (email templates live there). */
+  onEditNudge: (nudgeId: string) => void
+}) {
   const { toast } = useToast()
   const [templates, setTemplates] = useState<WaTemplate[]>([])
   const [configured, setConfigured] = useState(true)
@@ -89,9 +119,11 @@ export function TemplatesTab({ refreshKey }: { refreshKey: number }) {
   const [configHint, setConfigHint] = useState<string | null>(null)
 
   const [createOpen, setCreateOpen] = useState(false)
+  const [editing, setEditing] = useState<WaTemplate | null>(null)
   const [form, setForm] = useState(emptyForm)
   const [saving, setSaving] = useState(false)
   const [formErrors, setFormErrors] = useState<string[]>([])
+  const [needsReplace, setNeedsReplace] = useState(false)
 
   const [applyTarget, setApplyTarget] = useState<WaTemplate | null>(null)
   const [nudges, setNudges] = useState<NudgeDto[]>([])
@@ -99,6 +131,9 @@ export function TemplatesTab({ refreshKey }: { refreshKey: number }) {
   const [applying, setApplying] = useState(false)
 
   const [copied, setCopied] = useState<string | null>(null)
+
+  /** Email nudges carry their own subject/body — there is no Meta-side email registry. */
+  const emailNudges = nudges.filter((n) => n.channel === 'email')
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -134,26 +169,80 @@ export function TemplatesTab({ refreshKey }: { refreshKey: number }) {
   const create = async () => {
     setSaving(true)
     setFormErrors([])
+    setNeedsReplace(false)
     try {
+      const isEdit = Boolean(editing)
       const res = await fetch('/api/whatsapp/templates', {
-        method: 'POST',
+        method: isEdit ? 'PATCH' : 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(form),
+        body: JSON.stringify(isEdit ? { ...form, id: editing?.id } : form),
       })
-      const data = (await res.json()) as { ok: boolean; error?: string; errors?: string[]; warnings?: string[]; message?: string }
+      const data = (await res.json()) as {
+        ok: boolean
+        error?: string
+        errors?: string[]
+        warnings?: string[]
+        message?: string
+        needsReplace?: boolean
+      }
       if (!data.ok) {
-        setFormErrors(data.errors?.length ? data.errors : [data.error || 'Could not create the template'])
-        toast({ title: 'Template rejected by Meta', description: data.error, variant: 'destructive' })
+        setFormErrors(data.errors?.length ? data.errors : [data.error || 'Could not save the template'])
+        setNeedsReplace(Boolean(data.needsReplace))
+        toast({ title: isEdit ? 'Update rejected' : 'Template rejected by Meta', description: data.error, variant: 'destructive' })
         return
       }
-      toast({ title: 'Template submitted', description: data.message || 'Waiting for Meta review.' })
+      toast({ title: isEdit ? 'Template updated' : 'Template submitted', description: data.message || 'Waiting for Meta review.' })
       if (data.warnings?.length) toast({ title: 'Heads up', description: data.warnings.join(' ') })
       setCreateOpen(false)
+      setEditing(null)
       setForm(emptyForm)
       load()
     } finally {
       setSaving(false)
     }
+  }
+
+  /** Explicit delete + re-create, for a template Meta has locked while in review. */
+  const replace = async () => {
+    if (!editing) return
+    const ok = confirm(
+      `Meta locks a template while it is in review, so "${editing.name}" cannot be edited directly.\n\n` +
+        `Replace it? The current template will be DELETED and a new one created with the same name. ` +
+        `Meta can take up to a couple of minutes to release the name, so this request may be slow.`
+    )
+    if (!ok) return
+
+    setSaving(true)
+    setFormErrors([])
+    try {
+      const res = await fetch('/api/whatsapp/templates', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...form, id: editing.id, mode: 'replace' }),
+      })
+      const data = (await res.json()) as { ok: boolean; error?: string; message?: string }
+      if (!data.ok) {
+        setFormErrors([data.error || 'Replace failed'])
+        toast({ title: 'Replace failed', description: data.error, variant: 'destructive' })
+        return
+      }
+      toast({ title: 'Template replaced', description: data.message })
+      setCreateOpen(false)
+      setEditing(null)
+      setForm(emptyForm)
+      setNeedsReplace(false)
+      load()
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const openEdit = (t: WaTemplate) => {
+    setEditing(t)
+    setForm(formFromTemplate(t))
+    setFormErrors([])
+    setNeedsReplace(false)
+    setCreateOpen(true)
   }
 
   const remove = async (t: WaTemplate) => {
@@ -232,7 +321,17 @@ export function TemplatesTab({ refreshKey }: { refreshKey: number }) {
             {loading ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <RefreshCw className="h-4 w-4 mr-1" />}
             Refresh status
           </Button>
-          <Button size="sm" onClick={() => { setForm(emptyForm); setFormErrors([]); setCreateOpen(true) }} disabled={!configured}>
+          <Button
+            size="sm"
+            onClick={() => {
+              setEditing(null)
+              setForm(emptyForm)
+              setFormErrors([])
+              setNeedsReplace(false)
+              setCreateOpen(true)
+            }}
+            disabled={!configured}
+          >
             <Plus className="h-4 w-4 mr-1" /> New template
           </Button>
         </div>
@@ -319,6 +418,9 @@ export function TemplatesTab({ refreshKey }: { refreshKey: number }) {
                             >
                               {copied === t.name ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
                             </Button>
+                            <Button size="sm" variant="outline" onClick={() => openEdit(t)}>
+                              <Pencil className="h-4 w-4 mr-1" /> Edit
+                            </Button>
                             <Button size="sm" variant="outline" disabled={!isApproved} onClick={() => openApply(t)}>
                               <Send className="h-4 w-4 mr-1" /> Use in nudge
                             </Button>
@@ -341,14 +443,112 @@ export function TemplatesTab({ refreshKey }: { refreshKey: number }) {
         </CardContent>
       </Card>
 
+      {/* Email templates — these live in the nudge rows, not at Meta, so there is no
+          approval step and no separate registry to keep in sync. */}
+      <Card>
+        <CardContent className="p-4 sm:p-6 space-y-3">
+          <div>
+            <h3 className="text-sm font-medium flex items-center gap-2">
+              <Mail className="h-4 w-4 text-muted-foreground" /> Email templates
+            </h3>
+            <p className="text-xs text-muted-foreground">
+              Email has no external registry — a template <i>is</i> the nudge&apos;s subject and body, so these are
+              edited through the nudge itself. {emailNudges.length} email nudge(s) configured.
+            </p>
+          </div>
+
+          <div className="max-h-80 overflow-y-auto rounded-md border">
+            <Table>
+              <TableHeader className="sticky top-0 bg-background">
+                <TableRow>
+                  <TableHead>Nudge</TableHead>
+                  <TableHead>Subject</TableHead>
+                  <TableHead className="hidden lg:table-cell">Body preview</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead className="text-right">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {emailNudges.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={5} className="text-center text-muted-foreground py-8">
+                      No email nudges configured.
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  emailNudges.map((n) => (
+                    <TableRow key={n.id}>
+                      <TableCell>
+                        <p className="font-medium text-sm">{n.name}</p>
+                        <p className="font-mono text-xs text-muted-foreground">{n.key}</p>
+                      </TableCell>
+                      <TableCell className="max-w-64 truncate text-xs">
+                        {n.subjectTemplate ? (
+                          n.subjectTemplate
+                        ) : (
+                          <span className="text-destructive">no subject set</span>
+                        )}
+                      </TableCell>
+                      <TableCell className="hidden lg:table-cell max-w-72 truncate text-xs text-muted-foreground">
+                        {n.bodyTemplate ? n.bodyTemplate.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 110) : '—'}
+                      </TableCell>
+                      <TableCell>
+                        {n.subjectTemplate && n.bodyTemplate ? (
+                          <Badge className="bg-emerald-600 hover:bg-emerald-600 gap-1">
+                            <CheckCircle2 className="h-3 w-3" /> ready
+                          </Badge>
+                        ) : (
+                          <Badge variant="destructive" className="gap-1">
+                            <XCircle className="h-3 w-3" /> incomplete
+                          </Badge>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex justify-end gap-1">
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            title="Copy subject"
+                            disabled={!n.subjectTemplate}
+                            onClick={() => copy(n.subjectTemplate || '')}
+                          >
+                            {copied === n.subjectTemplate ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                          </Button>
+                          <Button size="sm" variant="outline" onClick={() => onEditNudge(n.id)}>
+                            <Pencil className="h-4 w-4 mr-1" /> Edit
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))
+                )}
+              </TableBody>
+            </Table>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            <b>Edit</b> opens this nudge&apos;s editor on the Nudges tab, where the subject and body live. Email needs no
+            approval, so changes take effect on the next run.
+          </p>
+        </CardContent>
+      </Card>
+
       {/* Create dialog */}
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
         <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>New WhatsApp template</DialogTitle>
+            <DialogTitle>{editing ? `Edit “${editing.name}”` : 'New WhatsApp template'}</DialogTitle>
             <DialogDescription>
-              Submitted to Meta for approval. Variables use positional placeholders: <code>{'{{1}}'}</code>,{' '}
-              <code>{'{{2}}'}</code>… which map to the nudge&apos;s template parameters.
+              {editing ? (
+                <>
+                  Editing an existing template puts it back into review — it shows as <b>Pending</b> until Meta
+                  re-approves it. The name and language identify the template and cannot be changed.
+                </>
+              ) : (
+                <>
+                  Submitted to Meta for approval. Variables use positional placeholders: <code>{'{{1}}'}</code>,{' '}
+                  <code>{'{{2}}'}</code>… which map to the nudge&apos;s template parameters.
+                </>
+              )}
             </DialogDescription>
           </DialogHeader>
 
@@ -360,16 +560,19 @@ export function TemplatesTab({ refreshKey }: { refreshKey: number }) {
                   id="t-name"
                   className="font-mono text-xs"
                   value={form.name}
+                  disabled={Boolean(editing)}
                   onChange={(e) => setForm({ ...form, name: e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, '_') })}
                   placeholder="documents_pending_reminder"
                 />
-                <p className="text-xs text-muted-foreground">lowercase, digits, underscores only</p>
+                <p className="text-xs text-muted-foreground">
+                  {editing ? 'immutable — Meta identifies the template by name' : 'lowercase, digits, underscores only'}
+                </p>
               </div>
               <div className="grid gap-1.5">
                 <Label htmlFor="t-lang">Language</Label>
-                <Input id="t-lang" className="font-mono text-xs" value={form.language} onChange={(e) => setForm({ ...form, language: e.target.value })} placeholder="en_US" />
+                <Input id="t-lang" className="font-mono text-xs" value={form.language} disabled={Boolean(editing)} onChange={(e) => setForm({ ...form, language: e.target.value })} placeholder="en_US" />
                 <p className="text-xs text-muted-foreground">
-                  must match exactly when sending — <code>en</code> ≠ <code>en_US</code>
+                  {editing ? 'immutable' : <>must match exactly when sending — <code>en</code> ≠ <code>en_US</code></>}
                 </p>
               </div>
               <div className="grid gap-1.5">
@@ -442,14 +645,27 @@ export function TemplatesTab({ refreshKey }: { refreshKey: number }) {
                     <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" /> {e}
                   </p>
                 ))}
+                {needsReplace && (
+                  <p className="pt-1">
+                    <button type="button" className="underline font-medium" onClick={replace} disabled={saving}>
+                      Replace it now (delete + re-create with the same name)
+                    </button>
+                  </p>
+                )}
               </div>
             )}
           </div>
 
           <DialogFooter>
-            <Button variant="outline" onClick={() => setCreateOpen(false)}>Cancel</Button>
+            <Button variant="outline" onClick={() => { setCreateOpen(false); setEditing(null) }}>Cancel</Button>
             <Button onClick={create} disabled={saving || !form.name.trim() || !form.bodyText.trim()}>
-              {saving ? <><Loader2 className="h-4 w-4 mr-1.5 animate-spin" />Submitting…</> : 'Submit for approval'}
+              {saving ? (
+                <><Loader2 className="h-4 w-4 mr-1.5 animate-spin" />{editing ? 'Saving…' : 'Submitting…'}</>
+              ) : editing ? (
+                'Save changes'
+              ) : (
+                'Submit for approval'
+              )}
             </Button>
           </DialogFooter>
         </DialogContent>

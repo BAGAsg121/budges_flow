@@ -24,13 +24,16 @@ for (const seed of DEFAULT_NUDGES) {
 
   if (!existing) {
     await db.nudge.create({ data: seed })
-    console.log(`created   ${seed.key}  (${seed.channel}, enabled=${seed.enabled})`)
+    console.log(`created   ${seed.key}  (${seed.channel}, seeded ${seed.enabled ? 'ENABLED' : 'disabled'})`)
   } else if (force) {
-    const { key, ...rest } = seed
+    // `enabled` is OPERATOR STATE, not template configuration. Refreshing the copy must
+    // never switch a nudge back on — that is exactly how a paused nudge kept re-enabling
+    // itself every time this script ran with --force.
+    const { key, enabled, ...rest } = seed
     await db.nudge.update({ where: { key }, data: rest })
-    console.log(`updated   ${seed.key}  (--force)`)
+    console.log(`updated   ${seed.key}  (--force; enabled left ${existing.enabled ? 'ON' : 'off'} as-is)`)
   } else {
-    console.log(`exists    ${seed.key}  (left untouched — use --force to refresh)`)
+    console.log(`exists    ${seed.key}  (left untouched — use --force to refresh the copy)`)
   }
 }
 

@@ -16,6 +16,14 @@ export default function Home() {
   const [refreshKey, setRefreshKey] = useState(0)
   const [syncing, setSyncing] = useState(false)
   const [lastSync, setLastSync] = useState<string | null>(null)
+  const [tab, setTab] = useState('dashboard')
+  // Set when the Templates tab asks to edit an email template: switch to Nudges and open it.
+  const [nudgeToEdit, setNudgeToEdit] = useState<string | null>(null)
+
+  const openNudgeEditor = useCallback((nudgeId: string) => {
+    setNudgeToEdit(nudgeId)
+    setTab('nudges')
+  }, [])
 
   const syncZoho = useCallback(async () => {
     setSyncing(true)
@@ -69,7 +77,7 @@ export default function Home() {
       </header>
 
       <main className="flex-1 max-w-7xl mx-auto w-full px-4 sm:px-6 py-6">
-        <Tabs defaultValue="dashboard" className="w-full">
+        <Tabs value={tab} onValueChange={setTab} className="w-full">
           <TabsList className="mb-4">
             <TabsTrigger value="dashboard">Dashboard</TabsTrigger>
             <TabsTrigger value="leads">Leads</TabsTrigger>
@@ -79,8 +87,17 @@ export default function Home() {
           </TabsList>
           <TabsContent value="dashboard"><DashboardTab refreshKey={refreshKey} /></TabsContent>
           <TabsContent value="leads"><LeadsTab refreshKey={refreshKey} /></TabsContent>
-          <TabsContent value="nudges"><NudgesTab refreshKey={refreshKey} onChanged={() => setRefreshKey((k) => k + 1)} /></TabsContent>
-          <TabsContent value="templates"><TemplatesTab refreshKey={refreshKey} /></TabsContent>
+          <TabsContent value="nudges">
+            <NudgesTab
+              refreshKey={refreshKey}
+              onChanged={() => setRefreshKey((k) => k + 1)}
+              openNudgeId={nudgeToEdit}
+              onOpenedNudge={() => setNudgeToEdit(null)}
+            />
+          </TabsContent>
+          <TabsContent value="templates">
+            <TemplatesTab refreshKey={refreshKey} onEditNudge={openNudgeEditor} />
+          </TabsContent>
           <TabsContent value="logs"><LogsTab refreshKey={refreshKey} /></TabsContent>
         </Tabs>
       </main>

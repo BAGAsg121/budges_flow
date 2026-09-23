@@ -91,7 +91,10 @@ export interface MysqlFlowTemplate {
 
 export const MYSQL_FLOW_TEMPLATES: Record<string, MysqlFlowTemplate> = {
   csp_details_pending: {
-    templateName: 'csp_details_pending',
+    // NOTE: named `_reminder` rather than `csp_details_pending` because Meta holds a
+    // deleted template's name for a long time (error 2388023), and the original name was
+    // consumed while probing the edit endpoint. The flow key is unchanged.
+    templateName: 'csp_details_pending_reminder',
     title: 'Application Details Pending',
     body:
       'Hi 👋 Your Eko partner application is almost complete. We just need a few more details from you:\n' +

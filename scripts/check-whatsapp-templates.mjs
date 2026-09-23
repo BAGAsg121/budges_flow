@@ -16,6 +16,7 @@ import { PrismaClient } from '@prisma/client'
 import {
   listTemplates,
   createTemplate,
+  editTemplate,
   deleteTemplate,
   isTemplateApiConfigured,
   validateTemplateInput,
@@ -86,6 +87,10 @@ async function showList() {
       `      ${header ? 'header, ' : ''}body ${vars} var(s)${buttonText ? `  ·  button: ${buttonText}` : '  ·  no button'}`
     )
     if (t.rejected_reason && t.rejected_reason !== 'NONE') console.log(`      rejected: ${t.rejected_reason}`)
+    if (args.includes('--verbose') && body?.text) {
+      const preview = body.text.length > 160 ? `${body.text.slice(0, 160)}…` : body.text
+      console.log(`      body: ${preview.replace(/\n/g, ' ⏎ ')}`)
+    }
   }
   const approved = result.templates.filter((t) => t.status === 'APPROVED')
   console.log(`\n${approved.length} approved and ready to attach to a nudge.`)
@@ -185,6 +190,50 @@ async function main() {
         ? `\n${created} template(s) submitted. They show as PENDING until Meta approves them — check back with \`npm run wa:templates\`.`
         : '\nNothing to create.'
     )
+    await showList()
+    await db.$disconnect()
+    return
+  }
+
+  // ---- resync existing templates back to the curated copy -------------------
+  // Only edits where the content actually DIFFERS, so approved templates are untouched.
+  if (args.includes('--resync')) {
+    console.log('\n--- resync templates to the curated copy ---')
+    const current = await listTemplates()
+    let edited = 0
+    for (const t of current.templates) {
+      const spec = templateSpecFor(t.name)
+      if (!spec) continue
+
+      const body = (t.components || []).find((c) => c.type === 'BODY')?.text || ''
+      const button = ((t.components || []).find((c) => c.type === 'BUTTONS')?.buttons || []).find((b) => b.type === 'URL')
+      const bodyMatches = body.trim() === spec.body.trim()
+      const buttonMatches =
+        (button?.url || null) === (spec.buttonUrl || null) && (button?.text || null) === (spec.buttonText || null)
+
+      if (bodyMatches && buttonMatches) {
+        console.log(`  ${t.name}: already matches — skipped`)
+        continue
+      }
+
+      const result = await editTemplate(t.id, {
+        name: t.name,
+        language: t.language,
+        category: 'UTILITY',
+        bodyText: spec.body,
+        headerText: null,
+        footerText: null,
+        buttonText: spec.buttonText,
+        buttonUrl: spec.buttonUrl,
+      })
+      if (result.ok) {
+        edited++
+        console.log(`  ✅ ${t.name}: resynced (${bodyMatches ? 'button only' : 'body'}) → ${result.status}`)
+      } else {
+        console.log(`  ❌ ${t.name}: ${result.error}`)
+      }
+    }
+    console.log(edited ? `\n${edited} template(s) resynced and back in review.` : '\nNothing to resync.')
     await showList()
     await db.$disconnect()
     return

@@ -266,6 +266,51 @@ npm run wa:flows        # live audit: template status, button, params, and recip
 npm run seed:nudges     # create-if-missing + a live per-flow recipient preview
 ```
 
+### Editing templates
+
+**Edit** on any WhatsApp template reopens the same form, prefilled. Two Meta rules matter:
+
+- An **approved** (or rejected) template can be edited. The edit creates a new revision, so the
+  template returns to **Pending** until Meta re-approves it.
+- A template **in review is locked** — Meta refuses to edit it (error `2388003`). The dialog then
+  offers an explicit **Replace** action, which deletes it and creates a fresh one with the same name.
+  Meta can take a long time to release a deleted name (error `2388023`), so `createTemplate()` waits
+  it out with retries, and a replace request can therefore take a minute or two.
+- The **name and language are immutable** — Meta identifies a template by the pair.
+
+Removing a template is deliberately never automatic: silently deleting a template the operator did
+not ask to delete is worse than refusing.
+
+`npm run wa:templates -- --resync` reapplies the curated copy from `nudge-defaults.ts` to any
+template whose content has drifted, and **skips templates that already match** so approved ones are
+never disturbed. `--verbose` prints each template's body.
+
+### Email templates
+
+Email has no external registry — a template *is* the nudge's subject and body, so there is nothing to
+submit or approve. The Templates tab lists every email nudge with its subject and a body preview
+(flagging any that are **incomplete**), and **Edit** jumps to that nudge's editor on the Nudges tab.
+
+Current email nudges: `onboarding_started_agreement`, `documents_pending`, `onboarded_transacting`,
+`onboarded_not_transacting`.
+
+Every nudge card also states which template it sends — the Meta template name plus language for
+WhatsApp, or the subject line for email.
+
+### Pausing and enabling nudges
+
+The scheduler only ever runs nudges that are **enabled**, so disabling them is the immediate,
+deploy-free way to stop all sending.
+
+- Each card has its own on/off switch.
+- **Pause all** / **Resume all** in the header flips every nudge at once (`POST /api/nudges/bulk`).
+- From the CLI: `npm run nudges off` / `on` / `status`.
+
+> **`enabled` is operator state and is never touched by the seeding scripts.** Seed with
+> `--force` refreshes a nudge's copy, criteria, filters and templates, and deliberately leaves
+> `enabled` exactly as it was — otherwise a paused nudge would switch itself back on every time
+> the copy was refreshed. Use `npm run nudges on` if you actually want to resume.
+
 ---
 
 ## HTTP surface

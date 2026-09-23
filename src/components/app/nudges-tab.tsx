@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import {
-  Play, Eye, Pencil, Trash2, Plus, Send, RefreshCcw, Loader2, AlertCircle, Mail, MessageCircle, Info, Sheet, Database,
+  Play, Pause, Eye, Pencil, Trash2, Plus, Send, RefreshCcw, Loader2, AlertCircle, Mail, MessageCircle, Info, Sheet, Database,
 } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -90,7 +90,18 @@ function reasonBadge(reason: string, detail?: string) {
   }
 }
 
-export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onChanged: () => void }) {
+export function NudgesTab({
+  refreshKey,
+  onChanged,
+  openNudgeId,
+  onOpenedNudge,
+}: {
+  refreshKey: number
+  onChanged: () => void
+  /** When set, open that nudge's editor (used by "Edit" on an email template). */
+  openNudgeId?: string | null
+  onOpenedNudge?: () => void
+}) {
   const { toast } = useToast()
   const [nudges, setNudges] = useState<NudgeDto[]>([])
   const [loading, setLoading] = useState(true)
@@ -103,6 +114,7 @@ export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onCha
   const [runTarget, setRunTarget] = useState<NudgeDto | null>(null)
   const [runWithSync, setRunWithSync] = useState(true)
   const [running, setRunning] = useState<string | null>(null)
+  const [bulkBusy, setBulkBusy] = useState(false)
   const [runResult, setRunResult] = useState<RunSummaryDto | null>(null)
   const [preview, setPreview] = useState<PreviewDto | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
@@ -158,6 +170,14 @@ export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onCha
     setFormOpen(true)
   }
 
+  // A request from the Templates tab to edit this nudge (email templates live in the nudge).
+  useEffect(() => {
+    if (!openNudgeId || nudges.length === 0) return
+    const target = nudges.find((n) => n.id === openNudgeId)
+    if (target) openEdit(target)
+    onOpenedNudge?.()
+  }, [openNudgeId, nudges])
+
   const canSave =
     form.name.trim() &&
     form.key.trim() &&
@@ -186,12 +206,57 @@ export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onCha
   }
 
   const toggleEnabled = async (n: NudgeDto, enabled: boolean) => {
+    // Optimistic for responsiveness, then always reconciled with the server so the switch
+    // can never end up showing a state the database does not have.
     setNudges((prev) => prev.map((x) => (x.id === n.id ? { ...x, enabled } : x)))
-    await fetch(`/api/nudges/${n.id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled }),
-    })
+    try {
+      const res = await fetch(`/api/nudges/${n.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      })
+      const data = (await res.json()) as { ok: boolean; error?: string }
+      if (!data.ok) throw new Error(data.error || 'Update rejected')
+      toast({
+        title: enabled ? 'Nudge enabled' : 'Nudge paused',
+        description: enabled ? `${n.name} will now send` : `${n.name} will not send until re-enabled`,
+      })
+    } catch (err) {
+      setNudges((prev) => prev.map((x) => (x.id === n.id ? { ...x, enabled: !enabled } : x)))
+      toast({
+        title: 'Could not change this nudge',
+        description: err instanceof Error ? err.message : String(err),
+        variant: 'destructive',
+      })
+    } finally {
+      load()
+    }
+  }
+
+  /** Pause or resume every nudge at once — the fastest way to stop all sending. */
+  const setAllEnabled = async (enabled: boolean) => {
+    if (!enabled && !confirm('Pause every nudge? No nudge will send until you re-enable it.')) return
+    setBulkBusy(true)
+    try {
+      const res = await fetch('/api/nudges/bulk', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      })
+      const data = (await res.json()) as { ok: boolean; count?: number; error?: string }
+      if (!data.ok) {
+        toast({ title: 'Bulk update failed', description: data.error, variant: 'destructive' })
+        return
+      }
+      toast({
+        title: enabled ? 'All nudges resumed' : 'All nudges paused',
+        description: `${data.count} nudge(s) ${enabled ? 'enabled' : 'disabled'} — the scheduler has nothing to run.`,
+      })
+      load()
+      onChanged()
+    } finally {
+      setBulkBusy(false)
+    }
   }
 
   const run = async (n: NudgeDto) => {
@@ -278,19 +343,40 @@ export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onCha
   }
 
   const isWhatsApp = form.channel === 'whatsapp'
+  const activeCount = nudges.filter((n) => n.enabled).length
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
-          <h3 className="text-sm font-medium">Nudges</h3>
+          <h3 className="text-sm font-medium">
+            Nudges
+            {activeCount > 0 ? (
+              <span className="ml-2 text-xs font-normal text-emerald-700">{activeCount} active</span>
+            ) : (
+              <span className="ml-2 text-xs font-normal text-amber-600">all paused — nothing will send</span>
+            )}
+          </h3>
           <p className="text-xs text-muted-foreground">
-            One nudge = one reusable flow (channel + Zoho criteria + lead filters + template + sequence). Create a new row to add a new flow.
+            One nudge = one reusable flow. Only enabled nudges are ever sent, by you or by the scheduler.
           </p>
         </div>
-        <Button onClick={openCreate} size="sm">
-          <Plus className="h-4 w-4 mr-1" /> New Nudge
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          {activeCount > 0 ? (
+            <Button variant="outline" size="sm" onClick={() => setAllEnabled(false)} disabled={bulkBusy}>
+              {bulkBusy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Pause className="h-4 w-4 mr-1" />}
+              Pause all
+            </Button>
+          ) : (
+            <Button variant="outline" size="sm" onClick={() => setAllEnabled(true)} disabled={bulkBusy}>
+              {bulkBusy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Play className="h-4 w-4 mr-1" />}
+              Resume all
+            </Button>
+          )}
+          <Button onClick={openCreate} size="sm">
+            <Plus className="h-4 w-4 mr-1" /> New Nudge
+          </Button>
+        </div>
       </div>
 
       {loading ? (
@@ -334,6 +420,32 @@ export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onCha
                   <span><RefreshCcw className="inline h-3 w-3 mr-1" />max {n.maxEmailsPerLead}/lead</span>
                   <span>follow-up every {n.followUpDays}d</span>
                   <span>last run: {n.lastRunAt ? new Date(n.lastRunAt).toLocaleString() : 'never'}</span>
+                </div>
+
+                {/* Which template this nudge sends. WhatsApp uses a Meta-approved template;
+                    email's "template" is the subject + body stored on the nudge itself. */}
+                <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs">
+                  {n.channel === 'whatsapp' ? (
+                    n.whatsappTemplateName ? (
+                      <p className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                        <MessageCircle className="h-3.5 w-3.5 text-emerald-600 shrink-0" />
+                        <span className="text-muted-foreground">Template</span>
+                        <code className="font-mono">{n.whatsappTemplateName}</code>
+                        <Badge variant="outline" className="font-mono">{n.whatsappLanguage || 'en_US'}</Badge>
+                      </p>
+                    ) : (
+                      <p className="flex items-center gap-2 text-amber-700">
+                        <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                        No template attached — sends free-form text, which Meta only allows inside the 24h window.
+                      </p>
+                    )
+                  ) : (
+                    <p className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                      <Mail className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                      <span className="text-muted-foreground">Subject</span>
+                      <span className="font-medium truncate">{n.subjectTemplate || <span className="text-destructive">not set</span>}</span>
+                    </p>
+                  )}
                 </div>
 
                 <Separator />
