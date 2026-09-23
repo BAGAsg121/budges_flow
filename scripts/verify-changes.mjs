@@ -8,6 +8,9 @@ import { isCronAuthorized, isWebhookAuthorized } from '../src/lib/cron-auth.ts'
 import { DEFAULT_NUDGES, ZOHO_CRITERIA, LEAD_STATUS, PAY_ACTIVATION_FEE_URL, WHATSAPP_TEST_STATUS, MYSQL_FLOW_TEMPLATES, WA_SHEET_FLOW_TEMPLATES, MYSQL_FLOW_LOOKBACK, CONSOLE_URL } from '../src/lib/nudge-defaults.ts'
 import { MYSQL_FLOW_KEYS, isMysqlFlowKey } from '../src/lib/mysql-nudges.ts'
 import { buildWhatsAppParams as buildWhatsAppParamsRaw } from '../src/lib/whatsapp-params.ts'
+import { extractInboundText, appendInbound, INBOUND_KEEP } from '../src/lib/whatsapp-inbound.ts'
+import { explainWhatsAppError, isDeliveryCapError, isPermanentDeliveryFailure } from '../src/lib/whatsapp-errors.ts'
+import { WA_EMAIL_TWIN, WA_UTILITY_SAFE_COPY } from '../src/lib/nudge-defaults.ts'
 import { buildTemplatePayload, validateTemplateInput, countTemplateVars } from '../src/lib/whatsapp-templates.ts'
 
 let failures = 0
@@ -226,6 +229,59 @@ check(
   JSON.stringify({ body: ['1'], button: ['9876543210'] })
 )
 check('missing values fall back, preserving position', JSON.stringify(buildWhatsAppParamsRaw('["a","b"]', { b: '2' }).body), JSON.stringify(['-', '2']))
+
+// --- inbound WhatsApp replies ----------------------------------------------
+check('text reply is captured verbatim', extractInboundText({ type: 'text', text: { body: 'Yes please call me' } }), 'Yes please call me')
+check('quick-reply button text', extractInboundText({ type: 'button', button: { text: 'Confirm' } }), 'Confirm')
+check('interactive button reply', extractInboundText({ type: 'interactive', interactive: { button_reply: { title: 'Uploaded' } } }), '[button] Uploaded')
+check('interactive list reply', extractInboundText({ type: 'interactive', interactive: { list_reply: { title: 'Need help' } } }), '[list] Need help')
+check('image caption', extractInboundText({ type: 'image', image: { caption: 'Here is my PAN' } }), '[image] Here is my PAN')
+check('document reply', extractInboundText({ type: 'document', document: { filename: 'pan.pdf' } }), '[document] pan.pdf')
+check('audio reply still produces readable text', extractInboundText({ type: 'audio', audio: {} }), '[audio message]')
+check('unknown type is labelled', extractInboundText({ type: 'weird' }), '[weird message]')
+checkTrue('a reply is never empty', extractInboundText({}).length > 0)
+
+const capped = Array.from({ length: INBOUND_KEEP + 5 }).reduce((acc, _v, i) => appendInbound(acc, { text: `m${i}` }).messages, null)
+check(`inbound history is capped at ${INBOUND_KEEP}`, JSON.parse(capped).length, INBOUND_KEEP)
+check('the newest message survives the cap', JSON.parse(capped).at(-1).text, `m${INBOUND_KEEP + 4}`)
+check('a timestamp is recorded', Boolean(JSON.parse(appendInbound(null, { text: 'hi' }).messages)[0].at), true)
+check('corrupt history is recovered', JSON.parse(appendInbound('not json', { text: 'hi' }).messages).length, 1)
+
+// --- Meta delivery error explanations --------------------------------------
+check('code 131049 is explained', explainWhatsAppError({ code: 131049 })?.label, 'engagement cap')
+check('stored error string with a code is explained', explainWhatsAppError('Something happened (code 131026)')?.label, 'undeliverable')
+check('text-only error is explained', explainWhatsAppError('This message was not delivered to maintain healthy ecosystem engagement.')?.label, 'engagement cap')
+check('opted-out experiment is explained', explainWhatsAppError("User's number is part of an experiment")?.label, 'opted out of marketing')
+check('unknown errors return null', explainWhatsAppError('something entirely new'), null)
+check('null input is safe', explainWhatsAppError(null), null)
+
+// --- delivery-cap classification and the email fallback ---------------------
+check('131049 is classified as a delivery cap', isDeliveryCapError({ code: 131049 }), true)
+check('a stored 131049 string is recognised', isDeliveryCapError('Meta said (code 131049)'), true)
+check('cap wording without a code is recognised', isDeliveryCapError('This message was not delivered to maintain healthy ecosystem engagement.'), true)
+check('marketing opt-out is treated as a cap', isDeliveryCapError("User's number is part of an experiment"), true)
+check('a config error is NOT a cap', isDeliveryCapError('WhatsApp API: template does not exist (code 132001)'), false)
+check('undefined is safe', isDeliveryCapError(undefined), false)
+
+check('131026 is a permanent failure', isPermanentDeliveryFailure({ code: 131026 }), true)
+check('undeliverable wording is a permanent failure', isPermanentDeliveryFailure('Message undeliverable'), true)
+check('a cap is NOT a permanent failure', isPermanentDeliveryFailure({ code: 131049 }), false)
+check('a config error is NOT a permanent failure', isPermanentDeliveryFailure('parameter mismatch'), false)
+
+// every WhatsApp sheet nudge must name an email twin that actually exists
+for (const [waKey, emailKey] of Object.entries(WA_EMAIL_TWIN)) {
+  checkTrue(`fallback target "${emailKey}" exists as a nudge`, Boolean(byKeyAll[emailKey]))
+  check(`fallback target "${emailKey}" is an email nudge`, byKeyAll[emailKey]?.channel, 'email')
+  checkTrue(`fallback target "${emailKey}" has a subject`, Boolean(byKeyAll[emailKey]?.subjectTemplate))
+  checkTrue(`fallback target "${emailKey}" has a body`, Boolean(byKeyAll[emailKey]?.bodyTemplate))
+  check(`${waKey} declares its email fallback`, JSON.parse(byKeyAll[waKey]?.filters || '{}').emailFallback, emailKey)
+}
+
+// UTILITY-safe alternative copy exists for both capped templates
+check('utility-safe copy for transacting', Boolean(WA_UTILITY_SAFE_COPY.onboarded_transacting_pay), true)
+check('utility-safe copy for not-transacting', Boolean(WA_UTILITY_SAFE_COPY.onboarded_not_transacting_pay), true)
+checkTrue('utility-safe copy drops the discount wording', !JSON.stringify(WA_UTILITY_SAFE_COPY).toLowerCase().includes('discount'))
+checkTrue('utility-safe copy keeps a payment CTA', WA_UTILITY_SAFE_COPY.onboarded_transacting_pay.buttonText.length > 0)
 
 console.log(failures === 0 ? '\nAll checks passed.' : `\n${failures} check(s) FAILED.`)
 process.exit(failures === 0 ? 0 : 1)

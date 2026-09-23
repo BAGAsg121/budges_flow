@@ -56,6 +56,12 @@ export interface LogDto {
   openedAt: string | null
   opensCount: number
   replied: boolean
+  repliedAt: string | null
+  /** Most recent inbound WhatsApp message body, when the customer replied. */
+  inboundText: string | null
+  /** JSON array of recent inbound messages: [{ at, type, text }] */
+  inboundMessages: string | null
+  inboundAt: string | null
   engagementStatus: 'sent' | 'opened' | 'replied' | 'failed'
   trackingId: string
   sheetRowRef: string | null

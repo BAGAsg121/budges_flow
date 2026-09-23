@@ -111,6 +111,11 @@ model MessageLog {
   openedAt         DateTime?
   replied          Boolean   @default(false)
   repliedAt        DateTime?
+  // Inbound WhatsApp replies. Added as additive ALTERs (scripts/add-inbound-columns.mjs):
+  // the webhook used to mark `replied` without storing what the customer actually said.
+  inboundText      String?   @db.Text // most recent inbound message body
+  inboundMessages  String?   @db.Text // JSON array of recent inbound messages: [{ at, type, text }]
+  inboundAt        DateTime? // when the most recent inbound message arrived
   engagementStatus String    @default("sent") // sent | opened | replied
   createdAt        DateTime  @default(now())
 

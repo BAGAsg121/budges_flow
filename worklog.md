@@ -317,6 +317,31 @@ Stage Summary:
 
 ---
 
+Task ID: 19
+Agent: Main agent (DeepSeek Harness)
+Task: Explain and fix the email and WhatsApp send failures; make customer replies readable.
+
+Work Log:
+- Diagnosed from data, not assumption. New scripts/diagnose-sends.mjs groups every failed send by channel and error: 839 email failures (100%, all "SMTP not configured") and 108 WhatsApp attempts (30 ok, 78 failed).
+- EMAIL ROOT CAUSE: the app only ever supported SMTP via nodemailer, and SMTP_USER / SMTP_PASS were empty. Meanwhile the Zoho Mail credentials in .env (client id/secret + refresh token + account id) were dead config — the ORIGINAL n8n flow sent mail through the Zoho Mail REST API with a refresh token, not SMTP. So the credentials the user believed were "being used" were never wired to anything.
+  FIX: new src/lib/zoho-mail.ts (refresh-token flow -> POST mail.zoho.in/api/accounts/{id}/messages, one 401 retry, Zoho's body-level status.code checked because it reports app errors with HTTP 200). mailer.ts now selects a transport: auto prefers Zoho Mail, then SMTP; MAIL_TRANSPORT forces one. VERIFIED WITH A REAL SEND: messageId 1790169845979108000 in ~1s.
+  Also: zoho-mail.ts and mailer.ts were made path-alias free so CLI scripts can exercise the real send path.
+- WHATSAPP FAILURES were not app errors. 50 were "WhatsApp not configured" from the 14:04 scheduler cycle before the token existed. The other 28 were Meta-side delivery drops on whatsapp_onboarded_not_transacting: 23x "not delivered to maintain healthy ecosystem engagement" (Meta's per-user MARKETING frequency cap), 3x "user's number is part of an experiment" (marketing opt-out), 2x "message undeliverable". Root cause: Meta auto-categorised the two activation-fee templates as MARKETING because of the discount wording, and marketing templates are rate-limited per user. 30 of 58 were delivered.
+- New src/lib/whatsapp-errors.ts translates Meta's codes (131026/131047/131049/131050/132000/132001/190/368/…) into plain English. Used by the Logs tab (badge label + tooltip with the raw text) and by diag:sends.
+- REPLIES WERE BEING THROWN AWAY: the webhook marked replied=true and discarded the message body, so the operator could see that someone replied but not what they said.
+  FIX: three ADDITIVE columns on nudge_message_log (inboundText, inboundMessages, inboundAt) via a new hand-reviewed script, add-inbound-columns.mjs — ALTER TABLE ... ADD COLUMN only, dry-run by default, refuses any destructive keyword, and touches only that one table (22 -> 25 columns). Prisma schema updated and the client regenerated.
+  New src/lib/whatsapp-inbound.ts: extractInboundText handles text, quick-reply buttons, interactive button/list replies, image/video/document captions, location, and labels media without captions so a reply is never blank; appendInbound keeps a capped 20-message history. The webhook now stores the text; the Logs tab has a speech-bubble button opening the customer's messages newest-first.
+  Also cleaned up the status-failure text: Meta repeats the same string in title and message (which is why the log read "Message undeliverable Message undeliverable"); it is now de-duplicated and carries the error code.
+- New scripts/check-email.mjs + `npm run email:check` (config, or send a real test), plus npm scripts diag:sends and db:add-inbound-columns.
+- verify: 176 assertions (new coverage for reply parsing, the capped history, and the error translator); tsc and eslint clean.
+
+Stage Summary:
+- Email works: the Zoho Mail API credentials are now the primary transport, proven by a real send.
+- WhatsApp failures are explained, not mysterious — they are Meta marketing-delivery limits on a MARKETING-categorised template.
+- Customer replies are now stored and readable in the Logs tab.
+
+---
+
 Task ID: 11
 Agent: Main agent (DeepSeek Harness)
 Task: Pause all outbound sending, and answer whether the temporary WhatsApp token is sufficient.
@@ -416,3 +441,22 @@ Work Log:
 Stage Summary:
 - Two independent causes for what looked like one bug: a wrong token in Render, and a .gitignore rule that had been silently dropping a route from every commit.
 - User actions: (1) replace WHATSAPP_TOKEN in Render with the permanent System User token; (2) commit — src/app/api/whatsapp/test/ now shows as untracked and will be included; (3) add the remaining WhatsApp env vars (WABA id, template language, app secret, verify token) to Render.
+
+---
+
+Task ID: 20
+Agent: Main agent (DeepSeek Harness)
+Task: "Do we have anything or fallback to fix this issue?" — make the Meta MARKETING frequency cap survivable.
+
+Work Log:
+- Framed the problem honestly before coding. The cap (131049) and the experiment opt-out (131050) are Meta policy, not app bugs; no code can force a marketing template through. What code CAN do is stop wasting the attempt, and route around the block. Built three layers, weakest-to-strongest, and documented the boundary of what is unfixable in README.
+- LAYER 1 — RETRY LATER, NOT EVERY CYCLE. The engine was re-attempting every capped recipient on every scheduler tick, logging an identical failure each time (that repetition is what made 28 drops look like an app fault). New src/lib/whatsapp-errors.ts exports isDeliveryCapError() (by code 131049/131050 OR by stored wording, so old log rows count too), isPermanentDeliveryFailure(), and capBackoffHours(). nudge-engine.decideSend now returns delivery_cap_backoff when the recipient's most recent failed send was capped inside DELIVERY_CAP_BACKOFF_HOURS (default 24, configurable): skipped, counted as `skipped` rather than `failed`, labelled "capped by Meta" in the UI. A cap is explicitly NOT treated as a permanent failure — the window rolls, so it is retried after the backoff.
+- LAYER 2 — AUTOMATIC EMAIL FALLBACK. The two manual sheet nudges now carry filters.emailFallback naming their email twin (whatsapp_onboarded_not_transacting -> onboarded_not_transacting, and the transacting pair). sheet-run, on a WhatsApp send that fails as a cap OR a permanent failure, sends the email twin to the same person — the sheet supplies both mobile and email — and logs it against the email nudge as well, so email keeps its own de-duplication and maxEmailsPerLead. Configuration errors (132000 parameter mismatch, 132001 unknown template, 190 auth) are deliberately NOT fallback-worthy: those are our bugs and masking them with an email would hide them. Falls back are counted in the run summary as `fallbackEmails` and the WhatsApp row is labelled "fell back to email". Nudges that name an emailFallback target which does not exist degrade to a clear email_fallback_missing reason instead of an exception.
+- LAYER 3 — ESCAPE THE MARKETING CATEGORY. Root cause is the category, and the category follows the wording: the discount/promo line is what makes Meta call these MARKETING, and marketing is what is capped. Added WA_UTILITY_SAFE_COPY to src/lib/nudge-defaults.ts — purely transactional rewrites of both activation-fee templates ("your activation fee payment is pending" + Pay Now) with no promo language — with a comment explaining the trade. Applying it is a human decision (replace the template body in the Templates tab, Meta re-reviews and should re-categorise as UTILITY); the discount stays in the email nudge, where no such cap exists.
+- verify-changes.mjs extended with the cap-classification and fallback assertions (cap detected by code and by wording, opt-out treated as a cap, config errors excluded from both cap and permanent-failure sets, both fallback targets exist as email nudges with subject+body, both WhatsApp nudges declare their fallback, and the utility-safe copy drops the discount while keeping the CTA). 200 assertions, all pass. tsc clean, eslint clean.
+- README gained a "Fallbacks for the marketing cap" section spelling out the three layers, the env knob, and what remains genuinely unfixable (a real opt-out or a number not on WhatsApp).
+
+Stage Summary:
+- A capped recipient is now skipped for 24h instead of re-failed every cycle, and the customer still gets the nudge by email in the same run.
+- The permanent fix is a wording change, not a code change: UTILITY copy is drafted and ready to paste when the user decides to trade the discount line for uncapped delivery.
+- Deliberately NOT done: no auto-deleting or auto-editing approved templates (Task 18's lesson), no retry-storm, no silent send through a channel the user did not choose.

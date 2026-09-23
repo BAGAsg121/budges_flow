@@ -17,6 +17,7 @@ import { db } from '@/lib/db'
 import { sendEmail, isMailerConfigured } from '@/lib/mailer'
 import { renderTemplate, injectTrackingPixel, htmlToText } from '@/lib/template'
 import { isWhatsAppConfigured, sendWhatsAppTemplate, normalizePhone, getDefaultTemplateLanguage } from '@/lib/whatsapp'
+import { isDeliveryCapError, isPermanentDeliveryFailure } from '@/lib/whatsapp-errors'
 import { buildWhatsAppParams } from '@/lib/whatsapp-params'
 import { getBaseUrl } from '@/lib/base-url'
 import { parseSheetCsv, toSheetCsvUrl } from '@/lib/sheet-parser'
@@ -98,6 +99,29 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     const sent: string[] = []
     const failed: { email: string; error: string }[] = []
     const skipped: SkipEntry[] = []
+    const fallbackEmails: { to: string; reason: string }[] = []
+
+    // Optional email fallback: when WhatsApp cannot deliver (Meta's marketing cap, or the
+    // number is unreachable), send the twin EMAIL nudge instead. Configured per nudge as
+    // filters.emailFallback = "<nudge key>". A configuration error is never masked by this.
+    let fallbackNudge: Awaited<ReturnType<typeof db.nudge.findUnique>> = null
+    let fallbackFilters: { emailFallback?: string } = {}
+    try {
+      fallbackFilters = JSON.parse(nudge.filters || '{}') as { emailFallback?: string }
+    } catch {
+      fallbackFilters = {}
+    }
+    if (isWhatsApp && fallbackFilters.emailFallback) {
+      fallbackNudge = await db.nudge.findUnique({ where: { key: fallbackFilters.emailFallback } })
+      if (!fallbackNudge) {
+        skipped.push({
+          lead: '-',
+          email: null,
+          reason: 'email_fallback_missing',
+          detail: `filters.emailFallback="${fallbackFilters.emailFallback}" does not match any nudge`,
+        })
+      }
+    }
 
     // 4. For each row — render, deduplicate, send
     for (const row of rows) {
@@ -193,7 +217,50 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         })
 
         if (result.ok) sent.push(toPhone as string)
-        else failed.push({ email: toPhone as string, error: result.error ?? 'unknown error' })
+        else {
+          failed.push({ email: toPhone as string, error: result.error ?? 'unknown error' })
+
+          // Fall back to email when WhatsApp is the wrong channel for this recipient —
+          // either Meta capped them (retryable but slow) or the number cannot receive.
+          const undeliverable = isDeliveryCapError(result.error) || isPermanentDeliveryFailure(result.error)
+          if (undeliverable && fallbackNudge && email && fallbackNudge.subjectTemplate && fallbackNudge.bodyTemplate) {
+            const fbTrackingId = randomUUID()
+            const fbSubject = renderTemplate(fallbackNudge.subjectTemplate, vars)
+            const fbHtml = injectTrackingPixel(
+              renderTemplate(fallbackNudge.bodyTemplate, vars, { escapeValues: true }),
+              baseUrl,
+              fbTrackingId
+            )
+            const fbResult = await sendEmail({
+              to: email,
+              subject: fbSubject,
+              html: fbHtml,
+              text: htmlToText(fbHtml),
+            })
+
+            await db.messageLog.create({
+              data: {
+                leadId: null,
+                nudgeId: fallbackNudge.id,
+                channel: 'email',
+                messageNumber: 1,
+                toEmail: email,
+                subject: fbSubject,
+                messageId: fbResult.messageId ?? null,
+                trackingId: fbTrackingId,
+                sheetRowRef: `fallback:${nudge.key}|${email}`.slice(0, 512),
+                sentOk: fbResult.ok,
+                sendError: fbResult.error ?? null,
+                sentAt: fbResult.ok ? new Date() : null,
+                engagementStatus: 'sent',
+              },
+            })
+
+            if (fbResult.ok) {
+              fallbackEmails.push({ to: email, reason: isDeliveryCapError(result.error) ? 'whatsapp capped' : 'whatsapp undeliverable' })
+            }
+          }
+        }
 
         await new Promise((r) => setTimeout(r, 250))
         continue
@@ -243,13 +310,14 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       ok: true,
       summary: {
         nudgeKey: nudge.key,
-        channel: 'email',
+        channel: nudge.channel,
         source: 'sheet',
         sheetUrl: rawUrl,
         rowsRead: rows.length,
         sent: sent.length,
         failed: failed.length,
         skipped: skipped.length,
+        fallbackEmails,
         sentEmails: sent,
         failedEntries: failed,
         skippedEntries: skipped,

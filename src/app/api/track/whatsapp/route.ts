@@ -8,7 +8,12 @@
  *         inbound -> latest message from that lead marked replied (engagement 'replied')
  */
 import { NextRequest, NextResponse } from 'next/server'
-import { applyWhatsAppStatus, applyWhatsAppInbound, verifyWhatsAppSignature } from '@/lib/whatsapp'
+import {
+  applyWhatsAppStatus,
+  applyWhatsAppInbound,
+  extractInboundText,
+  verifyWhatsAppSignature,
+} from '@/lib/whatsapp'
 
 export const dynamic = 'force-dynamic'
 
@@ -27,8 +32,34 @@ interface WebhookBody {
   entry?: {
     changes?: {
       value?: {
-        statuses?: { id: string; status: string; recipient_id?: string; errors?: { title?: string; message?: string }[] }[]
-        messages?: { from: string; id: string; type: string }[]
+        statuses?: {
+          id: string
+          status: string
+          recipient_id?: string
+          errors?: { code?: number; title?: string; message?: string }[]
+        }[]
+        messages?: {
+          from: string
+          id: string
+          type?: string
+          timestamp?: string
+          text?: { body?: string }
+          button?: { text?: string; payload?: string }
+          interactive?: {
+            type?: string
+            button_reply?: { title?: string; id?: string }
+            list_reply?: { title?: string; description?: string; id?: string }
+          }
+          image?: { caption?: string }
+          video?: { caption?: string }
+          document?: { filename?: string; caption?: string }
+          audio?: unknown
+          sticker?: unknown
+          location?: { name?: string; address?: string; latitude?: number; longitude?: number }
+          contacts?: unknown
+          order?: unknown
+          system?: { body?: string }
+        }[]
       }
     }[]
   }[]
@@ -58,7 +89,12 @@ export async function POST(req: NextRequest) {
 
         for (const msg of value.messages ?? []) {
           if (msg?.from) {
-            await applyWhatsAppInbound(msg.from).catch(() => null)
+            // Store what they actually wrote, not just that they wrote.
+            await applyWhatsAppInbound(msg.from, {
+              text: extractInboundText(msg),
+              type: msg.type,
+              timestamp: msg.timestamp ? Number(msg.timestamp) : undefined,
+            }).catch(() => null)
           }
         }
       }

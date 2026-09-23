@@ -1,14 +1,17 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { Search } from 'lucide-react'
+import { Search, MessageSquareQuote, Info } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Mail, MessageCircle, Sheet } from 'lucide-react'
+import { explainWhatsAppError } from '@/lib/whatsapp-errors'
 import type { LogDto, NudgeDto } from '@/lib/app-types'
 
 function ChannelBadge({ channel }: { channel: string }) {
@@ -38,14 +41,18 @@ function ChannelBadge({ channel }: { channel: string }) {
 
 function StatusBadge({ log }: { log: LogDto }) {
   if (!log.sentOk) {
+    // Meta's delivery errors are cryptic; explain them alongside the raw text.
+    const help = explainWhatsAppError(log.sendError)
     return (
       <TooltipProvider delayDuration={100}>
         <Tooltip>
           <TooltipTrigger asChild>
-            <Badge variant="destructive">failed</Badge>
+            <Badge variant="destructive">{help ? `failed · ${help.label}` : 'failed'}</Badge>
           </TooltipTrigger>
-          <TooltipContent side="top" className="max-w-72 text-xs">
-            {log.sendError || 'Unknown error'}
+          <TooltipContent side="top" className="max-w-80 text-xs space-y-1">
+            <p className="font-medium">{help ? help.label : 'Failed'}</p>
+            {help && <p>{help.detail}</p>}
+            <p className="opacity-70">Meta said: {log.sendError || 'Unknown error'}</p>
           </TooltipContent>
         </Tooltip>
       </TooltipProvider>
@@ -56,6 +63,17 @@ function StatusBadge({ log }: { log: LogDto }) {
   return <Badge variant="secondary">sent</Badge>
 }
 
+/** Parse the stored inbound history, tolerating a missing/invalid blob. */
+function parseInbound(raw: string | null): { at: string; type?: string; text: string }[] {
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
 export function LogsTab({ refreshKey }: { refreshKey: number }) {
   const [logs, setLogs] = useState<LogDto[]>([])
   const [nudges, setNudges] = useState<NudgeDto[]>([])
@@ -64,6 +82,7 @@ export function LogsTab({ refreshKey }: { refreshKey: number }) {
   const [channel, setChannel] = useState('all')
   const [q, setQ] = useState('')
   const [loading, setLoading] = useState(true)
+  const [replyLog, setReplyLog] = useState<LogDto | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -194,7 +213,22 @@ export function LogsTab({ refreshKey }: { refreshKey: number }) {
                     <TableCell className="hidden lg:table-cell max-w-56 truncate text-xs">
                       {l.subject || l.templateName || '—'}
                     </TableCell>
-                    <TableCell><StatusBadge log={l} /></TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-1">
+                        <StatusBadge log={l} />
+                        {l.replied && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-6 px-1"
+                            title="View what the customer replied"
+                            onClick={() => setReplyLog(l)}
+                          >
+                            <MessageSquareQuote className="h-3.5 w-3.5" />
+                          </Button>
+                        )}
+                      </div>
+                    </TableCell>
                     <TableCell className="hidden xl:table-cell text-xs text-muted-foreground">{l.opensCount}</TableCell>
                   </TableRow>
                 ))
@@ -203,6 +237,52 @@ export function LogsTab({ refreshKey }: { refreshKey: number }) {
           </Table>
         </div>
       </CardContent>
+
+      {/* What the customer actually wrote back. */}
+      <Dialog open={!!replyLog} onOpenChange={(o) => !o && setReplyLog(null)}>
+        <DialogContent className="max-w-xl max-h-[80vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Customer reply</DialogTitle>
+            <DialogDescription>
+              {replyLog?.lead} · {replyLog?.toPhone} · {replyLog?.nudge}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3">
+            {(() => {
+              const history = parseInbound(replyLog?.inboundMessages ?? null)
+              if (history.length === 0) {
+                return (
+                  <p className="flex items-start gap-2 rounded-md border bg-muted/30 p-3 text-xs text-muted-foreground">
+                    <Info className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                    <span>
+                      This reply was recorded before reply text was stored, so only the fact that they replied is known.
+                      New replies will show their message here.
+                    </span>
+                  </p>
+                )
+              }
+              return history
+                .slice()
+                .reverse()
+                .map((m, i) => (
+                  <div key={i} className="rounded-md border bg-muted/30 p-3">
+                    <p className="text-xs text-muted-foreground">
+                      {new Date(m.at).toLocaleString()}
+                      {m.type ? ` · ${m.type}` : ''}
+                    </p>
+                    <p className="mt-1 whitespace-pre-wrap text-sm">{m.text}</p>
+                  </div>
+                ))
+            })()}
+            {replyLog?.repliedAt && (
+              <p className="text-xs text-muted-foreground">
+                First reply recorded {new Date(replyLog.repliedAt).toLocaleString()}
+              </p>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
     </Card>
   )
 }

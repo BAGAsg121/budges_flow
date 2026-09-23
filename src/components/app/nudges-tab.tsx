@@ -85,6 +85,12 @@ function reasonBadge(reason: string, detail?: string) {
       return <Badge variant="outline">deferred{detail ? ` · ${detail}` : ''}</Badge>
     case 'duplicate_contact':
       return <Badge variant="outline">duplicate email{detail ? ` · ${detail}` : ''}</Badge>
+    case 'delivery_cap_backoff':
+      return <Badge className="bg-amber-500 hover:bg-amber-500">capped by Meta{detail ? ` · ${detail}` : ''}</Badge>
+    case 'email_fallback_missing':
+      return <Badge variant="destructive">fallback nudge missing{detail ? ` · ${detail}` : ''}</Badge>
+    case 'email_fallback':
+      return <Badge variant="secondary">sent by email{detail ? ` · ${detail}` : ''}</Badge>
     default:
       return <Badge variant="outline">{reason}{detail ? ` · ${detail}` : ''}</Badge>
   }

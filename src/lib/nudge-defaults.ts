@@ -178,6 +178,44 @@ export const WA_SHEET_FLOW_TEMPLATES = {
   },
 } as const
 
+/**
+ * Email twin for each manual WhatsApp nudge.
+ *
+ * Meta's per-user MARKETING frequency cap means a WhatsApp send can simply be dropped
+ * (error 131049) even though the template is approved and the number is valid. When that
+ * happens the sheet-run flow sends the email twin to the same person instead, provided the
+ * sheet has an email column. A configuration error is never masked by this fallback.
+ */
+export const WA_EMAIL_TWIN: Record<string, string> = {
+  whatsapp_onboarded_transacting: 'onboarded_transacting',
+  whatsapp_onboarded_not_transacting: 'onboarded_not_transacting',
+}
+
+/**
+ * UTILITY-safe alternative copy for the two pay nudges.
+ *
+ * Meta decides a template's category from its content, and discount/promo wording makes it
+ * MARKETING — which is what triggers the per-user frequency cap. Purely transactional copy
+ * ("your activation fee is pending") can qualify as UTILITY, which is not capped. Switch by
+ * editing the template in the Templates tab (or replacing it) and pasting this body.
+ */
+export const WA_UTILITY_SAFE_COPY: Record<string, { body: string; buttonText: string }> = {
+  onboarded_transacting_pay: {
+    body:
+      'Hi 👋 Your Eko account activation fee payment is still pending.\n\n' +
+      'Please complete the one-time payment to keep your account fully active.',
+    buttonText: 'Pay Now',
+  },
+  onboarded_not_transacting_pay: {
+    body:
+      'Hi 👋 Your Eko account has been activated and your production credentials were shared on your ' +
+      'registered email ID.\n\n' +
+      'Please complete your integration, and clear the pending one-time activation fee to keep the ' +
+      'account fully active.',
+    buttonText: 'Pay Now',
+  },
+}
+
 // ---------------------------------------------------------------------------
 // Email templates
 // ---------------------------------------------------------------------------
@@ -412,7 +450,7 @@ export const DEFAULT_NUDGES: NudgeSeed[] = [
     enabled: false,
     channel: 'whatsapp',
     zohoCriteria: null,
-    filters: json({ source: 'sheet', requirePhone: true }),
+    filters: json({ source: 'sheet', requirePhone: true, emailFallback: WA_EMAIL_TWIN[key] }),
     bodyTemplate: t.body,
     whatsappTemplateName: t.templateName,
     whatsappLanguage: WHATSAPP_TEMPLATE_LANGUAGE_DEFAULT,

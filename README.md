@@ -70,7 +70,7 @@ npm start                   # node .next/standalone/server.js  (PORT env, defaul
 | SMTP | `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` | `SMTP_USER`/`SMTP_PASS` must be filled in to send |
 | Reply tracking | `IMAP_ENABLED`, `IMAP_HOST`, `IMAP_PORT`, `IMAP_SECURE`, `IMAP_USER`, `IMAP_PASS`, `IMAP_MAILBOX`, `IMAP_REPLY_LOOKBACK_DAYS`, `EMAIL_WEBHOOK_SECRET` | |
 | Tracking URL | `APP_BASE_URL`, `APP_HOST` | Empty → derived from the request |
-| WhatsApp (Meta) | `WHATSAPP_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_WABA_ID`, `WHATSAPP_APP_SECRET`, `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_API_VERSION`, `WHATSAPP_TEMPLATE_LANGUAGE`, `WHATSAPP_DEFAULT_CC`, `WHATSAPP_DISPLAY_NUMBER`, `WHATSAPP_EMPTY_PARAM_FALLBACK` | Sending, webhooks and template management all go directly to the Meta Cloud API |
+| WhatsApp (Meta) | `WHATSAPP_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_WABA_ID`, `WHATSAPP_APP_SECRET`, `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_API_VERSION`, `WHATSAPP_TEMPLATE_LANGUAGE`, `WHATSAPP_DEFAULT_CC`, `WHATSAPP_DISPLAY_NUMBER`, `WHATSAPP_EMPTY_PARAM_FALLBACK`, `DELIVERY_CAP_BACKOFF_HOURS` | Sending, webhooks and template management all go directly to the Meta Cloud API |
 
 There is **no third-party WhatsApp provider in this app** — no Infinito, no n8n. Every send,
 every delivery/read receipt and every template operation talks to `graph.facebook.com`. The old
@@ -310,6 +310,105 @@ deploy-free way to stop all sending.
 > `--force` refreshes a nudge's copy, criteria, filters and templates, and deliberately leaves
 > `enabled` exactly as it was — otherwise a paused nudge would switch itself back on every time
 > the copy was refreshed. Use `npm run nudges on` if you actually want to resume.
+
+---
+
+## Email transport
+
+Two interchangeable transports. **`MAIL_TRANSPORT=auto`** (the default) prefers Zoho Mail when it is
+configured, then falls back to SMTP.
+
+| Transport | Credentials | Notes |
+| --- | --- | --- |
+| **Zoho Mail REST API** | `ZOHO_MAIL_CLIENT_ID`, `ZOHO_MAIL_CLIENT_SECRET`, `ZOHO_MAIL_REFRESH_TOKEN`, `ZOHO_MAIL_ACCOUNT_ID`, `ZOHO_MAIL_FROM_ADDRESS` | How the original n8n flow sent mail. Refresh-token based, so no mailbox password. |
+| SMTP (nodemailer) | `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` | Needs a mailbox **app password** — Zoho rejects the normal account password. |
+
+> ⚠️ **This was the cause of every email failure.** The app originally spoke only SMTP, so the Zoho
+> Mail credentials already sitting in `.env` were never used and all 839 email attempts failed with
+> *"SMTP not configured"* while `SMTP_USER`/`SMTP_PASS` were empty. Zoho Mail is now the primary
+> transport, which is the credential set that actually works.
+
+```bash
+npm run email:check                  # which transport is active, and why
+npm run email:check you@example.com  # send a real test email
+```
+
+## Diagnosing failures
+
+```bash
+npm run diag:sends
+```
+
+Groups every failed send by channel and error, explains Meta's codes in plain English, and prints the
+active configuration. The Logs tab does the same inline: a failed WhatsApp row's badge names the
+cause (e.g. *failed · engagement cap*) and the tooltip carries Meta's raw text.
+
+### Why WhatsApp messages fail
+
+Meta-side delivery failures are normal and are **not** app errors:
+
+| Cause | Meaning |
+| --- | --- |
+| `engagement cap` (131049) | Meta's per-user **marketing frequency cap** — the recipient has had too much marketing recently. Needs their opt-in, or a UTILITY template. |
+| `opted out of marketing` (131050) | The user is in a Meta experiment and has opted out of marketing. |
+| `undeliverable` (131026) | The number is not on WhatsApp / is invalid / blocked the business. |
+| `outside 24h window` (131047) | Free-form text needs the recipient to have messaged you within 24h. |
+| `parameter mismatch` (132000) | The nudge sends a different number of parameters than the template declares. |
+
+**Category matters.** Meta auto-categorises templates by their content. The two activation-fee
+templates (`onboarded_transacting_pay`, `onboarded_not_transacting_pay`) were classified
+**MARKETING** because of the discount wording, and marketing templates are subject to the frequency
+cap above. In the first live batch of 58 sends, 30 were delivered and 28 were dropped by Meta for
+exactly these reasons.
+
+### Fallbacks for the marketing cap
+
+Three layers, in order of how much they help.
+
+**1. Retry later, not every cycle.** A cap drop is not a permanent failure — the cap is a rolling
+per-user window, so the same message is usually accepted a day later. The engine records the cap
+failure and skips that recipient until `DELIVERY_CAP_BACKOFF_HOURS` (default **24**) has passed,
+instead of re-attempting on every scheduler cycle and logging an identical failure each time. A
+skipped recipient shows as **capped by Meta** in the run results, and is counted as `skipped`, not
+`failed`.
+
+**2. Fall back to email automatically.** The two manual WhatsApp nudges declare an `emailFallback` in
+their filters (`whatsapp_onboarded_not_transacting` → `onboarded_not_transacting`, and the same for
+the transacting twin). When a WhatsApp send is dropped for a cap **or** is undeliverable, the
+sheet-run flow sends the email twin to that same person — the sheet supplies both the mobile and the
+email — and logs it against the email nudge too, so email keeps its own de-duplication. A
+configuration error (wrong template, bad parameters) is never masked by this fallback: only
+"can't deliver" reasons trigger it. Counted in the run summary as `fallbackEmails`, and the WhatsApp
+row is labelled **fell back to email**.
+
+**3. Make the template UTILITY instead of MARKETING.** The root cause is the category, and the
+category follows the wording. UTILITY templates are not subject to the marketing cap. Ready-made
+transactional copy for both templates lives in `WA_UTILITY_SAFE_COPY` in `src/lib/nudge-defaults.ts` —
+no discount or promo language, just "your activation fee payment is pending" with a **Pay Now**
+button. To switch: open the template in the Templates tab, replace the body with that copy, save (it
+returns to Meta review), and Meta should re-categorise it as UTILITY. Keep the promotional discount
+line in the **email** nudge, where no such cap applies.
+
+What no code can fix: if a user has genuinely opted out of marketing (131050) or is not on WhatsApp
+at all (131026), only their opt-in or a different channel reaches them — which is what the email
+fallback is for.
+
+## Reading customer replies
+
+The WhatsApp webhook stores **what the customer actually wrote**, not just that they replied:
+
+- `inboundText` — the most recent message body
+- `inboundMessages` — a capped JSON history (`[{ at, type, text }]`, last 20)
+- `inboundAt` — when the most recent one arrived
+
+In the **Logs** tab, a replied row shows a speech-bubble button that opens the customer's message(s),
+newest first. Text, quick-reply buttons, list selections and media (with captions) are all recorded;
+media without a caption is stored as `[image]`, `[audio message]` and so on, so a reply is never
+silently blank.
+
+Those three columns were added to `nudge_message_log` with **additive `ALTER TABLE ... ADD COLUMN`
+statements only** (`npm run db:add-inbound-columns`, dry-run by default) — no other table and no other
+kind of change.
 
 ---
 

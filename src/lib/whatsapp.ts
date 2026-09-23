@@ -11,6 +11,7 @@
  */
 import { db } from '@/lib/db'
 import { createHmac, timingSafeEqual } from 'crypto'
+import { appendInbound, type InboundMessage } from '@/lib/whatsapp-inbound'
 
 const GRAPH_BASE = () => `https://graph.facebook.com/${process.env.WHATSAPP_API_VERSION || 'v21.0'}`
 
@@ -205,12 +206,22 @@ export function verifyWhatsAppSignature(rawBody: string, signatureHeader: string
  * Update a WhatsApp MessageLog from a Meta webhook status event.
  * read -> opened (first-read timestamp kept), failed -> sendError, replied never downgraded.
  */
-export async function applyWhatsAppStatus(messageId: string, status: string, errors?: { title?: string; message?: string }[]) {
+export async function applyWhatsAppStatus(
+  messageId: string,
+  status: string,
+  errors?: { code?: number; title?: string; message?: string }[]
+) {
   const log = await db.messageLog.findFirst({ where: { channel: 'whatsapp', messageId } })
   if (!log) return false
 
   if (status === 'failed') {
-    const detail = errors?.[0] ? `${errors[0].title || ''} ${errors[0].message || ''}`.trim() : 'delivery failed'
+    // Meta often repeats the same text in title and message; keep one copy and the code,
+    // so the UI can explain it instead of showing "Message undeliverable Message undeliverable".
+    const e = errors?.[0]
+    const parts = [e?.title, e?.message].filter(Boolean) as string[]
+    const unique = [...new Set(parts.map((p) => p.trim()))]
+    let detail = unique.join(' — ') || 'delivery failed'
+    if (e?.code) detail = `${detail} (code ${e.code})`
     await db.messageLog.update({ where: { id: log.id }, data: { sentOk: false, sendError: detail } })
     return true
   }
@@ -238,16 +249,36 @@ export async function applyWhatsAppStatus(messageId: string, status: string, err
   return true
 }
 
-/** Mark replied when a lead messages us back on WhatsApp. */
-export async function applyWhatsAppInbound(fromPhone: string) {
+/** An inbound WhatsApp message, reduced to what we store. */
+export type { InboundMessage, RawInboundMessage } from '@/lib/whatsapp-inbound'
+export { extractInboundText } from '@/lib/whatsapp-inbound'
+
+/**
+ * Mark replied when a lead messages us back on WhatsApp, and STORE WHAT THEY SAID.
+ *
+ * Previously this only flipped `replied`, so the reply content was lost — the operator could
+ * see that somebody replied but not what they wrote. The most recent message is kept in
+ * `inboundText` and a capped history in `inboundMessages`.
+ */
+export async function applyWhatsAppInbound(fromPhone: string, message?: InboundMessage) {
   const log = await db.messageLog.findFirst({
     where: { channel: 'whatsapp', toPhone: fromPhone },
     orderBy: { createdAt: 'desc' },
   })
   if (!log) return false
+
+  const at = message?.timestamp ? new Date(message.timestamp * 1000) : new Date()
+  const stored = message?.text ? appendInbound(log.inboundMessages, { ...message, timestamp: message.timestamp }) : null
+
   await db.messageLog.update({
     where: { id: log.id },
-    data: { replied: true, repliedAt: new Date(), engagementStatus: 'replied' },
+    data: {
+      replied: true,
+      repliedAt: log.repliedAt ?? at,
+      engagementStatus: 'replied',
+      inboundAt: at,
+      ...(stored ? { inboundText: stored.text, inboundMessages: stored.messages } : {}),
+    },
   })
   return true
 }

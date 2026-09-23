@@ -12,6 +12,7 @@ import { sendWhatsAppTemplate, sendWhatsAppText, isWhatsAppConfigured, normalize
 import { renderTemplate, injectTrackingPixel, htmlToText } from '@/lib/template'
 import { collectMysqlRecipients, isMysqlFlowKey } from '@/lib/mysql-nudges'
 import { buildWhatsAppParams } from '@/lib/whatsapp-params'
+import { isDeliveryCapError, capBackoffHours } from '@/lib/whatsapp-errors'
 import type { Nudge } from '@prisma/client'
 
 export type Channel = 'email' | 'whatsapp'
@@ -151,13 +152,37 @@ interface SendDecision {
   messageNumber?: number
 }
 
+/** The parts of a MessageLog row the sequence logic needs. */
+interface SequenceLog {
+  sentOk: boolean
+  replied: boolean
+  sentAt: Date | null
+  createdAt: Date
+  sendError: string | null
+}
+
 function decideSend(
-  logs: { sentOk: boolean; replied: boolean; sentAt: Date | null }[],
+  logs: SequenceLog[],
   maxEmailsPerLead: number,
   followUpDays: number,
   now: Date
 ): SendDecision {
   if (logs.some((l) => l.replied)) return { action: 'skip', reason: 'replied' }
+
+  // Meta's per-user marketing cap drops a message it will accept again later. Retrying on
+  // every scheduler cycle just repeats the same failure and floods the log, so wait out the
+  // cap instead. Only the MOST RECENT failure matters: a later success clears it.
+  const newest = [...logs].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0]
+  if (newest && !newest.sentOk && isDeliveryCapError(newest.sendError)) {
+    const retryAt = new Date(newest.createdAt.getTime() + capBackoffHours() * 60 * 60 * 1000)
+    if (now < retryAt) {
+      return {
+        action: 'skip',
+        reason: 'delivery_cap_backoff',
+        detail: `Meta capped this recipient — retry after ${retryAt.toISOString().slice(0, 16).replace('T', ' ')}`,
+      }
+    }
+  }
 
   const sentOkLogs = logs.filter((l) => l.sentOk && l.sentAt)
   if (sentOkLogs.length >= maxEmailsPerLead) {
