@@ -8,6 +8,7 @@ import { useToast } from '@/hooks/use-toast'
 import { DashboardTab } from '@/components/app/dashboard-tab'
 import { LeadsTab } from '@/components/app/leads-tab'
 import { NudgesTab } from '@/components/app/nudges-tab'
+import { TemplatesTab } from '@/components/app/templates-tab'
 import { LogsTab } from '@/components/app/logs-tab'
 
 export default function Home() {
@@ -73,11 +74,13 @@ export default function Home() {
             <TabsTrigger value="dashboard">Dashboard</TabsTrigger>
             <TabsTrigger value="leads">Leads</TabsTrigger>
             <TabsTrigger value="nudges">Nudges</TabsTrigger>
+            <TabsTrigger value="templates">Templates</TabsTrigger>
             <TabsTrigger value="logs">Logs</TabsTrigger>
           </TabsList>
           <TabsContent value="dashboard"><DashboardTab refreshKey={refreshKey} /></TabsContent>
           <TabsContent value="leads"><LeadsTab refreshKey={refreshKey} /></TabsContent>
           <TabsContent value="nudges"><NudgesTab refreshKey={refreshKey} onChanged={() => setRefreshKey((k) => k + 1)} /></TabsContent>
+          <TabsContent value="templates"><TemplatesTab refreshKey={refreshKey} /></TabsContent>
           <TabsContent value="logs"><LogsTab refreshKey={refreshKey} /></TabsContent>
         </Tabs>
       </main>

@@ -84,13 +84,22 @@ export function schedulerStatus(): SchedulerStatus {
   }
 }
 
-/** Run every enabled nudge once. Never throws; per-nudge errors are captured. */
+/**
+ * Run every enabled, LEAD-DRIVEN nudge once. Never throws; per-nudge errors are captured.
+ *
+ * Manual / sheet nudges (zohoCriteria === null) are deliberately excluded: they are meant to
+ * be triggered by pasting a Google Sheet URL, and running one on a timer would send its
+ * template to every synced lead with an address.
+ */
 export async function runAllEnabledNudges(opts?: { sync?: boolean; limit?: number | null }): Promise<NudgeRunResult[]> {
   const sync = opts?.sync ?? (process.env.SCHEDULE_SYNC_FROM_ZOHO ?? 'true') === 'true'
   const limit = opts?.limit === undefined ? getBatchLimit() : opts.limit
   const baseUrl = getStaticBaseUrl()
 
-  const nudges = await db.nudge.findMany({ where: { enabled: true }, orderBy: { createdAt: 'asc' } })
+  const nudges = await db.nudge.findMany({
+    where: { enabled: true, zohoCriteria: { not: null } },
+    orderBy: { createdAt: 'asc' },
+  })
   const results: NudgeRunResult[] = []
 
   for (const nudge of nudges) {

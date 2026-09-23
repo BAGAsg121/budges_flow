@@ -64,7 +64,7 @@ npm start                   # node .next/standalone/server.js  (PORT env, defaul
 | App store | `DATABASE_URL`, `PRISMA_LOG_QUERY` | MySQL DSN into `ekodb_icici`; the app's own three tables live there (see below) |
 | Simplibank MySQL | `SB_READ_HOST`, `SB_WRITE_HOST`, `SB_USER`, `SB_PASSWORD`, `SB_NAME`, `SB_PORT`, `SB_CONNECTION_LIMIT`, `SB_CONNECT_TIMEOUT_MS`, `SB_LOG_QUERY` | Connection details for the external business data — read **read-only** through `src/lib/sb-db.ts` |
 | Access control | `AUTH_ENABLED`, `APP_USERNAME`, `APP_PASSWORD` | Basic auth over the whole app |
-| Scheduler | `SCHEDULER_ENABLED`, `SCHEDULE_INTERVAL_MINUTES`, `SCHEDULE_SYNC_FROM_ZOHO`, `NUDGE_MAX_PER_RUN`, `CRON_SECRET` | |
+| Scheduler | `SCHEDULER_ENABLED`, `SCHEDULE_INTERVAL_MINUTES`, `SCHEDULE_SYNC_FROM_ZOHO`, `NUDGE_MAX_PER_RUN`, `CRON_SECRET` | ⚠️ `SCHEDULER_ENABLED=true` sends to real leads automatically once SMTP works |
 | Zoho CRM | `ZOHO_CLIENT_ID`, `ZOHO_CLIENT_SECRET`, `ZOHO_REFRESH_TOKEN`, `ZOHO_API_BASE`, `ZOHO_ACCOUNTS_BASE`, `ZOHO_ACCESS_TOKEN` | Refresh-token flow; the static token is a fallback only |
 | Zoho Mail | `ZOHO_MAIL_*` | Kept from the n8n flow for reference / IMAP |
 | SMTP | `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` | `SMTP_USER`/`SMTP_PASS` must be filled in to send |
@@ -251,6 +251,110 @@ request timeout; leftover leads are deferred to the next cycle (shown as `deferr
 - **WhatsApp** — register the sending number in Meta, approve a template, fill `WHATSAPP_TOKEN` +
   `WHATSAPP_PHONE_NUMBER_ID`, and set the Meta webhook to `{APP_BASE_URL}/api/track/whatsapp` with
   `WHATSAPP_VERIFY_TOKEN`. Deliveries/reads and inbound replies update the logs automatically.
+
+## WhatsApp setup and testing
+
+Three different Meta values are easy to confuse, and only two of them can send:
+
+| Value | Looks like | What it does |
+| --- | --- | --- |
+| `WHATSAPP_TOKEN` | long, starts with `EAA` | **Sends messages.** A System User or temporary access token |
+| `WHATSAPP_PHONE_NUMBER_ID` | ~15 digits, e.g. `123456789012345` | **Sends messages.** The Phone Number ID from WhatsApp Manager |
+| `WHATSAPP_APP_SECRET` | 32 hex chars | **Cannot send.** Verifies `X-Hub-Signature-256` on incoming webhooks |
+
+A 32-character hex string in `WHATSAPP_TOKEN` fails with
+`Invalid OAuth access token - Cannot parse access token` (code 190). `WHATSAPP_DISPLAY_NUMBER`
+(`9599722251`) is the sending number — it is *not* the Phone Number ID, and the WABA ID is a
+third, different value again.
+
+### Managing templates from the app
+
+The **Templates** tab lists every template on the WABA with its live approval status, and lets you
+submit new ones without leaving the dashboard.
+
+| | |
+| --- | --- |
+| `GET /api/whatsapp/templates` | every template: name, language, category, status, rejection reason |
+| `POST /api/whatsapp/templates` | submit a new one (returns `PENDING`) |
+| `DELETE /api/whatsapp/templates?name=&language=` | remove one (Meta-side only) |
+
+In the UI: **New template** opens a form (name, language, category, header, body, footer, optional URL
+button). Validation runs locally first — name charset, category, 1024/60/25-character limits,
+contiguous `{{1}}`… variables, `https://` on button URLs, and the rule that a URL variable must be a
+single `{{1}}` at the very end. Example values for Meta are generated automatically.
+
+New templates come back as **Pending review** and only become attachable once Meta approves them —
+hit **Refresh status** to check. **Use in nudge** on an approved template sets that nudge's channel to
+WhatsApp and stores the template name and language for you.
+
+> ⚠️ **The language must match exactly.** Meta treats `en` and `en_US` as different locales, and a
+> mismatch fails with `132001 — template name does not exist in the translation`, which reads like the
+> template is missing. Always copy the language from the list rather than typing it.
+
+Same operations from the CLI, using the identical module the API route calls:
+
+```bash
+npm run wa:templates                      # list with status flags
+npm run wa:templates -- --create-test     # create + delete a self-test template
+npm run wa:templates -- --delete NAME --lang en_US
+```
+
+### Verify it works
+
+```bash
+npm run wa:check                 # validates the credential shapes, then sends a test message
+npm run wa:check 9643520034      # explicit number
+npm run wa:check -- --template hello_world --lang en_US   # send an approved template
+npm run wa:check -- --list-templates                      # names + exact language codes
+npm run wa:webhook               # reproduce Meta's webhook handshake
+```
+
+### Test lead and sample nudge
+
+```bash
+npm run test-lead                # creates the test lead (default number 9643520034)
+npm run test-lead 9876543210     # a different number
+npm run test-lead -- --delete    # remove it again, with its logs
+```
+
+The test lead is marked three ways: a `TEST-WHATSAPP-<number>` zohoId, a `WhatsApp Test` status,
+and fake name fields. The `whatsapp_sample` nudge targets **only** that status, so it can never
+reach a real lead — it resolves to exactly one lead. Enable the nudge and click **Run** to send it.
+
+### The 24-hour rule
+
+Business-initiated messages normally require an **approved template**. Free-form text (what
+`whatsapp_sample` sends, since it has no template name) is only allowed when the recipient messaged
+you in the last 24 hours, or is registered as a test recipient in the Meta dashboard. Outside that
+window Meta returns an error and you must use a template — set the nudge's *Meta template name* and
+it switches to template mode automatically.
+
+### Webhooks
+
+Point Meta at `{APP_BASE_URL}/api/track/whatsapp` with `WHATSAPP_VERIFY_TOKEN`. With
+`WHATSAPP_APP_SECRET` set, incoming payloads are verified against `X-Hub-Signature-256` and
+unsigned or forged requests are rejected with 403. Delivery/read receipts then mark messages
+opened, and inbound replies mark them replied (which stops that lead's sequence).
+
+Test the exact handshake Meta performs, before touching the Meta dashboard:
+
+```bash
+npm run wa:webhook                                  # uses APP_BASE_URL
+npm run wa:webhook https://example.com              # explicit host
+npm run wa:webhook -- --token <token>               # test a specific token value
+```
+
+It checks `/api/health` (is the service awake, and on the current build?), the subscribe
+handshake (must echo `hub.challenge`), that a wrong token is refused with 403, and with `--post`
+it can send a synthetic signature-verified status event.
+
+In Meta: **WhatsApp → Configuration → Webhook → Edit**, paste the callback URL and verify token,
+click **Verify and save**, then **Manage** the `messages` field subscription.
+
+> On a host that sleeps, wake the app first (open the URL, wait for `/api/health` to return 200).
+> Meta's verification request times out quickly, and a cold start looks like a failure.
+
+---
 
 ## Deploying to Render
 

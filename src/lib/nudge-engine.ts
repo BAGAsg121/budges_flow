@@ -8,7 +8,7 @@ import { randomUUID } from 'crypto'
 import { db } from '@/lib/db'
 import { searchAllLeads, mapZohoLead } from '@/lib/zoho'
 import { sendEmail, isMailerConfigured } from '@/lib/mailer'
-import { sendWhatsAppTemplate, isWhatsAppConfigured, normalizePhone } from '@/lib/whatsapp'
+import { sendWhatsAppTemplate, sendWhatsAppText, isWhatsAppConfigured, normalizePhone } from '@/lib/whatsapp'
 import { renderTemplate, injectTrackingPixel, htmlToText } from '@/lib/template'
 
 export type Channel = 'email' | 'whatsapp'
@@ -22,6 +22,20 @@ export interface NudgeFilters {
   businessVertical?: string
   maxKycCount?: number
   minKycCount?: number
+  /**
+   * Treat a NULL KYC_Document_Upload_Count as 0 ("nothing uploaded yet") rather than
+   * "unknown". Default TRUE, matching the original n8n flow, which did
+   * `count = (raw == null || raw === '') ? 0 : Number(raw)`.
+   * Without this, a lead with no KYC value is silently excluded from the
+   * documents-pending nudge, because NULL does not satisfy `<= n`.
+   */
+  treatNullKycAsZero?: boolean
+  /**
+   * Only message one lead per email address per run. Default TRUE — the CRM holds many
+   * leads that share an email (re-imports, re-enquiries), and without this the same person
+   * receives several copies of the same nudge in one run.
+   */
+  dedupeByEmail?: boolean
   createdAfter?: string // ISO date
 }
 
@@ -60,13 +74,14 @@ export function parseFilters(raw: string): NudgeFilters {
 
 function buildWhere(filters: NudgeFilters, channel: Channel) {
   const where: Record<string, unknown> = {}
+  // Conditions that need their own OR are collected here and AND-ed together, so a
+  // KYC-null OR can coexist with the phone OR.
+  const and: Record<string, unknown>[] = []
 
   if (channel === 'email') {
     if (filters.requireEmail !== false) where.email = { not: null }
-  } else {
-    if (filters.requirePhone !== false) {
-      where.OR = [{ mobile: { not: null } }, { phone: { not: null } }]
-    }
+  } else if (filters.requirePhone !== false) {
+    and.push({ OR: [{ mobile: { not: null } }, { phone: { not: null } }] })
   }
 
   if (filters.includeStatuses?.length) {
@@ -77,18 +92,27 @@ function buildWhere(filters: NudgeFilters, channel: Channel) {
   if (filters.businessVertical) {
     where.businessVertical = filters.businessVertical
   }
-  if (filters.maxKycCount !== undefined) {
-    where.kycDocumentUploadCount = { ...(where.kycDocumentUploadCount as object), lte: filters.maxKycCount }
-  }
-  if (filters.minKycCount !== undefined) {
-    where.kycDocumentUploadCount = { ...(where.kycDocumentUploadCount as object), gte: filters.minKycCount }
-  }
-  if (filters.createdAfter) {
-    const d = new Date(filters.createdAfter)
-    if (!Number.isNaN(d.getTime())) {
-      where.createdTime = { ...(where.createdTime as object), gte: d }
+
+  const kycRange: Record<string, number> = {}
+  if (filters.maxKycCount !== undefined) kycRange.lte = filters.maxKycCount
+  if (filters.minKycCount !== undefined) kycRange.gte = filters.minKycCount
+  if (Object.keys(kycRange).length) {
+    // A missing KYC value means "nothing uploaded yet" (default), so it counts as 0.
+    const treatNullAsZero = filters.treatNullKycAsZero !== false
+    const withinRange = { kycDocumentUploadCount: kycRange }
+    if (treatNullAsZero && filters.minKycCount === undefined) {
+      and.push({ OR: [withinRange, { kycDocumentUploadCount: null }] })
+    } else {
+      and.push(withinRange)
     }
   }
+
+  if (filters.createdAfter) {
+    const d = new Date(filters.createdAfter)
+    if (!Number.isNaN(d.getTime())) where.createdTime = { gte: d }
+  }
+
+  if (and.length) where.AND = and
   return where
 }
 
@@ -254,6 +278,14 @@ export async function runNudge(
 
   const now = new Date()
   let attempts = 0
+  // The CRM holds many leads sharing one email address, so without this the same person
+  // receives several copies of the same nudge in a single run.
+  const dedupe = filters.dedupeByEmail !== false
+  const messagedContacts = new Set<string>()
+  const contactKey = (lead: { email: string | null; phone: string | null; mobile: string | null }) =>
+    channel === 'email'
+      ? (lead.email || '').trim().toLowerCase()
+      : normalizePhone(lead.mobile || lead.phone) || ''
 
   for (const lead of leads) {
     const logs = await db.messageLog.findMany({ where: { nudgeId: nudge.id, leadId: lead.id } })
@@ -284,6 +316,21 @@ export async function runNudge(
       continue
     }
 
+    const key = dedupe ? contactKey(lead) : ''
+    if (key) {
+      if (messagedContacts.has(key)) {
+        summary.skipped.push({
+          lead: lead.fullName || lead.email || lead.zohoId,
+          email: lead.email,
+          phone: lead.phone || lead.mobile,
+          reason: 'duplicate_contact',
+          detail: 'same email address already messaged in this run',
+        })
+        continue
+      }
+      messagedContacts.add(key)
+    }
+
     const messageNumber = decision.messageNumber ?? 1
     const vars = buildLeadVars(lead, messageNumber, now)
 
@@ -301,14 +348,22 @@ export async function runNudge(
       }
 
       attempts++
-      const paramValues = buildWhatsAppParams(nudge.whatsappParams, vars)
-
-      const result = await sendWhatsAppTemplate({
-        to: toPhone,
-        templateName: nudge.whatsappTemplateName || '',
-        language: nudge.whatsappLanguage || 'en',
-        params: paramValues,
-      })
+      // With a template name configured we send the approved template (required for
+      // business-initiated messages). Without one we send free-form text, which Meta
+      // allows inside the 24h customer service window or to a registered test number —
+      // useful for verifying the integration before a template is approved.
+      const templateName = (nudge.whatsappTemplateName || '').trim()
+      const result = templateName
+        ? await sendWhatsAppTemplate({
+            to: toPhone,
+            templateName,
+            language: nudge.whatsappLanguage || 'en',
+            params: buildWhatsAppParams(nudge.whatsappParams, vars),
+          })
+        : await sendWhatsAppText({
+            to: toPhone,
+            text: renderTemplate(nudge.bodyTemplate || '', vars),
+          })
 
       await db.messageLog.create({
         data: {
@@ -390,6 +445,12 @@ export async function previewNudge(nudgeId: string) {
 
   const wouldSend: { lead: string; email: string | null; phone: string | null; messageNumber: number }[] = []
   const wouldSkip: RunSkipped[] = []
+  const dedupe = filters.dedupeByEmail !== false
+  const seenContacts = new Set<string>()
+  const contactKey = (lead: { email: string | null; phone: string | null; mobile: string | null }) =>
+    channel === 'email'
+      ? (lead.email || '').trim().toLowerCase()
+      : normalizePhone(lead.mobile || lead.phone) || ''
 
   for (const lead of leads) {
     const logs = await db.messageLog.findMany({ where: { nudgeId: nudge.id, leadId: lead.id } })
@@ -406,6 +467,18 @@ export async function previewNudge(nudgeId: string) {
         })
         continue
       }
+      const key = dedupe ? contactKey(lead) : ''
+      if (key && seenContacts.has(key)) {
+        wouldSkip.push({
+          lead: lead.fullName || lead.email || lead.zohoId,
+          email: lead.email,
+          phone: lead.phone || lead.mobile,
+          reason: 'duplicate_contact',
+          detail: 'same email address already targeted in this run',
+        })
+        continue
+      }
+      if (key) seenContacts.add(key)
       wouldSend.push({
         lead: lead.fullName || lead.email || lead.zohoId,
         email: lead.email,

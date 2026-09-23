@@ -8,7 +8,7 @@
  *         inbound -> latest message from that lead marked replied (engagement 'replied')
  */
 import { NextRequest, NextResponse } from 'next/server'
-import { applyWhatsAppStatus, applyWhatsAppInbound } from '@/lib/whatsapp'
+import { applyWhatsAppStatus, applyWhatsAppInbound, verifyWhatsAppSignature } from '@/lib/whatsapp'
 
 export const dynamic = 'force-dynamic'
 
@@ -36,7 +36,14 @@ interface WebhookBody {
 
 export async function POST(req: NextRequest) {
   try {
-    const body = (await req.json()) as WebhookBody
+    // Verify Meta's HMAC signature over the RAW body before trusting anything in it.
+    // Skipped only when WHATSAPP_APP_SECRET is unset.
+    const raw = await req.text()
+    if (!verifyWhatsAppSignature(raw, req.headers.get('x-hub-signature-256'))) {
+      return new NextResponse('Invalid signature', { status: 403 })
+    }
+
+    const body = JSON.parse(raw || '{}') as WebhookBody
 
     for (const entry of body.entry ?? []) {
       for (const change of entry.changes ?? []) {

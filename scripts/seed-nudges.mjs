@@ -50,12 +50,27 @@ for (const n of all) {
     continue
   }
   const f = parse(n.filters)
-  const where = { ...withEmail }
+  // Channel-aware contact requirement, mirroring buildWhere(): email nudges need an
+  // address, WhatsApp nudges need a phone (the test lead has no email on purpose).
+  const and = []
+  if (n.channel === 'email') and.push({ email: { not: null } })
+  else and.push({ OR: [{ mobile: { not: null } }, { phone: { not: null } }] })
+
+  const where = {}
   if (f.includeStatuses?.length) where.leadStatus = { in: f.includeStatuses }
-  if (f.maxKycCount !== undefined) where.kycDocumentUploadCount = { lte: f.maxKycCount }
-  if (f.minKycCount !== undefined) where.kycDocumentUploadCount = { gte: f.minKycCount }
+  else if (f.excludeStatuses?.length) where.leadStatus = { notIn: f.excludeStatuses }
+  if (f.maxKycCount !== undefined) {
+    // A missing KYC value counts as 0 ("nothing uploaded yet"), so NULL is included
+    // alongside `<= max`.
+    and.push({ OR: [{ kycDocumentUploadCount: { lte: f.maxKycCount } }, { kycDocumentUploadCount: null }] })
+  } else if (f.minKycCount !== undefined) {
+    and.push({ kycDocumentUploadCount: { gte: f.minKycCount } })
+  }
+  if (and.length) where.AND = and
+
   const n_count = await db.lead.count({ where })
-  console.log(`  ${n.key.padEnd(30)} ${String(n_count).padStart(4)} lead(s) with an email  ${f.includeStatuses ? '· ' + f.includeStatuses.join(', ') : ''}${f.maxKycCount !== undefined ? ` · KYC <= ${f.maxKycCount}` : ''}`)
+  const who = n.channel === 'email' ? 'with an email' : 'with a phone'
+  console.log(`  ${n.key.padEnd(30)} ${String(n_count).padStart(4)} lead(s) ${who}  ${f.includeStatuses ? '· ' + f.includeStatuses.join(', ') : ''}${f.maxKycCount !== undefined ? ` · KYC <= ${f.maxKycCount} or unset` : ''}`)
 }
 
 // ---- lead data integrity ---------------------------------------------------

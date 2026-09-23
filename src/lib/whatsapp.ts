@@ -10,11 +10,27 @@
  *   5. Point the Meta webhook to {APP_URL}/api/track/whatsapp with the same verify token
  */
 import { db } from '@/lib/db'
+import { createHmac, timingSafeEqual } from 'crypto'
 
 const GRAPH_BASE = () => `https://graph.facebook.com/${process.env.WHATSAPP_API_VERSION || 'v21.0'}`
 
 export function isWhatsAppConfigured(): boolean {
   return Boolean(process.env.WHATSAPP_TOKEN && process.env.WHATSAPP_PHONE_NUMBER_ID)
+}
+
+/** Which pieces of WhatsApp config are present (never returns the values themselves). */
+export function whatsAppConfigStatus() {
+  const token = process.env.WHATSAPP_TOKEN || ''
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID || ''
+  return {
+    tokenPresent: Boolean(token),
+    tokenLooksValid: token.startsWith('EAA'),
+    phoneNumberIdPresent: Boolean(phoneNumberId),
+    phoneNumberIdLooksValid: /^\d{10,20}$/.test(phoneNumberId),
+    appSecretPresent: Boolean(process.env.WHATSAPP_APP_SECRET),
+    displayNumber: process.env.WHATSAPP_DISPLAY_NUMBER || null,
+    apiVersion: process.env.WHATSAPP_API_VERSION || 'v21.0',
+  }
 }
 
 export function getWhatsAppDisplayNumber(): string {
@@ -40,6 +56,37 @@ export interface WhatsAppSendResult {
   error?: string
 }
 
+const NOT_CONFIGURED =
+  'WhatsApp not configured — set WHATSAPP_TOKEN (a System User token starting with "EAA") and WHATSAPP_PHONE_NUMBER_ID (the numeric Phone Number ID from WhatsApp Manager, NOT the phone number itself).'
+
+/** Shared POST to /{phone_number_id}/messages. */
+async function postMessage(payload: Record<string, unknown>): Promise<WhatsAppSendResult> {
+  if (!isWhatsAppConfigured()) return { ok: false, error: NOT_CONFIGURED }
+
+  try {
+    const res = await fetch(`${GRAPH_BASE()}/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    })
+    const data = (await res.json().catch(() => ({}))) as {
+      messages?: { id?: string }[]
+      error?: { message?: string; code?: number; error_subcode?: number; type?: string }
+    }
+    if (!res.ok) {
+      const detail = data?.error
+      const suffix = detail?.code ? ` (code ${detail.code}${detail.error_subcode ? `/${detail.error_subcode}` : ''})` : ''
+      return { ok: false, error: `WhatsApp API: ${detail?.message || `HTTP ${res.status}`}${suffix}` }
+    }
+    return { ok: true, waMessageId: data.messages?.[0]?.id }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
 /** Send an approved template message. params[] map positionally to {{1}}, {{2}}, ... */
 export async function sendWhatsAppTemplate(opts: {
   to: string
@@ -47,14 +94,6 @@ export async function sendWhatsAppTemplate(opts: {
   language?: string
   params: string[]
 }): Promise<WhatsAppSendResult> {
-  if (!isWhatsAppConfigured()) {
-    return {
-      ok: false,
-      error:
-        'WhatsApp not configured (set WHATSAPP_TOKEN and WHATSAPP_PHONE_NUMBER_ID in .env; template must be approved in Meta)',
-    }
-  }
-
   const payload: Record<string, unknown> = {
     messaging_product: 'whatsapp',
     recipient_type: 'individual',
@@ -73,27 +112,52 @@ export async function sendWhatsAppTemplate(opts: {
       },
     ]
   }
+  return postMessage(payload)
+}
 
-  try {
-    const res = await fetch(`${GRAPH_BASE()}/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(payload),
-    })
-    const data = (await res.json().catch(() => ({}))) as {
-      messages?: { id?: string }[]
-      error?: { message?: string }
-    }
-    if (!res.ok) {
-      return { ok: false, error: `WhatsApp API: ${data?.error?.message || `HTTP ${res.status}`}` }
-    }
-    return { ok: true, waMessageId: data.messages?.[0]?.id }
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) }
-  }
+/**
+ * Send a plain text message.
+ * Meta only allows free-form text inside the 24-hour customer service window (i.e. the
+ * recipient messaged you first) or to a registered test number. Outside that window this
+ * returns an error and you must use an approved template instead.
+ */
+export async function sendWhatsAppText(opts: { to: string; text: string }): Promise<WhatsAppSendResult> {
+  return postMessage({
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to: opts.to,
+    type: 'text',
+    text: { preview_url: false, body: opts.text },
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Webhook signature verification (X-Hub-Signature-256, HMAC-SHA256 with the App Secret)
+// ---------------------------------------------------------------------------
+
+export function isWhatsAppSignatureVerificationConfigured(): boolean {
+  return Boolean(process.env.WHATSAPP_APP_SECRET)
+}
+
+/**
+ * Verify Meta's `X-Hub-Signature-256` header against the raw request body.
+ * Returns true when no App Secret is configured, so an unconfigured deployment keeps
+ * working — but configure WHATSAPP_APP_SECRET in production, otherwise anyone who knows
+ * the URL can forge webhook events.
+ */
+export function verifyWhatsAppSignature(rawBody: string, signatureHeader: string | null | undefined): boolean {
+  const secret = process.env.WHATSAPP_APP_SECRET
+  if (!secret) return true
+  if (!signatureHeader || !signatureHeader.startsWith('sha256=')) return false
+
+  const expected = createHmac('sha256', secret).update(rawBody, 'utf8').digest('hex')
+  const provided = signatureHeader.slice('sha256='.length).trim()
+  if (!/^[0-9a-f]+$/i.test(provided)) return false
+
+  const a = Buffer.from(expected, 'hex')
+  const b = Buffer.from(provided, 'hex')
+  if (a.length !== b.length) return false
+  return timingSafeEqual(a, b)
 }
 
 /**

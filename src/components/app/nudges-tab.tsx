@@ -72,6 +72,8 @@ function reasonBadge(reason: string, detail?: string) {
       return <Badge variant="destructive">no valid phone</Badge>
     case 'batch_limit':
       return <Badge variant="outline">deferred{detail ? ` · ${detail}` : ''}</Badge>
+    case 'duplicate_contact':
+      return <Badge variant="outline">duplicate email{detail ? ` · ${detail}` : ''}</Badge>
     default:
       return <Badge variant="outline">{reason}{detail ? ` · ${detail}` : ''}</Badge>
   }
@@ -428,7 +430,12 @@ export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onCha
                   </div>
                   <div className="grid gap-1.5">
                     <Label htmlFor="n-wa-lang">Template language</Label>
-                    <Input id="n-wa-lang" value={form.whatsappLanguage} onChange={(e) => setForm({ ...form, whatsappLanguage: e.target.value })} placeholder="en" />
+                    <Input id="n-wa-lang" value={form.whatsappLanguage} onChange={(e) => setForm({ ...form, whatsappLanguage: e.target.value })} placeholder="en_US" />
+                    <p className="text-xs text-muted-foreground">
+                      Must match the approved template <b>exactly</b>. Meta distinguishes <code>en</code> from{' '}
+                      <code>en_US</code>, and a mismatch fails with <code>132001 — template does not exist in the
+                      translation</code>. Check with <code>npm run wa:check -- --list-templates</code>.
+                    </p>
                   </div>
                 </div>
                 <div className="grid gap-1.5">

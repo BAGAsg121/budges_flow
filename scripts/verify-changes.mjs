@@ -5,7 +5,8 @@
  */
 import { renderTemplate, escapeHtml, injectTrackingPixel, htmlToText } from '../src/lib/template.ts'
 import { isCronAuthorized, isWebhookAuthorized } from '../src/lib/cron-auth.ts'
-import { DEFAULT_NUDGES, ZOHO_CRITERIA, LEAD_STATUS, PAY_ACTIVATION_FEE_URL } from '../src/lib/nudge-defaults.ts'
+import { DEFAULT_NUDGES, ZOHO_CRITERIA, LEAD_STATUS, PAY_ACTIVATION_FEE_URL, WHATSAPP_TEST_STATUS } from '../src/lib/nudge-defaults.ts'
+import { buildTemplatePayload, validateTemplateInput, countTemplateVars } from '../src/lib/whatsapp-templates.ts'
 
 let failures = 0
 function check(name, actual, expected) {
@@ -103,6 +104,64 @@ checkTrue('not-transacting has the pay CTA', notTransacting.includes('?mobile=98
 
 const agreement = renderTemplate(byKey['onboarding_started_agreement'].bodyTemplate, { first_name: 'Asha' }, { escapeValues: true })
 checkTrue('agreement nudge asks for agreement signing', agreement.includes('agreement signing'))
+
+// --- WhatsApp sample nudge --------------------------------------------------
+const wa = byKey['whatsapp_sample']
+checkTrue('whatsapp_sample exists', Boolean(wa))
+check('whatsapp_sample is a whatsapp nudge', wa.channel, 'whatsapp')
+check('whatsapp_sample ships disabled', wa.enabled, false)
+check('whatsapp_sample has no template name (=> free-form text mode)', wa.whatsappTemplateName, null)
+check('whatsapp_sample targets only the test-lead status', filtersOf('whatsapp_sample').includeStatuses[0], WHATSAPP_TEST_STATUS)
+check('whatsapp_sample targets exactly one status', filtersOf('whatsapp_sample').includeStatuses.length, 1)
+checkTrue('whatsapp_sample asks for a phone', filtersOf('whatsapp_sample').requirePhone === true)
+check('whatsapp_sample is capped at 1 message/lead', wa.maxEmailsPerLead, 1)
+checkTrue('whatsapp_sample body renders first_name', renderTemplate(wa.bodyTemplate, { first_name: 'Asha' }).includes('Hi Asha'))
+check('documents_pending_wa is the only other whatsapp nudge', DEFAULT_NUDGES.filter((n) => n.channel === 'whatsapp').length, 2)
+
+// --- WhatsApp template builder ----------------------------------------------
+check('countTemplateVars counts the highest placeholder', countTemplateVars('Hi {{1}}, {{2}} and {{3}}'), 3)
+check('countTemplateVars is 0 with no variables', countTemplateVars('no variables here'), 0)
+check('countTemplateVars tolerates spaces', countTemplateVars('{{ 2 }}'), 2)
+
+const goodTemplate = {
+  name: 'documents_pending_reminder',
+  language: 'en_US',
+  category: 'UTILITY',
+  headerText: 'KYC update',
+  bodyText: 'Hi {{1}}, your KYC for {{2}} is pending ({{3}} uploaded).',
+  footerText: 'Eko Team',
+  buttonText: 'REVIEW and PAY',
+  buttonUrl: 'https://eps.eko.in/console/pay-activation-fee?mobile={{1}}',
+}
+
+const goodValidation = validateTemplateInput(goodTemplate)
+check('a well-formed template has no errors', goodValidation.errors.length, 0)
+
+const payload = buildTemplatePayload(goodTemplate)
+check('payload carries name/language/category', `${payload.name}|${payload.language}|${payload.category}`, 'documents_pending_reminder|en_US|UTILITY')
+const types = payload.components.map((c) => c.type)
+check('payload component order', types.join(','), 'HEADER,BODY,FOOTER,BUTTONS')
+const bodyComp = payload.components.find((c) => c.type === 'BODY')
+check('body gets an example sized to its variable count', bodyComp.example.body_text[0].length, 3)
+const btnComp = payload.components.find((c) => c.type === 'BUTTONS')
+check('url button carries an example when it has a variable', Array.isArray(btnComp.buttons[0].example), true)
+check('url button html text preserved', btnComp.buttons[0].text, 'REVIEW and PAY')
+
+const plain = buildTemplatePayload({ name: 'plain_note', language: 'en', category: 'UTILITY', bodyText: 'No variables at all' })
+check('no example when the body has no variables', plain.components.find((c) => c.type === 'BODY').example, undefined)
+check('no header/footer/buttons when not supplied', plain.components.length, 1)
+
+check('name rejects uppercase', validateTemplateInput({ ...goodTemplate, name: 'Bad Name' }).errors.length > 0, true)
+check('language warns about bare "en"', validateTemplateInput({ ...goodTemplate, language: 'en' }).warnings.length > 0, true)
+check('bad category rejected', validateTemplateInput({ ...goodTemplate, category: 'PROMO' }).errors.length > 0, true)
+check('non-contiguous variables rejected', validateTemplateInput({ ...goodTemplate, bodyText: 'Hi {{1}} and {{3}}' }).errors.length > 0, true)
+check('button text without url rejected', validateTemplateInput({ ...goodTemplate, buttonUrl: '' }).errors.length > 0, true)
+check('button url without text rejected', validateTemplateInput({ ...goodTemplate, buttonText: '' }).errors.length > 0, true)
+check('http button url rejected', validateTemplateInput({ ...goodTemplate, buttonUrl: 'http://x.test/{{1}}' }).errors.length > 0, true)
+check('url variable must be at the end', validateTemplateInput({ ...goodTemplate, buttonUrl: 'https://x.test/{{1}}/tail' }).errors.length > 0, true)
+check('over-long body rejected', validateTemplateInput({ ...goodTemplate, bodyText: 'x'.repeat(1025) }).errors.length > 0, true)
+check('over-long footer rejected', validateTemplateInput({ ...goodTemplate, footerText: 'x'.repeat(61) }).errors.length > 0, true)
+check('empty body rejected', validateTemplateInput({ ...goodTemplate, bodyText: '' }).errors.length > 0, true)
 
 console.log(failures === 0 ? '\nAll checks passed.' : `\n${failures} check(s) FAILED.`)
 process.exit(failures === 0 ? 0 : 1)

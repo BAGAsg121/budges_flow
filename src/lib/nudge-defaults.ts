@@ -35,6 +35,12 @@ export const ZOHO_LEADS_CREATED_AFTER = '2026-08-01T00:00:00+05:30'
 /** KYC is considered complete at 11 uploads, so pending means < 11. */
 export const KYC_COMPLETE_AT = 11
 
+/**
+ * Status used by the WhatsApp test lead (scripts/create-test-lead.mjs). The sample
+ * nudge targets ONLY this status, so it can never message a real lead by accident.
+ */
+export const WHATSAPP_TEST_STATUS = 'WhatsApp Test'
+
 export const ZOHO_CRITERIA =
   `((Business_vertical:equals:EPS)and(Created_Time:greater_than:${ZOHO_LEADS_CREATED_AFTER}))`
 
@@ -177,6 +183,25 @@ export const DEFAULT_NUDGES: NudgeSeed[] = [
     filters: json({ requireEmail: true }),
     subjectTemplate: 'Your Eko account is activated — complete your integration',
     bodyTemplate: ONBOARDED_NOT_TRANSACTING_BODY,
+    maxEmailsPerLead: 1,
+    followUpDays: 0,
+  },
+  {
+    key: 'whatsapp_sample',
+    name: 'WhatsApp test message (sample)',
+    description:
+      'SAMPLE / integration check. Sends a plain-text WhatsApp message (no approved template needed). It is DISABLED by default and only ever targets leads whose status is exactly "WhatsApp Test" — i.e. the test lead created by scripts/create-test-lead.mjs. It therefore cannot message a real lead. Enable it and click Run to send a single test message. The quickest check with an arbitrary number is POST /api/whatsapp/test instead.',
+    enabled: false,
+    channel: 'whatsapp',
+    zohoCriteria: ZOHO_CRITERIA,
+    // Only the test lead. Never widen this without checking who it would reach.
+    filters: json({ requirePhone: true, includeStatuses: [WHATSAPP_TEST_STATUS] }),
+    // No whatsappTemplateName -> the sender falls back to free-form text.
+    bodyTemplate:
+      'Hi {{first_name}}, this is a test message from the Eko Nudge Engine. If you received this, the WhatsApp integration is working. Reply to this message to confirm.',
+    whatsappTemplateName: null,
+    whatsappLanguage: 'en',
+    whatsappParams: null,
     maxEmailsPerLead: 1,
     followUpDays: 0,
   },

@@ -172,3 +172,134 @@ Stage Summary:
 - Fetch is now EPS, 1 Aug -> now, unfiltered at source; all status/KYC decisions are local and exact.
 - Four nudges delivered as requested, two of them manual Google Sheet flows with the activation-fee CTA.
 - Nothing was deleted. Lead data was already clean, and de-dup is enforced by a unique constraint rather than by cleanup.
+
+---
+
+Task ID: 8
+Agent: Main agent (DeepSeek Harness)
+Task: WhatsApp setup — test lead, sample nudge, credential diagnostics, webhook signature verification.
+
+Work Log:
+- The supplied key `6b507bd2aa798e20ad3f9f52ec389b7b` is NOT a WhatsApp access token. Proved it against the Graph API: `{"error":{"message":"Invalid OAuth access token - Cannot parse access token","type":"OAuthException","code":190}}`. It is 32 hex chars = the Meta App Secret, which can only verify webhook signatures. The two values that actually send (WHATSAPP_TOKEN starting with "EAA", and the numeric WHATSAPP_PHONE_NUMBER_ID) are still missing.
+- Put the App Secret to its correct use: /api/track/whatsapp now verifies X-Hub-Signature-256 (HMAC-SHA256 over the raw body, timing-safe compare) and rejects forged payloads with 403. Reads the raw body via req.text() then parses, as the HMAC must cover the exact bytes.
+- whatsapp.ts: extracted a shared postMessage(); added sendWhatsAppText() for free-form text; added whatsAppConfigStatus() so the config can be reported without leaking values (flags "does not start with EAA" specifically, since that is the exact mistake made).
+- nudge-engine: a WhatsApp nudge with no whatsappTemplateName now falls back to free-form text instead of sending an empty template name. With a template name it still sends the approved template.
+- New scripts/check-whatsapp.mjs + `npm run wa:check` — validates credential shapes and actually sends a test message, printing Meta's raw response and the specific fix for each failure mode. Standalone: no web server needed.
+- New scripts/create-test-lead.mjs + `npm run test-lead` — idempotent upsert of the test lead (default number 9643520034, the user's). Marked three ways (TEST-WHATSAPP-<number> zohoId, "WhatsApp Test" status, fake name fields), with --delete to remove it and its logs.
+- New `whatsapp_sample` nudge, DISABLED, channel whatsapp, no template name (so free-form text). Its filter targets ONLY the "WhatsApp Test" status, so it resolves to exactly 1 lead and can never message a real lead — the earlier sentinel "matches nobody" design was replaced because a nudge that targets nobody cannot be used to verify anything.
+- New POST/GET /api/whatsapp/test (behind the app password) — reports config state and sends a single message to an arbitrary number, the fastest verification path.
+- Found and fixed a bug in my own arg parsing in check-whatsapp.mjs: with no --template flag, `templateIdx + 1` was 0, which filtered out the first positional argument, silently ignoring the phone number and falling back to the default.
+- MAJOR data change observed mid-task: the broadened fetch (Task 7) grew the lead table from 331 to 1651. KYC is now NULL for 1201 leads and there are 100 duplicate-email groups — leads the old `KYC_Document_Upload_Count:less_equal:11` filter had been hiding, plus Closed Won (111) / Closed Lost (75) which the old criteria excluded.
+  Two consequences handled:
+  1. NULL KYC would have silently excluded 1201 leads from documents_pending, because NULL does not satisfy `<= n`. Since the original n8n flow treated an empty count as 0 ("nothing uploaded"), added `treatNullKycAsZero` (default TRUE) to NudgeFilters/buildWhere. documents_pending went 47 -> 48 for Agreement Signed.
+  2. Multiple leads sharing an email would each receive the same nudge in one run. Added `dedupeByEmail` (default TRUE): within a run only the first lead per email address is messaged, the rest are skipped with reason `duplicate_contact`, and a UI badge. Dedup is applied to leads that would actually be sent, so a lead skipped for another reason does not block its duplicate.
+  buildWhere was restructured to collect OR-conditions into an AND array so the KYC-null OR can coexist with the phone OR.
+- verify-changes.mjs now 55 assertions (added WhatsApp sample-nudge checks); all pass. tsc clean, eslint clean.
+
+Stage Summary:
+- WhatsApp sending is fully wired but BLOCKED on two values the user must supply: WHATSAPP_TOKEN (EAA…) and WHATSAPP_PHONE_NUMBER_ID (numeric). `npm run wa:check` reports exactly that.
+- Test lead created (9643520034 -> 919643520034) and the sample nudge targets exactly it.
+- Still outstanding: credential rotation, repo visibility, and the Render env vars.
+
+---
+
+Task ID: 9
+Agent: Main agent (DeepSeek Harness)
+Task: Generate a rotated webhook verify token, produce a testable callback URL, and verify the live deployment.
+
+Work Log:
+- User confirmed "null means 0" for KYC, which is exactly the `treatNullKycAsZero` default added in Task 8 — no change needed, the 1201 NULL-KYC leads are already treated as 0 and included in documents_pending.
+- Generated a fresh WHATSAPP_VERIFY_TOKEN (rzUGKiiXYmocmMV6tjpuptCuA6NCscam) because the previous value (32G0EljQj_MrKg7l4yuVvgOj) was committed to the public repo and must be considered burned.
+- New scripts/check-whatsapp-webhook.mjs + `npm run wa:webhook` — reproduces exactly what Meta does: /api/health (is it awake / on the current build), the subscribe handshake (must echo hub.challenge), a wrong-token rejection (must be 403), and optionally a synthetic signature-signed status POST.
+- LIVE VERIFICATION against https://nudge-engine.onrender.com:
+  * /api/health returns 200 → the NEW build is deployed and the service is awake.
+  * Handshake with the NEW token → 403; with the OLD token → 200 and the challenge echoes correctly. So the server is still running the OLD, publicly-exposed verify token.
+  * Wrong token → 403, correctly refused.
+  * GET /api/nudges unauthenticated → 401; authenticated → 200 with all six nudges listed. Production auth works and the MySQL-backed store is serving real data end to end.
+- ⚠️ Found a live hazard: the scheduler is ENABLED on Render and has already completed 2 cycles. /api/logs shows 20+ send attempts to REAL lead addresses (booking@woodsvillastays.com, etc.) under documents_pending. Every one failed with "SMTP not configured", so no mail left the building — but `onboarding_started_agreement` (361 leads) and `documents_pending` (48) are both seeded enabled=true, so the moment SMTP_USER/SMTP_PASS are filled in, the scheduler starts mailing real leads automatically within 15 minutes. Failed sends are not counted by decideSend, so the same leads are retried every cycle and would all fire at once when SMTP comes up.
+- Recommend SCHEDULER_ENABLED=false until the templates and targeting have been reviewed via Preview. Documented in the README env table.
+
+Stage Summary:
+- Callback URL: https://nudge-engine.onrender.com/api/track/whatsapp
+- Verify token currently live: 32G0EljQj_MrKg7l4yuVvgOj (old, exposed). Rotated value ready in .env: rzUGKiiXYmocmMV6tjpuptCuA6NCscam — set it in Render to switch.
+- WhatsApp SENDING is still blocked on WHATSAPP_TOKEN (EAA…) and WHATSAPP_PHONE_NUMBER_ID (numeric). The webhook/receiving side is fully testable right now.
+
+---
+
+Task ID: 10
+Agent: Main agent (DeepSeek Harness)
+Task: Configure the real WhatsApp credentials and verify sending end to end.
+
+Work Log:
+- Added to .env: WHATSAPP_TOKEN (289-char temporary token), WHATSAPP_PHONE_NUMBER_ID=1337582996100582, WHATSAPP_WABA_ID=1603232804878093.
+- SENT A REAL MESSAGE — `npm run wa:check 9643520034` → HTTP 200, `wamid.HBgMOTE5NjQzNTIwMDM0FQIAERgSNzNEMUU5RkY5OTkwODREQkJGAA==`. Ran a second time to confirm repeatability → HTTP 200 with a fresh wamid. Sending works; normalisation of 9643520034 → 919643520034 was accepted (`wa_id: 919643520034`), which also validates normalizePhone against the live API.
+- Free-form text was accepted, which means the 24h customer service window is currently open on the user's number. That is a testing convenience only: production nudges are business-initiated and require an approved template.
+- Template send test: `--template hello_world` → HTTP 404 `(#132001) Template name does not exist in the translation`. So the WABA has NO approved template by that name. Auth, Phone Number ID and permissions are all correct (the request reached template resolution), but a template must be created and approved before any nudge flow can send business-initiated WhatsApp messages.
+- Fixed a defect in my own check-whatsapp.mjs: calling process.exit() while undici fetch sockets were still open tripped a libuv assertion on Windows (`Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)`), producing a bogus exit code (-1073740791) after correct output. Rewrote the script around an async main() using process.exitCode so the process drains naturally — now exits 0 cleanly. Also added Meta error-code translation (132001 template missing, 131047 outside 24h window, 190 bad/expired token, 100 wrong Phone Number ID) so the next failure explains itself.
+- Verified again that the deployed app is healthy and on the new build: /api/health 200, /api/nudges 401 unauthenticated / 200 authenticated with all six nudges.
+
+Stage Summary:
+- WhatsApp sending is PROVEN WORKING with the supplied credentials.
+- Blocking production nudges: (1) no approved message template on the WABA; (2) the token is temporary and expires in ~24h, so a System User token is needed for anything long-lived; (3) the WhatsApp env vars are only in the local .env — they must also be added in Render for the deployed app to send.
+- Still open: scheduler is enabled on Render and has already attempted 2 cycles against real lead addresses (all failed on SMTP); rotate the exposed Zoho/Mail/Infinito/MySQL credentials; make the repo private.
+
+---
+
+Task ID: 11
+Agent: Main agent (DeepSeek Harness)
+Task: Pause all outbound sending, and answer whether the temporary WhatsApp token is sufficient.
+
+Work Log:
+- Token answer, measured not guessed: `debug_token` on the supplied token returns type USER, app "EPS nudges" (1761724438387608), scopes whatsapp_business_management + whatsapp_business_messaging + public_profile, and **expires_at 2026-09-23T12:00:00Z**. At the time of checking that was 1.4 HOURS away. data_access_expires_at is 90 days out. So the temporary token is fine for today's test and useless for a scheduler — every send would begin failing with error 190 at noon. A System User token with no expiry is required.
+- PAUSED: ran scripts/toggle-nudges.mjs off against the live MySQL database — all 6 nudges disabled. Because the scheduler reads enabled nudges from the DB on every cycle, this takes effect immediately with no redeploy. Verified against the deployed app: GET /api/nudges now reports all six as OFF, and the scheduler's next cycle has nothing to run. Also set SCHEDULER_ENABLED=false in the local .env.
+- New scripts/toggle-nudges.mjs + `npm run nudges` (on | off | status) — flips every nudge in one command and prints which are lead-driven vs manual.
+- 🚨 SERIOUS BUG FOUND while pausing. The live scheduler's last cycle (10:34:47) ran ALL FOUR enabled nudges, including the two MANUAL sheet nudges:
+    onboarded_transacting      sent=0 failed=50 deferred=1248
+    onboarded_not_transacting  sent=0 failed=50 deferred=1248
+  i.e. the timer was pushing the activation-fee template at ~1298 real leads each. The ONLY thing that prevented a mass mailing was SMTP not being configured. Root cause: `runAllEnabledNudges` selected `{ enabled: true }` and knew nothing about the manual/sheet convention (zohoCriteria === null) that the UI uses to hide the Run button. Fixed in src/lib/scheduler.ts: the scheduler now selects `{ enabled: true, zohoCriteria: { not: null } }`, with a comment explaining why. Needs deploying — until then the DB-level pause is what is holding.
+- check-whatsapp.mjs now calls debug_token and prints token type, scopes and a humanised expiry, flagging anything under 24h with the "generate a System User token" instruction. This is the check that would have caught the expiry before it caused silent send failures. Also added Meta error-code translation (132001 / 131047 / 190 / 100).
+- tsc clean, eslint clean.
+
+Stage Summary:
+- All outbound sending is PAUSED at the database level (effective immediately) — 0 lead-driven and 0 manual nudges active.
+- Two things still required from the user: (1) set SCHEDULER_ENABLED=false in Render as well, and (2) generate a permanent System User token before 12:00 UTC today, plus create an approved message template.
+- The scheduler-was-running-manual-nudges fix is uncommitted and must be pushed and deployed.
+
+---
+
+Task ID: 12
+Agent: Main agent (DeepSeek Harness)
+Task: Configure the permanent WhatsApp token and find why template sends fail.
+
+Work Log:
+- Installed the permanent token in .env. `debug_token` confirms: type SYSTEM_USER (not USER), app "EPS nudges", scopes whatsapp_business_management + whatsapp_business_messaging + manage_app_solution + whatsapp_business_manage_events + public_profile, and **never expires**. Free-form send to 9643520034 returned HTTP 200.
+- Diagnosed the template failure properly instead of assuming the template was missing. Queried the WABA's template list: there IS one template — `hello_world`, status APPROVED, category UTILITY, and **language `en_US`**. My sender hardcoded `language: { code: 'en' }`, so Meta returned 132001 "template name does not exist in the translation", which reads like the template does not exist at all. Sending with `--lang en_US` returned HTTP 200. Root cause: language code must match the approved template exactly; `en` ≠ `en_US`.
+- check-whatsapp.mjs: added `--lang <code>` (defaulting to WHATSAPP_TEMPLATE_LANGUAGE or "en") and `--list-templates`, which prints every template on the WABA with its exact name, language, status and category plus a paste-ready example command. Rewrote the arg parsing as a proper flagValue() helper because the old positional filter broke once more than one value-flag existed.
+- Fixed two self-inflicted syntax errors while editing that script (a duplicated `listTemplates` identifier, and a blank line removed by an edit that joined two statements) — both caught immediately by running the script.
+- UI: the WhatsApp nudge form's "Template language" field now shows the en_US/132001 mismatch explicitly, with the command to list templates.
+- tsc clean, eslint clean.
+
+Stage Summary:
+- WhatsApp is now FULLY WORKING: permanent system-user token (never expires), free-form text AND template sends both return HTTP 200 to the test lead.
+- Remaining for real nudges: create the actual content templates in WhatsApp Manager (hello_world is Meta's generic sample), wait for approval, then set each nudge's template name AND language to match exactly.
+- Still to do: add the WhatsApp env vars to Render, deploy the uncommitted fixes, and resume the paused scheduler when ready.
+
+---
+
+Task ID: 13
+Agent: Main agent (DeepSeek Harness)
+Task: Build in-app WhatsApp template management — add templates, see approval status, attach them to nudges.
+
+Work Log:
+- New src/lib/whatsapp-templates.ts: listTemplates / createTemplate / deleteTemplate against the WABA, plus validateTemplateInput() and buildTemplatePayload(). Deliberately written with NO `@/` imports so the pure functions are unit-testable and the module can be imported directly by a CLI script.
+- Validation covers the rules Meta actually enforces and reports before spending an API call: name charset (lowercase/digits/underscore), category in UTILITY|MARKETING|AUTHENTICATION, body <=1024, header/footer <=60, button text <=25, https-only button URLs, contiguous {{1}}..{{n}} variables, and the URL-button rule that the variable must be a single {{1}} at the very end. It also warns when the language is bare "en" (the exact trap from Task 12).
+- buildTemplatePayload auto-generates Meta's required `example` values (example.body_text sized to the variable count, and a URL example for variable buttons) so the operator never has to know about them.
+- New routes GET/POST/DELETE /api/whatsapp/templates (behind the app password).
+- New Templates tab (src/components/app/templates-tab.tsx) + wired into page.tsx: table with name/language/category/status and live status badges (approved / pending review / rejected with reason), counts of approved vs awaiting review, Refresh status, New template dialog with full validation errors surfaced inline, copy-name button, Delete with confirmation, and "Use in nudge" which PATCHes the chosen nudge's channel to whatsapp plus its template name and language.
+- New scripts/check-whatsapp-templates.mjs + `npm run wa:templates` (list / --create-test / --delete NAME --lang X), importing the SAME module the route uses so the CLI exercises the real code path.
+- VERIFIED against the live WABA: listed hello_world (APPROVED, en_US, UTILITY); created `nudge_engine_selftest` -> came back PENDING with id 1587033549005188; confirmed it appeared in the list as PENDING; deleted it; list back to 1 template. Full create/list/delete round trip proven end to end.
+- verify-changes.mjs extended to 79 assertions, adding 25 for the template builder and validator (payload shape and component order, example generation, and every rejection case). tsc clean, eslint clean.
+
+Stage Summary:
+- Templates can now be added, reviewed and attached entirely inside the app; approval stays Meta-side and asynchronous, and the tab is where you watch it flip to Approved.
+- No more copying template names between Meta and the app by hand, and the en/en_US class of failure is surfaced in both the form and the CLI.
