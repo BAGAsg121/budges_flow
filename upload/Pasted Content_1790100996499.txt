@@ -91,7 +91,7 @@
           "parameters": [
             {
               "name": "Authorization",
-              "value": "Bearer eyJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJJbmZpbml0byIsImlhdCI6MTc3NjkyNTg1NSwic3ViIjoiRWtvX3dhYmFpbzhveHI2OGI4NTZ1OTloIn0.3LwJuVoYfv3_0M6kDlFRq5GS6QSlk9TZbmshOyYAMAM  "
+              "value": "Bearer REDACTED-see-.env-INFINITO_API_KEY  "
             },
             {
               "name": "Content-Type",
@@ -804,7 +804,7 @@
           "parameters": [
             {
               "name": "Authorization",
-              "value": "Bearer eyJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJJbmZpbml0byIsImlhdCI6MTc3NjkyNTg1NSwic3ViIjoiRWtvX3dhYmFpbzhveHI2OGI4NTZ1OTloIn0.3LwJuVoYfv3_0M6kDlFRq5GS6QSlk9TZbmshOyYAMAM  "
+              "value": "Bearer REDACTED-see-.env-INFINITO_API_KEY  "
             },
             {
               "name": "Content-Type",
@@ -1288,7 +1288,7 @@
           "parameters": [
             {
               "name": "Authorization",
-              "value": "Bearer eyJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJJbmZpbml0byIsImlhdCI6MTc3NjkyNTg1NSwic3ViIjoiRWtvX3dhYmFpbzhveHI2OGI4NTZ1OTloIn0.3LwJuVoYfv3_0M6kDlFRq5GS6QSlk9TZbmshOyYAMAM  "
+              "value": "Bearer REDACTED-see-.env-INFINITO_API_KEY  "
             },
             {
               "name": "Content-Type",
@@ -1811,7 +1811,7 @@
           "parameters": [
             {
               "name": "Authorization",
-              "value": "Bearer eyJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJJbmZpbml0byIsImlhdCI6MTc3NjkyNTg1NSwic3ViIjoiRWtvX3dhYmFpbzhveHI2OGI4NTZ1OTloIn0.3LwJuVoYfv3_0M6kDlFRq5GS6QSlk9TZbmshOyYAMAM  "
+              "value": "Bearer REDACTED-see-.env-INFINITO_API_KEY  "
             },
             {
               "name": "Content-Type",
@@ -1843,7 +1843,7 @@
           "parameters": [
             {
               "name": "Authorization",
-              "value": "Bearer eyJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJJbmZpbml0byIsImlhdCI6MTc3NjkyNTg1NSwic3ViIjoiRWtvX3dhYmFpbzhveHI2OGI4NTZ1OTloIn0.3LwJuVoYfv3_0M6kDlFRq5GS6QSlk9TZbmshOyYAMAM  "
+              "value": "Bearer REDACTED-see-.env-INFINITO_API_KEY  "
             },
             {
               "name": "Content-Type",

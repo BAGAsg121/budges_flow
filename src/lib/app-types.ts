@@ -58,6 +58,7 @@ export interface LogDto {
   replied: boolean
   engagementStatus: 'sent' | 'opened' | 'replied' | 'failed'
   trackingId: string
+  sheetRowRef: string | null
 }
 
 export interface StatsDto {
@@ -99,6 +100,10 @@ export interface RunSummaryDto {
   leadsConsidered: number
   sent: number
   failed: number
+  /** Leads postponed because NUDGE_MAX_PER_RUN was hit; they resume next cycle. */
+  deferred: number
+  /** Per-run cap applied (null = unlimited). */
+  batchLimit: number | null
   skipped: RunSkippedDto[]
   smtpConfigured: boolean
   whatsappConfigured: boolean
@@ -112,4 +117,33 @@ export interface PreviewDto {
   wouldSkip: RunSkippedDto[]
   smtpConfigured: boolean
   whatsappConfigured: boolean
+  batchLimit: number | null
+}
+
+export interface NudgeRunResultDto {
+  nudgeKey: string
+  name: string
+  channel: NudgeChannel
+  summary?: RunSummaryDto
+  error?: string
+}
+
+export interface ImapSyncDto {
+  configured: boolean
+  scanned: number
+  matched: number
+  error?: string
+}
+
+export interface SchedulerStatusDto {
+  ok: boolean
+  enabled: boolean
+  running: boolean
+  intervalMinutes: number
+  runsCompleted: number
+  lastCycleAt: string | null
+  lastCycleTrigger: string | null
+  lastResults: NudgeRunResultDto[]
+  lastReplySync: ImapSyncDto | null
+  imapConfigured: boolean
 }

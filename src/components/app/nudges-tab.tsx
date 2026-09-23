@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import {
-  Play, Eye, Pencil, Trash2, Plus, Send, RefreshCcw, Loader2, AlertCircle, Mail, MessageCircle, Info,
+  Play, Eye, Pencil, Trash2, Plus, Send, RefreshCcw, Loader2, AlertCircle, Mail, MessageCircle, Info, Sheet,
 } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -70,6 +70,8 @@ function reasonBadge(reason: string, detail?: string) {
       return <Badge variant="destructive">no email</Badge>
     case 'no_valid_phone':
       return <Badge variant="destructive">no valid phone</Badge>
+    case 'batch_limit':
+      return <Badge variant="outline">deferred{detail ? ` · ${detail}` : ''}</Badge>
     default:
       return <Badge variant="outline">{reason}{detail ? ` · ${detail}` : ''}</Badge>
   }
@@ -91,6 +93,16 @@ export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onCha
   const [runResult, setRunResult] = useState<RunSummaryDto | null>(null)
   const [preview, setPreview] = useState<PreviewDto | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
+
+  // Sheet-run state
+  const [sheetTarget, setSheetTarget] = useState<NudgeDto | null>(null)
+  const [sheetUrl, setSheetUrl] = useState('')
+  const [sheetRunning, setSheetRunning] = useState(false)
+  const [sheetResult, setSheetResult] = useState<{
+    sent: number; failed: number; skipped: number;
+    failedEntries: { email: string; error: string }[];
+    skippedEntries: { lead: string; email: string | null; reason: string; detail?: string }[];
+  } | null>(null)
 
   const load = useCallback(async () => {
     try {
@@ -215,6 +227,43 @@ export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onCha
     onChanged()
   }
 
+  const openSheetRun = (n: NudgeDto) => {
+    setSheetTarget(n)
+    setSheetUrl('')
+    setSheetResult(null)
+  }
+
+  const runSheetNudge = async () => {
+    if (!sheetTarget || !sheetUrl.trim()) return
+    setSheetRunning(true)
+    setSheetResult(null)
+    try {
+      const res = await fetch(`/api/nudges/${sheetTarget.id}/sheet-run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sheetUrl: sheetUrl.trim() }),
+      })
+      const data = (await res.json()) as {
+        ok: boolean
+        error?: string
+        summary?: {
+          sent: number; failed: number; skipped: number;
+          failedEntries: { email: string; error: string }[];
+          skippedEntries: { lead: string; email: string | null; reason: string; detail?: string }[];
+        }
+      }
+      if (!data.ok || !data.summary) {
+        toast({ title: 'Sheet run failed', description: data.error, variant: 'destructive' })
+        return
+      }
+      setSheetResult(data.summary)
+      load()
+      onChanged()
+    } finally {
+      setSheetRunning(false)
+    }
+  }
+
   const isWhatsApp = form.channel === 'whatsapp'
 
   return (
@@ -272,6 +321,11 @@ export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onCha
                   <Button size="sm" variant="outline" onClick={() => openPreview(n)}>
                     <Eye className="h-4 w-4 mr-1" /> Preview
                   </Button>
+                  {n.channel === 'email' && (
+                    <Button size="sm" variant="outline" onClick={() => openSheetRun(n)} disabled={!n.enabled}>
+                      <Sheet className="h-4 w-4 mr-1" /> Send from Sheet
+                    </Button>
+                  )}
                   <Button size="sm" variant="outline" onClick={() => openEdit(n)}>
                     <Pencil className="h-4 w-4 mr-1" /> Edit
                   </Button>
@@ -424,6 +478,8 @@ export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onCha
                 ? 'This will send WhatsApp template messages (Meta Cloud API) to every eligible lead that hasn\'t hit the sequence limit.'
                 : 'This will send emails to every eligible lead that hasn\'t hit the sequence limit.'}{' '}
               Max {runTarget?.maxEmailsPerLead} message(s) per lead, {runTarget?.followUpDays} day(s) between follow-ups.
+              A per-run cap (NUDGE_MAX_PER_RUN) protects the request from timing out — leftover leads resume on the next
+              scheduled run.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <div className="flex items-center gap-2 py-1">
@@ -454,6 +510,12 @@ export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onCha
               {runResult?.leadsConsidered} leads considered ·{' '}
               <b className="text-emerald-600">{runResult?.sent} sent</b> ·{' '}
               {runResult?.failed ? <span className="text-red-600">{runResult.failed} failed</span> : '0 failed'}
+              {runResult?.deferred ? (
+                <span className="block mt-1 text-amber-600">
+                  {runResult.deferred} lead(s) deferred — the per-run cap is {runResult.batchLimit}. They are picked up on
+                  the next scheduled run, or run again now.
+                </span>
+              ) : null}
               {runResult?.channel === 'email' && !runResult?.smtpConfigured && (
                 <span className="flex items-start gap-1.5 mt-2 text-amber-600">
                   <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
@@ -539,6 +601,79 @@ export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onCha
           ) : (
             <div className="py-8 text-center text-sm text-muted-foreground">loading preview…</div>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Sheet-run dialog */}
+      <Dialog open={!!sheetTarget} onOpenChange={(o) => { if (!o) { setSheetTarget(null); setSheetResult(null) } }}>
+        <DialogContent className="max-w-xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>
+              <Sheet className="inline h-4 w-4 mr-1.5 -mt-0.5" />
+              Send from Google Sheet — {sheetTarget?.name}
+            </DialogTitle>
+            <DialogDescription>
+              Paste a publicly-shared Google Sheet URL. Each row must have an <code>email</code> column.
+              Any column header (e.g. <code>first_name</code>, <code>company</code>) becomes a{' '}
+              <code>{'{{variable}}'}</code> in the email template. Already-sent rows are automatically skipped.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="grid gap-3 py-1">
+            <div className="grid gap-1.5">
+              <Label htmlFor="sheet-url">Google Sheet URL</Label>
+              <Input
+                id="sheet-url"
+                value={sheetUrl}
+                onChange={(e) => setSheetUrl(e.target.value)}
+                placeholder="https://docs.google.com/spreadsheets/d/…"
+                disabled={sheetRunning}
+              />
+              <p className="text-xs text-muted-foreground">
+                The sheet must be shared as <strong>&ldquo;Anyone with the link can view&rdquo;</strong> (no sign-in required).
+              </p>
+            </div>
+
+            {sheetResult && (
+              <div className="rounded-md border p-3 space-y-2">
+                <div className="flex gap-4 text-sm font-medium">
+                  <span className="text-emerald-600">✓ {sheetResult.sent} sent</span>
+                  <span className="text-red-600">✗ {sheetResult.failed} failed</span>
+                  <span className="text-muted-foreground">— {sheetResult.skipped} skipped</span>
+                </div>
+                {sheetResult.failedEntries.length > 0 && (
+                  <div className="space-y-1">
+                    <p className="text-xs font-medium text-red-600">Failed:</p>
+                    {sheetResult.failedEntries.map((f, i) => (
+                      <div key={i} className="text-xs rounded bg-red-50 px-2 py-1">
+                        <span className="font-mono">{f.email}</span> — {f.error}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {sheetResult.skippedEntries.length > 0 && (
+                  <div className="space-y-1">
+                    <p className="text-xs font-medium text-muted-foreground">Skipped:</p>
+                    <div className="max-h-40 overflow-y-auto space-y-0.5">
+                      {sheetResult.skippedEntries.map((s, i) => (
+                        <div key={i} className="flex items-center justify-between text-xs rounded px-2 py-1 hover:bg-muted/60">
+                          <span className="truncate font-mono">{s.email || s.lead}</span>
+                          {reasonBadge(s.reason, s.detail)}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setSheetTarget(null); setSheetResult(null) }}>Close</Button>
+            <Button onClick={runSheetNudge} disabled={sheetRunning || !sheetUrl.trim()}>
+              {sheetRunning ? <><Loader2 className="h-4 w-4 mr-1.5 animate-spin" />Sending…</> : <><Sheet className="h-4 w-4 mr-1.5" />Send emails</>}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

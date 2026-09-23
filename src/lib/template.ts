@@ -1,15 +1,8 @@
 /**
  * Tiny mustache-style template renderer + open-tracking pixel injection.
  * Placeholders: {{full_name}}, {{first_name}}, {{email}}, {{company}}, {{lead_status}},
- * {{kyc_document_upload_count}}, {{email_number}}, {{today}}, {{owner_name}} ... any lead field.
+ * {{kyc_document_upload_count}}, {{message_number}}, {{today}}, {{owner_name}} ... any lead field.
  */
-
-export function renderTemplate(tpl: string, vars: Record<string, string | number | null | undefined>): string {
-  return tpl.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_m, key: string) => {
-    const v = vars[key]
-    return v === null || v === undefined || v === '' ? '' : String(v)
-  })
-}
 
 export function escapeHtml(s: string): string {
   return s
@@ -18,6 +11,27 @@ export function escapeHtml(s: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;')
+}
+
+export interface RenderOptions {
+  /**
+   * HTML-escape the substituted values (not the template). Use for HTML bodies so
+   * lead-controlled data (company names, etc.) cannot inject markup into the email.
+   */
+  escapeValues?: boolean
+}
+
+export function renderTemplate(
+  tpl: string,
+  vars: Record<string, string | number | null | undefined>,
+  opts: RenderOptions = {}
+): string {
+  return tpl.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_m, key: string) => {
+    const v = vars[key]
+    if (v === null || v === undefined || v === '') return ''
+    const s = String(v)
+    return opts.escapeValues ? escapeHtml(s) : s
+  })
 }
 
 /** Append the 1x1 open-tracking pixel right before </body>, or at the end. */

@@ -71,12 +71,13 @@ model Nudge {
 // One row per message sent (email or whatsapp)
 model MessageLog {
   id               String    @id @default(cuid())
-  leadId           String
-  lead             Lead      @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  leadId           String?
+  lead             Lead?     @relation(fields: [leadId], references: [id], onDelete: Cascade)
   nudgeId          String
   nudge            Nudge     @relation(fields: [nudgeId], references: [id], onDelete: Cascade)
   channel          String    @default("email") // email | whatsapp
   messageNumber    Int       @default(1)
+  sheetRowRef      String?   // e.g. "<sheetUrl>|<email>" — set for sheet-sourced sends
   toEmail          String?
   toPhone          String?
   subject          String? // email only

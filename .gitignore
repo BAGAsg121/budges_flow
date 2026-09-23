@@ -10,6 +10,9 @@ node_modules
 !.yarn/releases
 !.yarn/versions
 
+# local npm cache (kept in-workspace so installs work under a locked-down profile)
+/.npm-cache/
+
 # testing
 /coverage
 
@@ -19,6 +22,14 @@ node_modules
 
 # production
 /build
+
+# database (contains real lead + message data)
+/db/*.db
+/db/*.db-journal
+/db/*.db-wal
+/db/*.db-shm
+/db/*.sqlite
+/db/*.sqlite3
 
 # misc
 .DS_Store
@@ -48,6 +59,7 @@ dev.log
 dev.out.log
 test
 prompt
+
 
 server.log
 # Skills directory

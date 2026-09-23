@@ -38,7 +38,7 @@ export async function GET() {
     recentLogs: recentLogs.map((l) => ({
       id: l.id,
       channel: l.channel,
-      lead: l.lead.fullName || l.lead.email,
+      lead: l.lead?.fullName || l.lead?.email || l.toEmail || 'Sheet send',
       nudge: l.nudge.name,
       messageNumber: l.messageNumber,
       subject: l.subject,

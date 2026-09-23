@@ -19,6 +19,10 @@ const eslintConfig = [...nextCoreWebVitals, ...nextTypescript, {
     // React rules
     "react-hooks/exhaustive-deps": "off",
     "react-hooks/purity": "off",
+    // The app uses the standard "fetch in useEffect -> setState" data-loading pattern in
+    // every tab (and in vendored shadcn components). The newer react-hooks plugin flags
+    // that pattern as a cascading render; migrating to React Query is out of scope here.
+    "react-hooks/set-state-in-effect": "off",
     "react/no-unescaped-entities": "off",
     "react/display-name": "off",
     "react/prop-types": "off",

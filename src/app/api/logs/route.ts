@@ -24,6 +24,8 @@ export async function GET(req: NextRequest) {
       { toEmail: { contains: q } },
       { toPhone: { contains: q } },
       { subject: { contains: q } },
+      { sheetRowRef: { contains: q } },
+      // Only match lead relation when a lead exists (sheet sends have leadId=null)
       { lead: { is: { OR: [{ fullName: { contains: q } }, { email: { contains: q } }, { company: { contains: q } }] } } },
     ]
   }
@@ -43,8 +45,9 @@ export async function GET(req: NextRequest) {
     count: logs.length,
     logs: logs.map((l) => ({
       id: l.id,
-      lead: l.lead.fullName || l.lead.email,
-      company: l.lead.company,
+      // lead may be null for sheet-sourced sends — fall back to the email address
+      lead: l.lead?.fullName || l.lead?.email || l.toEmail || 'Sheet send',
+      company: l.lead?.company ?? null,
       channel: l.channel,
       toEmail: l.toEmail,
       toPhone: l.toPhone,
@@ -62,6 +65,7 @@ export async function GET(req: NextRequest) {
       replied: l.replied,
       engagementStatus: l.replied ? 'replied' : l.opened ? 'opened' : l.sentOk ? 'sent' : 'failed',
       trackingId: l.trackingId,
+      sheetRowRef: l.sheetRowRef ?? null,
     })),
   })
 }

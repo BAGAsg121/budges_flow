@@ -57,7 +57,7 @@ export function LeadsTab({ refreshKey }: { refreshKey: number }) {
                 <TableHead className="hidden md:table-cell">Company</TableHead>
                 <TableHead className="hidden lg:table-cell">Status</TableHead>
                 <TableHead>KYC docs</TableHead>
-                <TableHead className="hidden lg:table-cell">Emails</TableHead>
+                <TableHead className="hidden lg:table-cell">Messages</TableHead>
                 <TableHead className="hidden xl:table-cell">Created</TableHead>
               </TableRow>
             </TableHeader>
@@ -83,7 +83,7 @@ export function LeadsTab({ refreshKey }: { refreshKey: number }) {
                     <TableCell className="hidden md:table-cell max-w-40 truncate">{l.company || '—'}</TableCell>
                     <TableCell className="hidden lg:table-cell max-w-32 truncate">{l.leadStatus || '—'}</TableCell>
                     <TableCell>{l.kycDocumentUploadCount ?? '—'}</TableCell>
-                    <TableCell className="hidden lg:table-cell">{l.emailsSent}</TableCell>
+                    <TableCell className="hidden lg:table-cell">{l.messagesSent}</TableCell>
                     <TableCell className="hidden xl:table-cell text-xs text-muted-foreground">
                       {l.createdTime ? new Date(l.createdTime).toLocaleDateString() : '—'}
                     </TableCell>

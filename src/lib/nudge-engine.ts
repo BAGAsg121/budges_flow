@@ -2,7 +2,7 @@
  * Nudge engine: selects eligible leads, decides sequence position, sends (email or
  * whatsapp), logs. Shared sequence logic across channels: per-lead message history
  * decides first send, follow-up (after followUpDays), or skip
- * (replied / max reached / waiting).
+ * (replied / max reached / waiting / batch limit).
  */
 import { randomUUID } from 'crypto'
 import { db } from '@/lib/db'
@@ -38,6 +38,10 @@ export interface RunSummary {
   leadsConsidered: number
   sent: number
   failed: number
+  /** Leads left over because the per-run batch cap was reached. */
+  deferred: number
+  /** Per-run cap actually applied (null = unlimited). */
+  batchLimit: number | null
   skipped: RunSkipped[]
   smtpConfigured: boolean
   whatsappConfigured: boolean
@@ -177,14 +181,46 @@ function buildLeadVars(lead: {
   }
 }
 
+/** Resolve the per-run cap: explicit option wins, then NUDGE_MAX_PER_RUN, else unlimited. */
+function resolveBatchLimit(limit?: number): number | null {
+  const raw = limit !== undefined ? limit : Number(process.env.NUDGE_MAX_PER_RUN || 0)
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : null
+}
+
+/**
+ * Build positional WhatsApp template parameters.
+ * Order is preserved even when a value is missing — dropping an empty value would
+ * silently shift every later {{n}} into the wrong slot.
+ */
+function buildWhatsAppParams(config: string | null, vars: Record<string, unknown>): string[] {
+  let sources: string[] = []
+  try {
+    const parsed = JSON.parse(config || '[]')
+    if (Array.isArray(parsed)) sources = parsed.map((p) => String(p))
+  } catch {
+    // bad config -> send with no params; Meta will reject if the template needs them
+  }
+  const fallback = process.env.WHATSAPP_EMPTY_PARAM_FALLBACK ?? '-'
+  return sources.map((key) => {
+    const value = vars[key]
+    if (value === null || value === undefined || value === '') return fallback
+    return String(value)
+  })
+}
+
 /** Run a nudge end-to-end. Set opts.sync=false to skip the Zoho refresh and send to already-synced leads. */
-export async function runNudge(nudgeId: string, baseUrl: string, opts: { sync: boolean }): Promise<RunSummary> {
+export async function runNudge(
+  nudgeId: string,
+  baseUrl: string,
+  opts: { sync: boolean; limit?: number }
+): Promise<RunSummary> {
   const nudge = await db.nudge.findUnique({ where: { id: nudgeId } })
   if (!nudge) throw new Error('Nudge not found')
   if (!nudge.enabled) throw new Error('Nudge is disabled')
 
   const channel: Channel = nudge.channel === 'whatsapp' ? 'whatsapp' : 'email'
   const filters = parseFilters(nudge.filters)
+  const batchLimit = resolveBatchLimit(opts.limit)
 
   const summary: RunSummary = {
     nudgeKey: nudge.key,
@@ -193,6 +229,8 @@ export async function runNudge(nudgeId: string, baseUrl: string, opts: { sync: b
     leadsConsidered: 0,
     sent: 0,
     failed: 0,
+    deferred: 0,
+    batchLimit,
     skipped: [],
     smtpConfigured: isMailerConfigured(),
     whatsappConfigured: isWhatsAppConfigured(),
@@ -211,6 +249,7 @@ export async function runNudge(nudgeId: string, baseUrl: string, opts: { sync: b
   summary.leadsConsidered = leads.length
 
   const now = new Date()
+  let attempts = 0
 
   for (const lead of leads) {
     const logs = await db.messageLog.findMany({ where: { nudgeId: nudge.id, leadId: lead.id } })
@@ -223,6 +262,20 @@ export async function runNudge(nudgeId: string, baseUrl: string, opts: { sync: b
         phone: lead.phone || lead.mobile,
         reason: decision.reason!,
         detail: decision.detail,
+      })
+      continue
+    }
+
+    // 3. Respect the per-run cap so a single request can never run past its timeout.
+    //    Deferred leads are picked up by the next cycle.
+    if (batchLimit !== null && attempts >= batchLimit) {
+      summary.deferred++
+      summary.skipped.push({
+        lead: lead.fullName || lead.email || lead.zohoId,
+        email: lead.email,
+        phone: lead.phone || lead.mobile,
+        reason: 'batch_limit',
+        detail: `cap ${batchLimit}/run — continues next cycle`,
       })
       continue
     }
@@ -243,16 +296,8 @@ export async function runNudge(nudgeId: string, baseUrl: string, opts: { sync: b
         continue
       }
 
-      let params: string[] = []
-      try {
-        const parsed = JSON.parse(nudge.whatsappParams || '[]')
-        if (Array.isArray(parsed)) params = parsed
-      } catch {
-        // bad config -> send without params; Meta will reject if template requires them
-      }
-      const paramValues = params
-        .map((p) => String(vars[p as keyof typeof vars] ?? ''))
-        .filter((v) => v !== '')
+      attempts++
+      const paramValues = buildWhatsAppParams(nudge.whatsappParams, vars)
 
       const result = await sendWhatsAppTemplate({
         to: toPhone,
@@ -286,9 +331,15 @@ export async function runNudge(nudgeId: string, baseUrl: string, opts: { sync: b
         continue
       }
 
+      attempts++
       const trackingId = randomUUID()
       const subject = renderTemplate(nudge.subjectTemplate || '', vars)
-      const bodyHtml = injectTrackingPixel(renderTemplate(nudge.bodyTemplate || '', vars), baseUrl, trackingId)
+      // escape substituted values: lead data must not inject markup into the email body
+      const bodyHtml = injectTrackingPixel(
+        renderTemplate(nudge.bodyTemplate || '', vars, { escapeValues: true }),
+        baseUrl,
+        trackingId
+      )
 
       const result = await sendEmail({ to: lead.email, subject, html: bodyHtml, text: htmlToText(bodyHtml) })
 
@@ -339,7 +390,18 @@ export async function previewNudge(nudgeId: string) {
   for (const lead of leads) {
     const logs = await db.messageLog.findMany({ where: { nudgeId: nudge.id, leadId: lead.id } })
     const decision = decideSend(logs, nudge.maxEmailsPerLead, nudge.followUpDays, now)
+
     if (decision.action === 'send') {
+      // mirror the run-time phone validation so preview never promises an undeliverable send
+      if (channel === 'whatsapp' && !normalizePhone(lead.mobile || lead.phone)) {
+        wouldSkip.push({
+          lead: lead.fullName || lead.zohoId,
+          email: lead.email,
+          phone: lead.phone || lead.mobile,
+          reason: 'no_valid_phone',
+        })
+        continue
+      }
       wouldSend.push({
         lead: lead.fullName || lead.email || lead.zohoId,
         email: lead.email,
@@ -365,5 +427,6 @@ export async function previewNudge(nudgeId: string) {
     wouldSkip,
     smtpConfigured: isMailerConfigured(),
     whatsappConfigured: isWhatsAppConfigured(),
+    batchLimit: resolveBatchLimit(),
   }
 }

@@ -58,3 +58,27 @@ Stage Summary:
 - App is now dual-channel: email (SMTP) and WhatsApp (Meta Cloud API) nudges share one engine, one log table, one UI, same sequence logic (replied/max_reached/waiting/retry).
 - User actions to go live on WhatsApp: register 9599722251 in Meta WhatsApp Manager, approve a template (e.g. documents_pending_reminder with 3 body params), fill WHATSAPP_TOKEN + WHATSAPP_PHONE_NUMBER_ID + change WHATSAPP_VERIFY_TOKEN in .env, set webhook URL in Meta app dashboard, enable documents_pending_wa nudge, fill in its template name.
 - Reply tracking is FREE on WhatsApp (inbound webhook) vs email (not yet implemented for email).
+
+---
+
+Task ID: 3
+Agent: Main agent (DeepSeek Harness)
+Task: Hardening pass — make the app runnable on the current machine, close the security/credential gaps, add scheduling and email reply tracking, fix correctness bugs.
+
+Work Log:
+- Environment: rewrote .env into grouped, documented sections. DATABASE_URL was an absolute Linux path (/home/z/my-project/db/custom.db) -> now file:../db/custom.db (relative to prisma/schema.prisma, verified via `prisma db push` resolving to the project's db/custom.db). Added PRISMA_LOG_QUERY, auth, scheduler, IMAP, EMAIL_WEBHOOK_SECRET, WHATSAPP_EMPTY_PARAM_FALLBACK, APP_HOST, legacy n8n + Infinito values.
+- Credentials: moved the real Zoho CRM (client id/secret/refresh token), Zoho Mail (account id, from address, client id/secret/refresh) and Infinito API key out of the pasted n8n JSON into .env, and redacted them in upload/*.txt. Generated fresh APP_PASSWORD, CRON_SECRET, WHATSAPP_VERIFY_TOKEN, EMAIL_WEBHOOK_SECRET.
+- Toolchain: package.json scripts were POSIX-only (tee/cp/NODE_ENV=) and the project had no node_modules. New cross-platform scripts (dev/build/start/typecheck/lint/db:*), name -> nudge-engine, added imapflow + @types/node, added postinstall `prisma generate`, added scripts/postbuild.mjs (cross-platform copy of .next/static + public into .next/standalone), .npmrc with an in-workspace npm cache. Removed unused scaffold deps next-auth/next-intl/@mdxeditor/editor/z-ai-web-dev-sdk (next-auth also caused an ERESOLVE conflict with nodemailer 10).
+- Auth: new src/middleware.ts — HTTP Basic over the whole app using APP_USERNAME/APP_PASSWORD, timing-safe compare, fails closed when AUTH_ENABLED=true and no password is set. Public by necessity: /api/track/* (inboxes and Meta cannot authenticate) and /api/cron/* (validated by shared secret in-route).
+- Scheduler: new src/lib/scheduler.ts (in-process interval, overlap guard, per-nudge error capture, status snapshot) started from src/instrumentation.ts; endpoints POST /api/cron/run, GET+POST /api/cron/replies (CRON_SECRET via x-cron-secret / Bearer / ?secret=), GET /api/scheduler for the UI.
+- Email reply tracking: new src/lib/reply-tracker.ts — IMAP polling (imapflow, gated on IMAP_ENABLED) matching In-Reply-To/References against sent message-ids with a from-address fallback, plus a public reply webhook /api/track/email (EMAIL_WEBHOOK_SECRET). Replies mark the log replied, which stops the follow-up sequence.
+- Correctness: WhatsApp template params no longer drop empty values (that shifted every later {{n}} into the wrong slot) — order is preserved with WHATSAPP_EMPTY_PARAM_FALLBACK; email body variables are now HTML-escaped (lead data could inject markup); preview now mirrors run-time phone validation so it never promises an undeliverable WhatsApp send; per-run batch cap (NUDGE_MAX_PER_RUN) defers leftover leads instead of running past the request timeout, surfaced as `deferred`/`batch_limit` in the UI.
+- Fixed flagged loose ends: leads-tab read `l.emailsSent` but the API returns `messagesSent` (column was always blank, header said "Emails" -> "Messages"); db.ts logged every SQL query (now opt-in); next.config no longer sets typescript.ignoreBuildErrors; layout metadata/branding updated off the Z.ai scaffold; deleted the leftover src/app/api/route.ts hello-world; .gitignore now ignores /db/*.db and /.npm-cache; tsconfig excludes examples/ (scaffold code that failed typecheck); eslint disables react-hooks/set-state-in-effect with a rationale comment.
+- Dashboard: added a Scheduler card (enabled state, cadence, cycles completed, last cycle, IMAP reply-sync result, per-nudge errors) and run-result/confirm dialogs now explain the batch cap.
+- Docs: new README.md (setup, command table, full env reference, HTTP surface with auth per route, scheduling, tracking setup, security notes).
+- Verified: npm install clean (680 packages, --ignore-scripts needed only because the sandbox blocks npm's postinstall spawn); prisma generate OK; Prisma runtime read confirmed against db/custom.db (0 leads / 2 nudges / 0 logs); `tsc --noEmit` clean; `eslint .` clean.
+
+Stage Summary:
+- The app now runs on this machine (Windows, npm) instead of only in the original Linux sandbox.
+- Every credential lives in .env; the pasted workflow files are redacted. Rotate the Zoho/Mail/Infinito secrets anyway — they were in plain text.
+- Remaining user actions to go live: set SMTP_USER/SMTP_PASS (mailbox password for do.not.reply@eko.co.in) to send email; fill WHATSAPP_TOKEN + WHATSAPP_PHONE_NUMBER_ID after Meta approves the number/template; set APP_BASE_URL for working pixels; optionally enable IMAP_ENABLED for email reply tracking.

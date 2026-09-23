@@ -18,25 +18,25 @@
             {
               "id": "b8cfd74c-e8e5-4095-9b0b-2a14ff196ebd",
               "name": "zoho_client_id",
-              "value": "1000.H70DLTD3P20IIUVGTQ91NHHUVM3OHS",
+              "value": "REDACTED - see .env ZOHO_CLIENT_ID",
               "type": "string"
             },
             {
               "id": "dfd74218-849d-4bec-b416-dd93f261a620",
               "name": "zoho_client_secret",
-              "value": "4a446e765c32dd1a1e4d92109af04f27065ae9214d",
+              "value": "REDACTED - see .env ZOHO_CLIENT_SECRET",
               "type": "string"
             },
             {
               "id": "64ff07e5-258d-41a4-aa12-04e189f5c070",
               "name": "zoho_refresh_token",
-              "value": "1000.e31a20983e1e6c670c28c5ecc8f75126.8ac7ebaca230eac95c0796a7454a166d",
+              "value": "REDACTED - see .env ZOHO_REFRESH_TOKEN",
               "type": "string"
             },
             {
               "id": "c58d5a91-f9ab-4e57-8321-2d050c9db65e",
               "name": "mail_account_id",
-              "value": "1211051000000002002",
+              "value": "REDACTED - see .env ZOHO_MAIL_ACCOUNT_ID",
               "type": "string"
             },
             {
@@ -78,7 +78,7 @@
             {
               "id": "6f155ea5-a862-464d-bd9a-43fc57059d8f",
               "name": "mail_refresh_token",
-              "value": "1000.abeb5577d460856699efd856c085eee7.6588ae492e9605a548d192ac5e46a548",
+              "value": "REDACTED - see .env ZOHO_MAIL_REFRESH_TOKEN",
               "type": "string"
             }
           ]
@@ -998,15 +998,15 @@
           "parameters": [
             {
               "name": "refresh_token",
-              "value": "1000.abeb5577d460856699efd856c085eee7.6588ae492e9605a548d192ac5e46a548"
+              "value": "REDACTED - see .env ZOHO_MAIL_REFRESH_TOKEN"
             },
             {
               "name": "client_id",
-              "value": "1000.40GDBUGT36VITIK2FSIXLUBM5YE51C"
+              "value": "REDACTED - see .env ZOHO_MAIL_CLIENT_ID"
             },
             {
               "name": "client_secret",
-              "value": "b6f5b6ddc5dece76937cd68d2a5a2bdd601e8f205c"
+              "value": "REDACTED - see .env ZOHO_MAIL_CLIENT_SECRET"
             },
             {
               "name": "grant_type",

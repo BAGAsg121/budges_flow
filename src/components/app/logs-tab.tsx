@@ -8,7 +8,7 @@ import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
-import { Mail, MessageCircle } from 'lucide-react'
+import { Mail, MessageCircle, Sheet } from 'lucide-react'
 import type { LogDto, NudgeDto } from '@/lib/app-types'
 
 function ChannelBadge({ channel }: { channel: string }) {
@@ -182,6 +182,11 @@ export function LogsTab({ refreshKey }: { refreshKey: number }) {
                     <TableCell>
                       <p className="font-medium truncate max-w-36">{l.lead}</p>
                       <p className="text-xs text-muted-foreground truncate max-w-36">{l.toPhone || l.toEmail}</p>
+                      {l.sheetRowRef && (
+                        <Badge variant="outline" className="mt-0.5 gap-1 text-[10px] h-4 px-1 text-emerald-700 border-emerald-300">
+                          <Sheet className="h-2.5 w-2.5" /> Sheet
+                        </Badge>
+                      )}
                     </TableCell>
                     <TableCell><ChannelBadge channel={l.channel} /></TableCell>
                     <TableCell className="hidden md:table-cell text-xs">{l.nudge}</TableCell>

@@ -1,11 +1,11 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { Users, Send, MailOpen, Reply, TrendingUp, RefreshCw, Mail, MessageCircle } from 'lucide-react'
+import { Users, Send, MailOpen, Reply, TrendingUp, RefreshCw, Mail, MessageCircle, Clock, TriangleAlert } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
-import type { StatsDto } from '@/lib/app-types'
+import type { SchedulerStatusDto, StatsDto } from '@/lib/app-types'
 
 function StatCard({
   icon: Icon,
@@ -43,13 +43,15 @@ function statusBadge(s: string, sentOk: boolean, opens: number) {
 
 export function DashboardTab({ refreshKey }: { refreshKey: number }) {
   const [stats, setStats] = useState<StatsDto | null>(null)
+  const [scheduler, setScheduler] = useState<SchedulerStatusDto | null>(null)
   const [loading, setLoading] = useState(true)
 
   const load = useCallback(async () => {
     try {
-      const res = await fetch('/api/stats')
-      const data = (await res.json()) as StatsDto
+      const [statsRes, schedRes] = await Promise.all([fetch('/api/stats'), fetch('/api/scheduler')])
+      const data = (await statsRes.json()) as StatsDto
       setStats(data)
+      if (schedRes.ok) setScheduler((await schedRes.json()) as SchedulerStatusDto)
     } finally {
       setLoading(false)
     }
@@ -85,6 +87,61 @@ export function DashboardTab({ refreshKey }: { refreshKey: number }) {
         <StatCard icon={Reply} label="Replied" value={stats.replied} sub="replies detected" />
         <StatCard icon={TrendingUp} label="Nudges" value={stats.nudges} sub="configured flows" />
       </div>
+
+      <Card>
+        <CardContent className="p-4 sm:p-6 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-sm font-medium flex items-center gap-2">
+              <Clock className="h-4 w-4 text-muted-foreground" /> Scheduler
+            </h3>
+            {scheduler?.enabled ? (
+              <Badge className="bg-emerald-600 hover:bg-emerald-600">
+                {scheduler.running ? 'cycle running…' : `every ${scheduler.intervalMinutes} min`}
+              </Badge>
+            ) : (
+              <Badge variant="secondary">disabled</Badge>
+            )}
+          </div>
+          {scheduler?.enabled ? (
+            <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-muted-foreground">
+              <span>{scheduler.runsCompleted} cycle(s) completed</span>
+              <span>
+                last cycle: {scheduler.lastCycleAt ? new Date(scheduler.lastCycleAt).toLocaleString() : 'not yet'}
+                {scheduler.lastCycleTrigger ? ` (${scheduler.lastCycleTrigger})` : ''}
+              </span>
+              <span>
+                email replies via IMAP:{' '}
+                {scheduler.imapConfigured ? (
+                  scheduler.lastReplySync?.error ? (
+                    <span className="text-red-600">error — {scheduler.lastReplySync.error}</span>
+                  ) : (
+                    `${scheduler.lastReplySync?.matched ?? 0} matched of ${scheduler.lastReplySync?.scanned ?? 0} scanned`
+                  )
+                ) : (
+                  'not configured (IMAP_ENABLED=false)'
+                )}
+              </span>
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              Automatic runs are off. Set <code className="font-mono">SCHEDULER_ENABLED=true</code> in .env, or call{' '}
+              <code className="font-mono">POST /api/cron/run</code> from an external cron with the CRON_SECRET header.
+            </p>
+          )}
+          {scheduler?.lastResults?.some((r) => r.error) ? (
+            <div className="space-y-1">
+              {scheduler.lastResults
+                .filter((r) => r.error)
+                .map((r) => (
+                  <p key={r.nudgeKey} className="flex items-start gap-1.5 text-xs text-red-600">
+                    <TriangleAlert className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                    {r.nudgeKey}: {r.error}
+                  </p>
+                ))}
+            </div>
+          ) : null}
+        </CardContent>
+      </Card>
 
       <Card>
         <CardContent className="p-4 sm:p-6">
