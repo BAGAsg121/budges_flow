@@ -143,3 +143,32 @@ Stage Summary:
 - The app now stores leads, nudge config and the message log in MySQL, so deploy/restart/spin-down no longer wipes the send ledger and cannot cause duplicate re-sends.
 - Exactly three tables were created, in one pass, with no drop/alter anywhere; the create script is idempotent and self-guarded, and schema-push is actively blocked.
 - Still outstanding from Task 5: credential rotation, repo visibility, and setting env vars in Render (DATABASE_URL now included) before the next deploy.
+
+---
+
+Task ID: 7
+Agent: Main agent (DeepSeek Harness)
+Task: Correct the Zoho fetch window/filters, remove KYC from the fetch, add four new nudges, and verify lead integrity.
+
+Work Log:
+- Answered the open question with live data rather than assumption: the fetch was NOT "August and September" — the stored criteria was `Created_Time:greater_than:2026-07-01` (July onwards) plus `KYC_Document_Upload_Count:less_equal:11`. Real lead data: 331 EPS leads, createdTime 2026-07-07 .. today.
+- Two data-quality findings that would have silently broken the new nudges:
+  1. The real CRM status values contain SPACES ("Onboarding Started", "Agreement Signed"), not the underscores the request used. A filter of "Onboarding_Started" matches nothing.
+  2. The old fetch excluded `not_equal:Unqualified`, but the real value is "Unqualified (Junk)" — so 37 junk leads were never excluded. Also "Unqualified (Junk)" contains parentheses, which is unsafe inside a Zoho criteria string.
+  Resolution: fetch EPS + created-after only, and do ALL status filtering locally via exact match.
+- New src/lib/nudge-defaults.ts as the single source of truth (criteria, status constants, KYC threshold, and all five nudge definitions). Removed the duplicated DEFAULT_CRITERIA that lived in both /api/nudges and /api/zoho/sync.
+- Fetch window is now `Created_Time:greater_than:2026-08-01T00:00:00+05:30` with no upper bound, so it is Aug 1 -> "now" and stays correct as time passes. No KYC filter, no status filter.
+- nudge-engine: added `includeStatuses` to NudgeFilters/buildWhere (exact-match allow-list; takes precedence over excludeStatuses).
+- Nudges: `onboarding_started_agreement` (Onboarding Started -> agreement signing); `documents_pending` re-scoped to Agreement Signed + `maxKycCount: 10` (i.e. KYC < 11, the real "pending" boundary); `onboarded_transacting` and `onboarded_not_transacting` (manual Google Sheet, pay CTA to eps.eko.in/console/pay-activation-fee). `documents_pending_wa` realigned to the same status/KYC scoping.
+- Impact check on documents_pending before/after: with the old unscoped filters it would have emailed 282 leads across every status; it now targets 47 (Agreement Signed). onboarding_started_agreement targets 173.
+- Manual vs synced nudges are distinguished by `zohoCriteria: null` (no schema change — a new column would have required ALTER, which is off-limits on this shared database). The UI now hides Run/Preview and shows a "Manual / Sheet" badge for those, because Run would otherwise email all 331 synced leads.
+- sheet-run: added `mobile` aliases (mobile/mobile_number/phone/phone_number/contact/contact_number/whatsapp) plus a normalised `mobile_digits` (strips +91/leading zero) so the pay link cannot break on formatting. Templates use `{{mobile_digits}}`, not raw `{{mobile}}`.
+- /api/nudges seeding changed from "only when the table is empty" to create-if-missing per key, so new built-in nudges reach an existing database without ever reverting UI edits. `--force` opts into refreshing existing rows.
+- Lead integrity verified against the live table (331 leads): 0 duplicate zohoId, 0 duplicate email, 0 rows missing status/KYC/createdTime/zohoId. 49 rows have no email (expected — they are skipped by `requireEmail`). So there was nothing to "clear": the imported leads are complete. The de-dup guarantee is the `zohoId @unique` constraint plus upsert-on-zohoId in syncLeadsFromCriteria, both already in place. 4 leads predate 2026-08-01 and remain in the table (reported, left alone).
+- New scripts/seed-nudges.mjs + `npm run seed:nudges` (create-if-missing, `--force` to refresh, prints a per-nudge targeting preview and a lead-integrity report). Ran it against the live database; all five nudges now exist with correct scoping.
+- scripts/verify-changes.mjs extended from 21 to 45 assertions covering the criteria contents, status spacing, per-nudge scoping, manual-nudge convention and the pay-CTA rendering. All pass. tsc --noEmit clean, eslint clean.
+
+Stage Summary:
+- Fetch is now EPS, 1 Aug -> now, unfiltered at source; all status/KYC decisions are local and exact.
+- Four nudges delivered as requested, two of them manual Google Sheet flows with the activation-fee CTA.
+- Nothing was deleted. Lead data was already clean, and de-dup is enforced by a unique constraint rather than by cleanup.

@@ -294,6 +294,11 @@ export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onCha
                     <div className="flex items-center gap-2 flex-wrap">
                       <h4 className="font-medium truncate">{n.name}</h4>
                       <ChannelBadge channel={n.channel} />
+                      {!n.zohoCriteria && (
+                        <Badge variant="outline" className="gap-1">
+                          <Sheet className="h-3 w-3" /> Manual / Sheet
+                        </Badge>
+                      )}
                       <Badge variant="outline" className="font-mono text-xs">{n.key}</Badge>
                       {!n.enabled && <Badge variant="secondary">disabled</Badge>}
                     </div>
@@ -314,14 +319,25 @@ export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onCha
                 <Separator />
 
                 <div className="flex flex-wrap gap-2">
-                  <Button size="sm" onClick={() => { setRunWithSync(true); setRunTarget(n) }} disabled={!n.enabled}>
-                    {running === n.id ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Play className="h-4 w-4 mr-1" />}
-                    Run
-                  </Button>
-                  <Button size="sm" variant="outline" onClick={() => openPreview(n)}>
-                    <Eye className="h-4 w-4 mr-1" /> Preview
-                  </Button>
-                  {n.channel === 'email' && (
+                  {/* A nudge with no Zoho criteria is MANUAL / sheet-driven. Offering Run or
+                      Preview here would email every synced lead that has an address, so those
+                      buttons are withheld and only the sheet flow is exposed. */}
+                  {n.zohoCriteria ? (
+                    <>
+                      <Button size="sm" onClick={() => { setRunWithSync(true); setRunTarget(n) }} disabled={!n.enabled}>
+                        {running === n.id ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Play className="h-4 w-4 mr-1" />}
+                        Run
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={() => openPreview(n)}>
+                        <Eye className="h-4 w-4 mr-1" /> Preview
+                      </Button>
+                    </>
+                  ) : (
+                    <Button size="sm" onClick={() => openSheetRun(n)} disabled={!n.enabled}>
+                      <Sheet className="h-4 w-4 mr-1" /> Send from Sheet
+                    </Button>
+                  )}
+                  {n.zohoCriteria && n.channel === 'email' && (
                     <Button size="sm" variant="outline" onClick={() => openSheetRun(n)} disabled={!n.enabled}>
                       <Sheet className="h-4 w-4 mr-1" /> Send from Sheet
                     </Button>

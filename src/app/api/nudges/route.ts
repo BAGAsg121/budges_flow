@@ -1,83 +1,35 @@
 /**
- * GET  /api/nudges — list all nudges (seeds default nudges on first call)
- * POST /api/nudges — create a new nudge. This is how new flows are added:
- *                   one config row = one nudge flow (channel + criteria + filters + template).
+ * GET  /api/nudges — list all nudges. Any built-in nudge from nudge-defaults.ts that
+ *                    does not exist yet is created first (create-if-missing only).
+ * POST /api/nudges — create a new nudge. One config row = one nudge flow.
+ *
+ * A nudge with `zohoCriteria: null` is a MANUAL / sheet-driven nudge: it is never run
+ * against synced leads, it is triggered by pasting a Google Sheet URL in the UI.
  */
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
+import { DEFAULT_NUDGES } from '@/lib/nudge-defaults'
 
 export const dynamic = 'force-dynamic'
 
-const DEFAULT_CRITERIA =
-  '((Business_vertical:equals:EPS)and(Lead_Status:not_equal:Closed Won)and(Lead_Status:not_equal:Closed Lost)and(Lead_Status:not_equal:Unqualified)and(Created_Time:greater_than:2026-07-01T01:00:00+05:30)and(KYC_Document_Upload_Count:less_equal:11))'
-
-const DEFAULT_FILTERS = JSON.stringify(
-  {
-    requireEmail: true,
-    excludeStatuses: ['Closed Won', 'Closed Lost', 'Unqualified'],
-    maxKycCount: 11,
-  },
-  null,
-  2
-)
-
-const DEFAULT_DOCS_PENDING = {
-  key: 'documents_pending',
-  name: 'Documents Pending Reminder',
-  channel: 'email',
-  description:
-    'Nudge for EPS leads with pending KYC documents (upload count <= 11). Excludes Closed Won / Closed Lost / Unqualified leads. Syncs eligible leads from Zoho on every run.',
-  zohoCriteria: DEFAULT_CRITERIA,
-  filters: DEFAULT_FILTERS,
-  subjectTemplate: 'Action pending: complete your KYC documents',
-  bodyTemplate: `<div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:0 auto;color:#1a1a1a;">
-  <p>Hi {{first_name}},</p>
-  <p>We noticed your KYC document upload is still pending for <b>{{company}}</b> — your account currently shows <b>{{kyc_document_upload_count}}</b> document(s) uploaded.</p>
-  <p>To keep your onboarding moving, please log in and complete your document upload. It only takes a few minutes:</p>
-  <p style="text-align:center;margin:28px 0;">
-    <a href="https://app.eko.co/in/onboard" style="background:#0d9488;color:#ffffff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:bold;display:inline-block;">Upload Documents</a>
-  </p>
-  <p>If you have already completed this, please ignore this email.</p>
-  <p>Thanks,<br/>Eko Onboarding Team</p>
-</div>`,
-  maxEmailsPerLead: 3,
-  followUpDays: 2,
-}
-
-const DEFAULT_DOCS_PENDING_WA = {
-  key: 'documents_pending_wa',
-  name: 'Documents Pending Reminder (WhatsApp)',
-  channel: 'whatsapp',
-  description:
-    'WhatsApp twin of the documents-pending nudge, delivered via Meta Cloud API. Disabled until you finish Meta setup: register the number, approve the template, set WHATSAPP_TOKEN + WHATSAPP_PHONE_NUMBER_ID in .env, and point the Meta webhook to /api/track/whatsapp.',
-  zohoCriteria: DEFAULT_CRITERIA,
-  filters: JSON.stringify(
-    {
-      requirePhone: true,
-      excludeStatuses: ['Closed Won', 'Closed Lost', 'Unqualified'],
-      maxKycCount: 11,
-    },
-    null,
-    2
-  ),
-  // reference copy of the Meta template body (Meta templates use {{1}}, {{2}} positional params)
-  bodyTemplate: 'Hi {{1}}, your KYC document upload for {{2}} is still pending ({{3}} document(s) uploaded). Please complete it to keep your onboarding moving. - Eko Onboarding Team',
-  whatsappTemplateName: 'documents_pending_reminder',
-  whatsappLanguage: 'en',
-  whatsappParams: JSON.stringify(['first_name', 'company', 'kyc_document_upload_count']),
-  maxEmailsPerLead: 3,
-  followUpDays: 2,
-}
-
-async function ensureDefaultNudges() {
-  const count = await db.nudge.count()
-  if (count === 0) {
-    await db.nudge.createMany({ data: [DEFAULT_DOCS_PENDING, DEFAULT_DOCS_PENDING_WA] })
+/**
+ * Create missing built-in nudges.
+ * Deliberately create-if-missing, never upsert: an admin editing a template in the UI
+ * must not have it silently reverted on the next page load.
+ */
+async function ensureDefaultNudges(): Promise<number> {
+  let created = 0
+  for (const seed of DEFAULT_NUDGES) {
+    const exists = await db.nudge.findUnique({ where: { key: seed.key }, select: { id: true } })
+    if (exists) continue
+    await db.nudge.create({ data: seed })
+    created++
   }
+  return created
 }
 
 export async function GET() {
-  await ensureDefaultNudges()
+  const seeded = await ensureDefaultNudges()
   const nudges = await db.nudge.findMany({
     orderBy: { createdAt: 'asc' },
     include: {
@@ -86,6 +38,7 @@ export async function GET() {
   })
   return NextResponse.json({
     ok: true,
+    seeded,
     nudges: nudges.map((n) => ({
       id: n.id,
       key: n.key,

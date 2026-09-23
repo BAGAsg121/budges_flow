@@ -16,6 +16,8 @@ export type Channel = 'email' | 'whatsapp'
 export interface NudgeFilters {
   requireEmail?: boolean
   requirePhone?: boolean
+  /** Only leads whose status is in this list are considered (exact match). */
+  includeStatuses?: string[]
   excludeStatuses?: string[]
   businessVertical?: string
   maxKycCount?: number
@@ -67,7 +69,9 @@ function buildWhere(filters: NudgeFilters, channel: Channel) {
     }
   }
 
-  if (filters.excludeStatuses?.length) {
+  if (filters.includeStatuses?.length) {
+    where.leadStatus = { in: filters.includeStatuses }
+  } else if (filters.excludeStatuses?.length) {
     where.leadStatus = { notIn: filters.excludeStatuses }
   }
   if (filters.businessVertical) {

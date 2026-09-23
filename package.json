@@ -12,6 +12,7 @@
     "verify": "node scripts/verify-changes.mjs",
     "db:check": "node --env-file=.env scripts/check-sb-db.mjs",
     "db:create-tables": "node --env-file=.env scripts/create-nudge-tables.mjs",
+    "seed:nudges": "node --env-file=.env scripts/seed-nudges.mjs",
     "postinstall": "prisma generate",
     "db:push": "node scripts/refuse-schema-push.mjs",
     "db:push:force": "node scripts/refuse-schema-push.mjs",

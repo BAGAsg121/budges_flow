@@ -115,6 +115,25 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         full_name: row['full_name'] || row['name'] || email.split('@')[0],
       }
 
+      // `mobile` drives the payment link in the onboarding nudges. Sheets name that
+      // column inconsistently, so accept the common spellings in priority order.
+      const mobile =
+        row['mobile'] ||
+        row['mobile_number'] ||
+        row['mobilenumber'] ||
+        row['phone'] ||
+        row['phone_number'] ||
+        row['contact'] ||
+        row['contact_number'] ||
+        row['whatsapp'] ||
+        ''
+      vars.mobile = mobile
+      vars.phone = row['phone'] || mobile
+      // normalise to digits, and strip a leading country code / trunk zero so the
+      // link is stable whether the sheet holds 9876543210 or +91 98765 43210
+      const mobileDigits = String(mobile).replace(/\D/g, '').replace(/^0+/, '').replace(/^91(?=\d{10}$)/, '')
+      vars.mobile_digits = mobileDigits
+
       const trackingId = randomUUID()
       const subject = renderTemplate(nudge.subjectTemplate, vars)
       const bodyHtml = injectTrackingPixel(

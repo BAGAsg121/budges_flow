@@ -140,6 +140,68 @@ column metadata.
 
 ---
 
+## Built-in nudges
+
+All defined in `src/lib/nudge-defaults.ts` (single source of truth for the Zoho criteria and
+every template). `GET /api/nudges` creates any that are missing; it never updates an existing
+row, so UI edits are safe. Refresh definitions deliberately with:
+
+```bash
+npm run seed:nudges           # create-if-missing + targeting report
+npm run seed:nudges -- --force   # also refresh templates/filters on existing rows
+```
+
+| Key | Trigger | Who it targets |
+| --- | --- | --- |
+| `onboarding_started_agreement` | Zoho sync | status = `Onboarding Started` → asks them to complete agreement signing |
+| `documents_pending` | Zoho sync | status = `Agreement Signed` **and** `KYC_Document_Upload_Count <= 10` → complete the document upload |
+| `onboarded_transacting` | **Manual — Google Sheet** | expiring-discount activation-fee reminder with a pay CTA |
+| `onboarded_not_transacting` | **Manual — Google Sheet** | account-activated + integration next steps, then the discount reminder with a pay CTA |
+| `documents_pending_wa` | Zoho sync | WhatsApp twin of `documents_pending` (disabled until Meta approves the template) |
+
+### Two things that will bite you
+
+**Status values contain spaces, not underscores.** The real CRM values are `Onboarding Started`,
+`Agreement Signed`, `Unqualified (Junk)` — *not* `Onboarding_Started`. A filter written with
+underscores silently matches nothing.
+
+**KYC is complete at 11.** So "pending" means `< 11`, which is `maxKycCount: 10` in the filters.
+The original `<= 11` form included three leads that are already complete.
+
+### Fetch criteria vs. nudge filters
+
+The Zoho fetch is deliberately broad:
+
+```
+((Business_vertical:equals:EPS)and(Created_Time:greater_than:2026-08-01T00:00:00+05:30))
+```
+
+No KYC filter and no status filter — every EPS lead since 1 Aug is pulled in, and the
+status/KYC decisions happen locally in each nudge's `filters`. (The old criteria filtered KYC at
+fetch time *and* excluded `not_equal:Unqualified`, which never matched anything, because the real
+value is `Unqualified (Junk)`.)
+
+Move the window by editing `ZOHO_LEADS_CREATED_AFTER` in `nudge-defaults.ts`. It has no upper
+bound, so it always runs "up to now". Leads synced earlier stay in the local table and keep being
+nudged until their status changes — add `createdAfter` to a nudge's filters if you want to exclude
+them.
+
+### Manual / sheet nudges
+
+A nudge with `zohoCriteria: null` is manual: it is never run against synced leads. The UI hides its
+**Run**/**Preview** buttons (running it would otherwise email every synced lead with an address) and
+shows a *Manual / Sheet* badge plus a **Send from Sheet** button.
+
+Paste a sheet URL shared as *"Anyone with the link can view"*. The CSV parser lower-cases headers
+and turns spaces into underscores, so `Mobile Number` becomes `{{mobile_number}}`. Any column
+becomes a `{{variable}}`.
+
+The pay CTA uses `{{mobile_digits}}`, which accepts `mobile`, `mobile_number`, `phone`,
+`phone_number`, `contact`, `contact_number` or `whatsapp` and normalises `+91 98765 43210` /
+`09876543210` / `919876543210` all down to `9876543210`, so the link stays valid.
+
+---
+
 ## HTTP surface
 
 | Route | Auth | Purpose |
