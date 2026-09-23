@@ -224,40 +224,58 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
           // either Meta capped them (retryable but slow) or the number cannot receive.
           const undeliverable = isDeliveryCapError(result.error) || isPermanentDeliveryFailure(result.error)
           if (undeliverable && fallbackNudge && email && fallbackNudge.subjectTemplate && fallbackNudge.bodyTemplate) {
-            const fbTrackingId = randomUUID()
-            const fbSubject = renderTemplate(fallbackNudge.subjectTemplate, vars)
-            const fbHtml = injectTrackingPixel(
-              renderTemplate(fallbackNudge.bodyTemplate, vars, { escapeValues: true }),
-              baseUrl,
-              fbTrackingId
-            )
-            const fbResult = await sendEmail({
-              to: email,
-              subject: fbSubject,
-              html: fbHtml,
-              text: htmlToText(fbHtml),
+            // Honour the EMAIL nudge's own "one successful send per recipient" rule. Without
+            // this, a capped WhatsApp recipient would be emailed again on every retry of the
+            // WhatsApp run — the backoff makes the run revisit them, the dedup makes it safe.
+            const alreadyEmailed = await db.messageLog.findFirst({
+              where: { nudgeId: fallbackNudge.id, toEmail: email, sentOk: true },
             })
-
-            await db.messageLog.create({
-              data: {
-                leadId: null,
-                nudgeId: fallbackNudge.id,
-                channel: 'email',
-                messageNumber: 1,
-                toEmail: email,
+            if (alreadyEmailed) {
+              skipped.push({
+                lead: email || mobile,
+                email: email || null,
+                reason: 'email_fallback',
+                detail: 'already sent by the email nudge',
+              })
+            } else {
+              const fbTrackingId = randomUUID()
+              const fbSubject = renderTemplate(fallbackNudge.subjectTemplate, vars)
+              const fbHtml = injectTrackingPixel(
+                renderTemplate(fallbackNudge.bodyTemplate, vars, { escapeValues: true }),
+                baseUrl,
+                fbTrackingId
+              )
+              const fbResult = await sendEmail({
+                to: email,
                 subject: fbSubject,
-                messageId: fbResult.messageId ?? null,
-                trackingId: fbTrackingId,
-                sheetRowRef: `fallback:${nudge.key}|${email}`.slice(0, 512),
-                sentOk: fbResult.ok,
-                sendError: fbResult.error ?? null,
-                sentAt: fbResult.ok ? new Date() : null,
-                engagementStatus: 'sent',
-              },
-            })
+                html: fbHtml,
+                text: htmlToText(fbHtml),
+              })
 
-            if (fbResult.ok) {
-              fallbackEmails.push({ to: email, reason: isDeliveryCapError(result.error) ? 'whatsapp capped' : 'whatsapp undeliverable' })
+              await db.messageLog.create({
+                data: {
+                  leadId: null,
+                  nudgeId: fallbackNudge.id,
+                  channel: 'email',
+                  messageNumber: 1,
+                  toEmail: email,
+                  subject: fbSubject,
+                  messageId: fbResult.messageId ?? null,
+                  trackingId: fbTrackingId,
+                  sheetRowRef: `fallback:${nudge.key}|${email}`.slice(0, 512),
+                  sentOk: fbResult.ok,
+                  sendError: fbResult.error ?? null,
+                  sentAt: fbResult.ok ? new Date() : null,
+                  engagementStatus: 'sent',
+                },
+              })
+
+              if (fbResult.ok) {
+                fallbackEmails.push({
+                  to: email,
+                  reason: isDeliveryCapError(result.error) ? 'whatsapp capped' : 'whatsapp undeliverable',
+                })
+              }
             }
           }
         }
