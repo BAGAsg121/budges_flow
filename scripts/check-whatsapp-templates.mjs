@@ -21,8 +21,31 @@ import {
   validateTemplateInput,
   countTemplateVars,
 } from '../src/lib/whatsapp-templates.ts'
+import {
+  MYSQL_FLOW_TEMPLATES,
+  WA_SHEET_FLOW_TEMPLATES,
+  CONSOLE_URL,
+  PAY_ACTIVATION_FEE_URL,
+} from '../src/lib/nudge-defaults.ts'
 
 const db = new PrismaClient()
+
+/**
+ * Look up the approved-copy spec for a template name. This is what lets
+ * `--create-missing` build a template with its URL BUTTON, which the nudge row alone
+ * does not carry.
+ */
+function templateSpecFor(name) {
+  const mysqlFlow = Object.values(MYSQL_FLOW_TEMPLATES).find((t) => t.templateName === name)
+  if (mysqlFlow) {
+    return { body: mysqlFlow.body, buttonText: mysqlFlow.buttonText, buttonUrl: `${CONSOLE_URL}?mobile={{1}}` }
+  }
+  const sheetFlow = Object.values(WA_SHEET_FLOW_TEMPLATES).find((t) => t.templateName === name)
+  if (sheetFlow) {
+    return { body: sheetFlow.body, buttonText: sheetFlow.buttonText, buttonUrl: `${PAY_ACTIVATION_FEE_URL}?mobile={{1}}` }
+  }
+  return null
+}
 
 const args = process.argv.slice(2)
 function flagValue(name) {
@@ -52,7 +75,17 @@ async function showList() {
   for (const t of result.templates) {
     const flag = t.status === 'APPROVED' ? '✅' : t.status === 'PENDING' ? '⏳' : '❌'
     console.log(`  ${flag} ${t.name.padEnd(pad)}  ${String(t.language).padEnd(7)} ${String(t.status).padEnd(9)} ${t.category}`)
-    if (t.rejected_reason) console.log(`      rejected: ${t.rejected_reason}`)
+
+    // Surface the parts that decide whether a send will actually work.
+    const body = (t.components || []).find((c) => c.type === 'BODY')
+    const vars = countTemplateVars(body?.text || '')
+    const buttons = (t.components || []).find((c) => c.type === 'BUTTONS')?.buttons || []
+    const header = (t.components || []).find((c) => c.type === 'HEADER')
+    const buttonText = buttons.map((b) => `${b.type} "${b.text}" -> ${b.url || ''}`).join(', ')
+    console.log(
+      `      ${header ? 'header, ' : ''}body ${vars} var(s)${buttonText ? `  ·  button: ${buttonText}` : '  ·  no button'}`
+    )
+    if (t.rejected_reason && t.rejected_reason !== 'NONE') console.log(`      rejected: ${t.rejected_reason}`)
   }
   const approved = result.templates.filter((t) => t.status === 'APPROVED')
   console.log(`\n${approved.length} approved and ready to attach to a nudge.`)
@@ -113,7 +146,10 @@ async function main() {
         continue
       }
 
-      const body = (n.bodyTemplate || '').trim()
+      // Prefer the curated copy + button from nudge-defaults; fall back to the nudge's
+      // own reference body for ad-hoc nudges created in the UI.
+      const spec = templateSpecFor(name)
+      const body = (spec?.body || n.bodyTemplate || '').trim()
       if (!body) {
         console.log(`  ${n.key}: no bodyTemplate to build a template from — skipped`)
         continue
@@ -126,8 +162,8 @@ async function main() {
         bodyText: body,
         footerText: null,
         headerText: null,
-        buttonText: null,
-        buttonUrl: null,
+        buttonText: spec?.buttonText || null,
+        buttonUrl: spec?.buttonUrl || null,
       }
       const { errors, warnings } = validateTemplateInput(input)
       if (errors.length) {

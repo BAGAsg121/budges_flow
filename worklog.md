@@ -245,6 +245,33 @@ Stage Summary:
 
 ---
 
+Task ID: 16
+Agent: Main agent (DeepSeek Harness)
+Task: Port all the n8n WhatsApp nudges onto the Meta API, driven directly by the business database; drop Infinito entirely.
+
+Work Log:
+- Read the supplied n8n workflow and mapped all six flows plus the two sheet-driven ones. Confirmed the n8n docs flow could not have been working: its query selects `d.CREATED_AT`, but `csp_docs` has no such column (7 columns total). The port queries only columns that exist.
+- Checked the real columns of all four source tables (csp_application, verify_csp, csp_docs, customer_agreement_history) before writing any SQL, rather than assuming from the n8n expressions.
+- NEW ARCHITECTURE, no schema change: a nudge's audience is now one of three sources — zoho (zohoCriteria set), mysql (filters.source="mysql" + filters.flow), or sheet (neither). This is encoded entirely in the existing fields, because adding a column would require ALTER on the shared production database, which is off-limits.
+- New src/lib/mysql-nudges.ts: six collectors over the read-only sb-db connection (SELECT only). A/B/C keep the n8n trigger windows (3h / 2h / 2h). D/E/F previously read their candidate list from a Google Sheet; with direct DB access the cohort is now "recent CSP applications" (30 days), so the checks cover the whole onboarding cohort instead of a hand-maintained sheet. The document classification logic is ported faithfully from the n8n code node — same required-docs list, master ids, aliases, and the approved > submitted > rejected duplicate rule.
+- csp_docs has no phone, so the recipient mobile is resolved from csp_application for the candidate customer ids, falling back to verify_csp. The IN list is bounded and every query has a LIMIT.
+- nudge-engine: added a MySQL branch (runMysqlNudge) that keys sequence state on the phone (MessageLog.toPhone) so the existing replied / max-reached / follow-up rules apply unchanged and nobody is messaged twice for the same nudge. Extracted buildWhatsAppParams into a dependency-free src/lib/whatsapp-params.ts so the position mapping is unit-testable.
+- Meta URL-button support: sendWhatsAppTemplate now sends a separate `button` component (sub_type url, index 0). Meta keeps the button's {{1}} independent of the body's {{1}}, which is exactly what flows E/F need (body = document list, button = mobile).
+- sheet-run extended to WhatsApp: reads a mobile column (mobile / mobile_number / phone / phone_number / contact / contact_number / whatsapp), normalises it, sends the template with the button param, and de-duplicates per phone.
+- Eight new nudges defined in nudge-defaults.ts, all DISABLED: six MySQL flows (console button) and two manual sheet pay nudges (pay-activation-fee button). Copy rewritten and improved for each, per the supplied samples.
+- Created all eight templates on the live WABA via `--create-missing`, extended to build from the curated copy AND attach the URL button. Verified the components came back exactly right: six at https://eps.eko.in/console?mobile={{1}} and two at .../pay-activation-fee?mobile={{1}}. All eight are PENDING Meta review. (documents_pending_reminder has since been APPROVED.)
+- UI: nudgeSourceOf() drives the badges (MySQL / DB, Manual / Sheet) and the buttons — MySQL nudges get Run (they are not sheet-driven), sheet nudges get Send from Sheet.
+- Two self-inflicted bugs found and fixed by running things: the seed script hung because the MySQL pool holds the event loop open (now closes the pool), and a duplicate `const f` after I added live flow previews to it. Also added allowImportingTsExtensions so CLI scripts can import the collector module.
+- VERIFIED: `npm run seed:nudges` now previews live per-flow recipient counts — agreement_signature_pending 3, documents_pending_upload 2, the rest 0 at the time of writing. `npm run wa:flows` audits all ten WhatsApp nudges (template status, button, params, live recipient count) and exits 0. verify-changes.mjs is now 154 assertions covering the flow registry, per-flow nudge config, button URLs, and the param-mapping forms. tsc and eslint clean.
+- Scheduler remains PAUSED; every new nudge ships disabled.
+
+Stage Summary:
+- All six n8n WhatsApp nudges plus the two sheet pay nudges now run on the Meta Cloud API, driven straight from the business database through the read-only connection. Infinito is gone from code and config.
+- Nothing is live yet by design: all ten WhatsApp nudges are disabled, and eight templates await Meta approval.
+- Remaining: deploy, and enable each nudge once its template shows Approved.
+
+---
+
 Task ID: 11
 Agent: Main agent (DeepSeek Harness)
 Task: Pause all outbound sending, and answer whether the temporary WhatsApp token is sufficient.

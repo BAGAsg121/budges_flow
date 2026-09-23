@@ -203,6 +203,69 @@ The pay CTA uses `{{mobile_digits}}`, which accepts `mobile`, `mobile_number`, `
 `phone_number`, `contact`, `contact_number` or `whatsapp` and normalises `+91 98765 43210` /
 `09876543210` / `919876543210` all down to `9876543210`, so the link stays valid.
 
+### Nudge sources
+
+A nudge is driven by one of three sources. It is encoded in the existing `zohoCriteria` /
+`filters` fields, so **no database column was added** — the shared production database is
+untouched.
+
+| Source | How it is marked | Audience |
+| --- | --- | --- |
+| Zoho (lead-driven) | `zohoCriteria` set | synced CRM leads |
+| **MySQL (DB-driven)** | `filters.source = "mysql"` + `filters.flow` | live rows from the business database, read read-only |
+| Manual / sheet | neither of the above | rows of a Google Sheet you paste in the UI |
+
+The UI badges each card and only offers the buttons that make sense: **Run** for Zoho and MySQL
+nudges, **Send from Sheet** for sheet nudges. Preview works on lead-driven nudges; for MySQL flows
+`npm run wa:flows` shows the live recipient count instead.
+
+### MySQL-driven WhatsApp flows
+
+Ported from the n8n workflow, now talking to the Meta Cloud API instead of Infinito. All six ship
+**disabled** until their template is approved.
+
+| Flow key | Table | Fires when | Window |
+| --- | --- | --- | --- |
+| `csp_details_pending` | `csp_application` | pincode / alternate mobile / shop address missing | last 3h |
+| `mobile_otp_pending` | `verify_csp` | `verifyAt` empty | last 2h |
+| `pan_verification_pending` | `verify_csp` | mobile verified but `panNumber` empty | last 2h |
+| `agreement_signature_pending` | `customer_agreement_history` | latest agreement `status <> 1` (not signed) | last 30 days |
+| `documents_pending_upload` | `csp_docs` | any mandatory document never uploaded | last 30 days |
+| `documents_reupload_required` | `csp_docs` | any mandatory document rejected (status 3) | last 30 days |
+
+Notes:
+
+- Reads go through `src/lib/sb-db.ts` — `SELECT` only, session read-only. **The app never writes to
+  the business database.**
+- A/B/C keep the n8n trigger intervals, because they are event-driven. D/E/F previously took their
+  candidate list from a Google Sheet; with direct DB access the cohort is *recent CSP applications*,
+  so the window is in days. Widen any window freely — de-duplication is per phone number, so a wider
+  window means better coverage, not repeat messages.
+- `csp_docs` has no `CREATED_AT` column, so the original n8n docs query could not have worked; the
+  port queries the columns that actually exist and resolves the phone via `csp_application`
+  (falling back to `verify_csp`).
+- Document classification is ported from the n8n code node: the same required-document list, master
+  doc ids and aliases, and the same priority when duplicates exist (approved > submitted > rejected).
+- Recipients are de-duplicated by **phone**, and the shared sequence rules still apply (stop on reply,
+  max sends per contact).
+- Every button links to `https://eps.eko.in/console?mobile=<recipient mobile>`.
+
+### Manual WhatsApp sheet nudges
+
+`whatsapp_onboarded_transacting` and `whatsapp_onboarded_not_transacting` are the WhatsApp twins of
+the two pay-activation-fee email nudges. Paste a Google Sheet URL in the UI; the sheet needs a mobile
+column (any of `mobile`, `mobile_number`, `phone`, `phone_number`, `contact`, `contact_number`,
+`whatsapp`). Their button links to `https://eps.eko.in/console/pay-activation-fee?mobile=<mobile>`.
+
+> Only these two use the pay-activation-fee link. The six DB flows use the console link.
+
+### Verifying the flows
+
+```bash
+npm run wa:flows        # live audit: template status, button, params, and recipient counts
+npm run seed:nudges     # create-if-missing + a live per-flow recipient preview
+```
+
 ---
 
 ## HTTP surface

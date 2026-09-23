@@ -16,7 +16,8 @@ import { randomUUID } from 'crypto'
 import { db } from '@/lib/db'
 import { sendEmail, isMailerConfigured } from '@/lib/mailer'
 import { renderTemplate, injectTrackingPixel, htmlToText } from '@/lib/template'
-import { isWhatsAppConfigured } from '@/lib/whatsapp'
+import { isWhatsAppConfigured, sendWhatsAppTemplate, normalizePhone, getDefaultTemplateLanguage } from '@/lib/whatsapp'
+import { buildWhatsAppParams } from '@/lib/whatsapp-params'
 import { getBaseUrl } from '@/lib/base-url'
 import { parseSheetCsv, toSheetCsvUrl } from '@/lib/sheet-parser'
 
@@ -37,10 +38,22 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     const nudge = await db.nudge.findUnique({ where: { id } })
     if (!nudge) return NextResponse.json({ ok: false, error: 'Nudge not found' }, { status: 404 })
     if (!nudge.enabled) return NextResponse.json({ ok: false, error: 'Nudge is disabled' }, { status: 400 })
-    if (nudge.channel !== 'email') {
-      return NextResponse.json({ ok: false, error: 'Sheet-run only supports email nudges' }, { status: 400 })
-    }
-    if (!nudge.subjectTemplate || !nudge.bodyTemplate) {
+
+    const isWhatsApp = nudge.channel === 'whatsapp'
+    if (isWhatsApp) {
+      if (!nudge.whatsappTemplateName?.trim()) {
+        return NextResponse.json(
+          { ok: false, error: 'WhatsApp sheet-run needs an approved template name on the nudge' },
+          { status: 400 }
+        )
+      }
+      if (!isWhatsAppConfigured()) {
+        return NextResponse.json(
+          { ok: false, error: 'WhatsApp is not configured (WHATSAPP_TOKEN / WHATSAPP_PHONE_NUMBER_ID)' },
+          { status: 400 }
+        )
+      }
+    } else if (!nudge.subjectTemplate || !nudge.bodyTemplate) {
       return NextResponse.json({ ok: false, error: 'Nudge has no subject or body template' }, { status: 400 })
     }
 
@@ -89,17 +102,43 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     // 4. For each row — render, deduplicate, send
     for (const row of rows) {
       const email = row['email'] || row['email_address'] || ''
-      if (!email) {
+
+      // `mobile` is needed by WhatsApp, and drives the link in the onboarding nudges.
+      // Sheets name that column inconsistently, so accept the common spellings.
+      const mobile =
+        row['mobile'] ||
+        row['mobile_number'] ||
+        row['mobilenumber'] ||
+        row['phone'] ||
+        row['phone_number'] ||
+        row['contact'] ||
+        row['contact_number'] ||
+        row['whatsapp'] ||
+        ''
+      const toPhone = isWhatsApp ? normalizePhone(mobile) : null
+
+      if (isWhatsApp && !toPhone) {
+        skipped.push({
+          lead: email || JSON.stringify(row).slice(0, 60),
+          email: email || null,
+          reason: 'no_valid_phone',
+          detail: 'WhatsApp sheet-run needs a mobile column',
+        })
+        continue
+      }
+      if (!isWhatsApp && !email) {
         skipped.push({ lead: JSON.stringify(row).slice(0, 60), email: null, reason: 'no_email_column' })
         continue
       }
 
-      // Dedup: skip if there is already a successful send for this nudge + email from a sheet run
+      // Dedup: one successful send per recipient per nudge, keyed on the channel's address.
       const existing = await db.messageLog.findFirst({
-        where: { nudgeId: nudge.id, toEmail: email, sentOk: true },
+        where: isWhatsApp
+          ? { nudgeId: nudge.id, toPhone: toPhone as string, sentOk: true }
+          : { nudgeId: nudge.id, toEmail: email, sentOk: true },
       })
       if (existing) {
-        skipped.push({ lead: email, email, reason: 'duplicate', detail: 'already sent successfully' })
+        skipped.push({ lead: email || mobile, email: email || null, reason: 'duplicate', detail: 'already sent successfully' })
         continue
       }
 
@@ -115,18 +154,6 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         full_name: row['full_name'] || row['name'] || email.split('@')[0],
       }
 
-      // `mobile` drives the payment link in the onboarding nudges. Sheets name that
-      // column inconsistently, so accept the common spellings in priority order.
-      const mobile =
-        row['mobile'] ||
-        row['mobile_number'] ||
-        row['mobilenumber'] ||
-        row['phone'] ||
-        row['phone_number'] ||
-        row['contact'] ||
-        row['contact_number'] ||
-        row['whatsapp'] ||
-        ''
       vars.mobile = mobile
       vars.phone = row['phone'] || mobile
       // normalise to digits, and strip a leading country code / trunk zero so the
@@ -135,13 +162,49 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       vars.mobile_digits = mobileDigits
 
       const trackingId = randomUUID()
-      const subject = renderTemplate(nudge.subjectTemplate, vars)
+      const sheetRowRef = `${csvUrl}|${isWhatsApp ? toPhone : email}`
+
+      if (isWhatsApp) {
+        const waParams = buildWhatsAppParams(nudge.whatsappParams, vars)
+        const result = await sendWhatsAppTemplate({
+          to: toPhone as string,
+          templateName: nudge.whatsappTemplateName as string,
+          language: nudge.whatsappLanguage || getDefaultTemplateLanguage(),
+          params: waParams.body,
+          buttonParams: waParams.button,
+        })
+
+        await db.messageLog.create({
+          data: {
+            leadId: null,
+            nudgeId: nudge.id,
+            channel: 'whatsapp',
+            messageNumber: 1,
+            toPhone,
+            templateName: nudge.whatsappTemplateName,
+            messageId: result.waMessageId ?? null,
+            trackingId,
+            sheetRowRef: sheetRowRef.slice(0, 512),
+            sentOk: result.ok,
+            sendError: result.error ?? null,
+            sentAt: result.ok ? new Date() : null,
+            engagementStatus: 'sent',
+          },
+        })
+
+        if (result.ok) sent.push(toPhone as string)
+        else failed.push({ email: toPhone as string, error: result.error ?? 'unknown error' })
+
+        await new Promise((r) => setTimeout(r, 250))
+        continue
+      }
+
+      const subject = renderTemplate(nudge.subjectTemplate as string, vars)
       const bodyHtml = injectTrackingPixel(
-        renderTemplate(nudge.bodyTemplate, vars, { escapeValues: true }),
+        renderTemplate(nudge.bodyTemplate as string, vars, { escapeValues: true }),
         baseUrl,
         trackingId
       )
-      const sheetRowRef = `${csvUrl}|${email}`
 
       const result = await sendEmail({ to: email, subject, html: bodyHtml, text: htmlToText(bodyHtml) })
 

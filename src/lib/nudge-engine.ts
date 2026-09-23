@@ -10,6 +10,9 @@ import { searchAllLeads, mapZohoLead } from '@/lib/zoho'
 import { sendEmail, isMailerConfigured } from '@/lib/mailer'
 import { sendWhatsAppTemplate, sendWhatsAppText, isWhatsAppConfigured, normalizePhone, getDefaultTemplateLanguage } from '@/lib/whatsapp'
 import { renderTemplate, injectTrackingPixel, htmlToText } from '@/lib/template'
+import { collectMysqlRecipients, isMysqlFlowKey } from '@/lib/mysql-nudges'
+import { buildWhatsAppParams } from '@/lib/whatsapp-params'
+import type { Nudge } from '@prisma/client'
 
 export type Channel = 'email' | 'whatsapp'
 
@@ -220,20 +223,143 @@ function resolveBatchLimit(limit?: number): number | null {
  * Order is preserved even when a value is missing — dropping an empty value would
  * silently shift every later {{n}} into the wrong slot.
  */
-function buildWhatsAppParams(config: string | null, vars: Record<string, unknown>): string[] {
-  let sources: string[] = []
-  try {
-    const parsed = JSON.parse(config || '[]')
-    if (Array.isArray(parsed)) sources = parsed.map((p) => String(p))
-  } catch {
-    // bad config -> send with no params; Meta will reject if the template needs them
+/** What drives a nudge's audience. Encoded in existing fields, so no schema change. */
+export type NudgeSource = 'zoho' | 'mysql' | 'sheet'
+
+export function nudgeSource(nudge: { zohoCriteria: string | null; filters: string }): NudgeSource {
+  const f = parseFilters(nudge.filters) as { source?: string }
+  if (f.source === 'mysql') return 'mysql'
+  if (nudge.zohoCriteria && nudge.zohoCriteria.trim()) return 'zoho'
+  return 'sheet'
+}
+
+/** Local 10-digit form used in the template's URL button, e.g. 919876543210 -> 9876543210. */
+function buttonMobile(raw: string | null): string {
+  const full = normalizePhone(raw)
+  if (!full) return ''
+  const cc = process.env.WHATSAPP_DEFAULT_CC || '91'
+  return full.startsWith(cc) ? full.slice(cc.length) : full
+}
+
+/**
+ * Run a MySQL-driven WhatsApp nudge.
+ *
+ * Recipients come from the business database via a read-only query. Sequence state is keyed
+ * on the phone number (MessageLog.toPhone) rather than a Lead row, so the same
+ * replied / max-reached / follow-up rules apply and a recipient is never messaged twice for
+ * the same nudge.
+ */
+async function runMysqlNudge(nudge: Nudge, summary: RunSummary, batchLimit: number | null): Promise<RunSummary> {
+  const filters = parseFilters(nudge.filters) as { flow?: string; lookbackHours?: number; lookbackDays?: number }
+  if (!isMysqlFlowKey(filters.flow)) {
+    throw new Error(
+      `Nudge "${nudge.key}" is marked source=mysql but filters.flow is missing or invalid. Expected one of the known flow keys.`
+    )
   }
-  const fallback = process.env.WHATSAPP_EMPTY_PARAM_FALLBACK ?? '-'
-  return sources.map((key) => {
-    const value = vars[key]
-    if (value === null || value === undefined || value === '') return fallback
-    return String(value)
+  if (summary.channel !== 'whatsapp') {
+    throw new Error(`MySQL-driven nudge "${nudge.key}" must use the whatsapp channel.`)
+  }
+
+  const recipients = await collectMysqlRecipients(filters.flow, {
+    lookbackHours: filters.lookbackHours,
+    lookbackDays: filters.lookbackDays,
   })
+  summary.leadsConsidered = recipients.length
+
+  const templateName = (nudge.whatsappTemplateName || '').trim()
+  const now = new Date()
+  let attempts = 0
+
+  for (const recipient of recipients) {
+    const toPhone = normalizePhone(recipient.phone)
+    const label = recipient.key
+
+    if (!toPhone) {
+      summary.skipped.push({ lead: label, email: null, phone: recipient.phone, reason: 'no_valid_phone', detail: recipient.detail })
+      continue
+    }
+
+    const logs = await db.messageLog.findMany({ where: { nudgeId: nudge.id, toPhone } })
+    const decision = decideSend(logs, nudge.maxEmailsPerLead, nudge.followUpDays, now)
+    if (decision.action === 'skip') {
+      summary.skipped.push({ lead: label, email: null, phone: toPhone, reason: decision.reason!, detail: decision.detail })
+      continue
+    }
+
+    if (batchLimit !== null && attempts >= batchLimit) {
+      summary.deferred++
+      summary.skipped.push({
+        lead: label,
+        email: null,
+        phone: toPhone,
+        reason: 'batch_limit',
+        detail: `cap ${batchLimit}/run — continues next cycle`,
+      })
+      continue
+    }
+
+    attempts++
+    const messageNumber = decision.messageNumber ?? 1
+    const fallback = process.env.WHATSAPP_EMPTY_PARAM_FALLBACK ?? '-'
+    const mobile = buttonMobile(recipient.phone)
+
+    // Body params come from the flow's own values (e.g. the document list for E/F);
+    // the button param comes from the nudge config, defaulting to this recipient's mobile.
+    const cfg = buildWhatsAppParams(nudge.whatsappParams, {
+      mobile,
+      mobile_digits: mobile,
+      key: recipient.key,
+      detail: recipient.detail ?? '',
+    })
+    const bodyParams = recipient.params.length
+      ? recipient.params.map((v) => (v === null || v === undefined || v === '' ? fallback : String(v)))
+      : cfg.body
+    const buttonParams = cfg.button.length ? cfg.button : mobile ? [mobile] : []
+
+    const result = templateName
+      ? await sendWhatsAppTemplate({
+          to: toPhone,
+          templateName,
+          language: nudge.whatsappLanguage || getDefaultTemplateLanguage(),
+          params: bodyParams,
+          buttonParams,
+        })
+      : await sendWhatsAppText({
+          to: toPhone,
+          text: renderTemplate(nudge.bodyTemplate || '', {
+            key: recipient.key,
+            detail: recipient.detail ?? '',
+            mobile,
+            mobile_digits: mobile,
+          }),
+        })
+
+    await db.messageLog.create({
+      data: {
+        leadId: null,
+        nudgeId: nudge.id,
+        channel: 'whatsapp',
+        messageNumber,
+        toPhone,
+        templateName: nudge.whatsappTemplateName,
+        messageId: result.waMessageId ?? null,
+        trackingId: randomUUID(),
+        sentOk: result.ok,
+        sendError: result.error ?? null,
+        sentAt: result.ok ? new Date() : null,
+        engagementStatus: 'sent',
+        sheetRowRef: `mysql:${filters.flow}:${recipient.key}`.slice(0, 512),
+      },
+    })
+
+    if (result.ok) summary.sent++
+    else summary.failed++
+
+    await new Promise((r) => setTimeout(r, 250))
+  }
+
+  await db.nudge.update({ where: { id: nudge.id }, data: { lastRunAt: new Date() } })
+  return summary
 }
 
 /** Run a nudge end-to-end. Set opts.sync=false to skip the Zoho refresh and send to already-synced leads. */
@@ -262,6 +388,12 @@ export async function runNudge(
     skipped: [],
     smtpConfigured: isMailerConfigured(),
     whatsappConfigured: isWhatsAppConfigured(),
+  }
+
+  // 0. MySQL-driven flows read the business database directly (read-only) and skip the
+  //    local Lead table entirely.
+  if (nudgeSource(nudge) === 'mysql') {
+    return runMysqlNudge(nudge, summary, batchLimit)
   }
 
   // 1. Optional Zoho sync for this nudge's criteria
@@ -353,12 +485,14 @@ export async function runNudge(
       // allows inside the 24h customer service window or to a registered test number —
       // useful for verifying the integration before a template is approved.
       const templateName = (nudge.whatsappTemplateName || '').trim()
+      const waParams = buildWhatsAppParams(nudge.whatsappParams, vars)
       const result = templateName
         ? await sendWhatsAppTemplate({
             to: toPhone,
             templateName,
             language: nudge.whatsappLanguage || getDefaultTemplateLanguage(),
-            params: buildWhatsAppParams(nudge.whatsappParams, vars),
+            params: waParams.body,
+            buttonParams: waParams.button,
           })
         : await sendWhatsAppText({
             to: toPhone,

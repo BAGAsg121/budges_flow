@@ -118,6 +118,11 @@ export async function sendWhatsAppTemplate(opts: {
   templateName: string
   language?: string
   params: string[]
+  /**
+   * Values for the template's URL button variable. Meta sends these as a separate
+   * `button` component, so the button's {{1}} is INDEPENDENT of the body's {{1}}.
+   */
+  buttonParams?: string[]
 }): Promise<WhatsAppSendResult> {
   const payload: Record<string, unknown> = {
     messaging_product: 'whatsapp',
@@ -129,13 +134,24 @@ export async function sendWhatsAppTemplate(opts: {
       language: { code: opts.language || 'en' },
     },
   }
+
+  const components: Record<string, unknown>[] = []
   if (opts.params.length > 0) {
-    ;(payload.template as Record<string, unknown>).components = [
-      {
-        type: 'body',
-        parameters: opts.params.map((text) => ({ type: 'text', text: String(text) })),
-      },
-    ]
+    components.push({
+      type: 'body',
+      parameters: opts.params.map((text) => ({ type: 'text', text: String(text) })),
+    })
+  }
+  if (opts.buttonParams?.length) {
+    components.push({
+      type: 'button',
+      sub_type: 'url',
+      index: '0',
+      parameters: opts.buttonParams.map((text) => ({ type: 'text', text: String(text) })),
+    })
+  }
+  if (components.length) {
+    ;(payload.template as Record<string, unknown>).components = components
   }
   return postMessage(payload)
 }

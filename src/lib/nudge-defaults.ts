@@ -47,6 +47,134 @@ export const ZOHO_CRITERIA =
 /** Payment link used by the two onboarding nudges. */
 export const PAY_ACTIVATION_FEE_URL = 'https://eps.eko.in/console/pay-activation-fee'
 
+/** Console link used by every MySQL-driven flow. The button variable is the mobile. */
+export const CONSOLE_URL = 'https://eps.eko.in/console'
+
+/**
+ * Default Meta template language for this account. Meta treats "en" and "en_US" as
+ * different locales, and a mismatch fails with 132001.
+ */
+export const WHATSAPP_TEMPLATE_LANGUAGE_DEFAULT =
+  (process.env.WHATSAPP_TEMPLATE_LANGUAGE || 'en_US').trim() || 'en_US'
+
+/**
+ * Look-back window per MySQL flow, mirroring the n8n cadences where they existed.
+ * A/B/C are event-driven, so a short window matches the original trigger interval.
+ * D/E/F previously took their candidate list from a Google Sheet; with direct database
+ * access the cohort is "recent CSP applications", so the window is expressed in days.
+ * Widen any of these — a wider window plus per-phone de-duplication simply means better
+ * coverage, not repeat messages.
+ */
+export const MYSQL_FLOW_LOOKBACK: Record<string, { lookbackHours?: number; lookbackDays?: number }> = {
+  csp_details_pending: { lookbackHours: 3 },
+  mobile_otp_pending: { lookbackHours: 2 },
+  pan_verification_pending: { lookbackHours: 2 },
+  agreement_signature_pending: { lookbackDays: 30 },
+  documents_pending_upload: { lookbackDays: 30 },
+  documents_reupload_required: { lookbackDays: 30 },
+}
+
+// ---------------------------------------------------------------------------
+// Meta template bodies for the six MySQL-driven flows.
+// These are the reference copies; the same text is submitted to Meta from the
+// Templates tab (or with `npm run wa:templates -- --create-missing`).
+// ---------------------------------------------------------------------------
+
+export interface MysqlFlowTemplate {
+  templateName: string
+  title: string
+  body: string
+  buttonText: string
+  /** Body variable sources for {{1}}… ; empty when the template has no variables. */
+  bodyVars: string[]
+}
+
+export const MYSQL_FLOW_TEMPLATES: Record<string, MysqlFlowTemplate> = {
+  csp_details_pending: {
+    templateName: 'csp_details_pending',
+    title: 'Application Details Pending',
+    body:
+      'Hi 👋 Your Eko partner application is almost complete. We just need a few more details from you:\n' +
+      '• Current address and pincode\n' +
+      '• Shop address\n' +
+      '• An alternate mobile number\n\n' +
+      'Please finish this step so your onboarding is not delayed. Tap the button below to continue.',
+    buttonText: 'Complete Now',
+    bodyVars: [],
+  },
+  mobile_otp_pending: {
+    templateName: 'mobile_otp_pending',
+    title: 'Mobile Verification Pending',
+    body:
+      'Hi 👋 Your mobile number verification for the Eko partner registration is still pending.\n\n' +
+      'Please verify the OTP to continue your onboarding. It only takes a moment.',
+    buttonText: 'Verify Now',
+    bodyVars: [],
+  },
+  pan_verification_pending: {
+    templateName: 'pan_verification_pending',
+    title: 'PAN Verification Pending',
+    body:
+      'Hi 👋 Your Eko partner application is incomplete — we are still missing your PAN details.\n\n' +
+      'Once you submit and verify your PAN, we can move your onboarding forward.',
+    buttonText: 'Submit PAN',
+    bodyVars: [],
+  },
+  agreement_signature_pending: {
+    templateName: 'agreement_signature_pending',
+    title: 'Agreement Signature Pending',
+    body:
+      'Hi 👋 Your Eko partner agreement is ready for e-signature but has not been signed yet.\n\n' +
+      'Please sign it at the earliest so we can activate your account and you can start using our services.',
+    buttonText: 'Sign Agreement',
+    bodyVars: [],
+  },
+  documents_pending_upload: {
+    templateName: 'documents_pending_upload',
+    title: 'Documents Pending',
+    body:
+      'Hi 👋 A few mandatory documents for your Eko partner account are still pending:\n\n' +
+      '{{1}}\n\n' +
+      'Please upload them soon to avoid any delay in activation.',
+    buttonText: 'Upload Now',
+    bodyVars: ['pending_documents'],
+  },
+  documents_reupload_required: {
+    templateName: 'documents_reupload_required',
+    title: 'Documents Reupload Required',
+    body:
+      'Hi 👋 A few documents in your Eko partner application were not approved and need to be re-uploaded:\n\n' +
+      '{{1}}\n\n' +
+      'Please resubmit them so we can continue your onboarding.',
+    buttonText: 'Reupload Now',
+    bodyVars: ['reupload_documents'],
+  },
+}
+
+/** The manual, sheet-driven WhatsApp nudges (pay-activation-fee CTA). */
+export const WA_SHEET_FLOW_TEMPLATES = {
+  whatsapp_onboarded_transacting: {
+    templateName: 'onboarded_transacting_pay',
+    title: 'Onboarded and started transacting (WhatsApp)',
+    body:
+      'Hi 👋 🎉 Special discounts are expiring soon!\n\n' +
+      'Pay your one-time activation fee today to avail the discount before it expires.',
+    buttonText: 'REVIEW and PAY',
+  },
+  whatsapp_onboarded_not_transacting: {
+    templateName: 'onboarded_not_transacting_pay',
+    title: 'Onboarded but not transacting (WhatsApp)',
+    body:
+      'Hi 👋 Great news — your account has been successfully activated with Eko.\n\n' +
+      'Your production credentials have been shared on your registered email ID. Please complete your ' +
+      'integration and start processing transactions. If you need any assistance, our support team is happy to help.\n\n' +
+      'Thank you for partnering with Eko.\n\n' +
+      '🎉 Special discounts are expiring soon! Pay your one-time activation fee today to avail the discount ' +
+      'before it expires.',
+    buttonText: 'REVIEW and PAY',
+  },
+} as const
+
 // ---------------------------------------------------------------------------
 // Email templates
 // ---------------------------------------------------------------------------
@@ -228,4 +356,65 @@ export const DEFAULT_NUDGES: NudgeSeed[] = [
     maxEmailsPerLead: 3,
     followUpDays: 2,
   },
+
+  // -------------------------------------------------------------------------
+  // MySQL-driven WhatsApp flows, ported from the n8n workflow.
+  // `filters.source = "mysql"` is what routes them at the business database; there
+  // is no extra database column, so the DB schema is untouched.
+  // -------------------------------------------------------------------------
+  ...Object.entries(MYSQL_FLOW_TEMPLATES).map(([flow, t]): NudgeSeed => {
+    const window = MYSQL_FLOW_LOOKBACK[flow] ?? {}
+    const windowText = window.lookbackHours
+      ? `last ${window.lookbackHours}h`
+      : `last ${window.lookbackDays} days`
+    return {
+      key: flow,
+      name: `WhatsApp · ${t.title}`,
+      description:
+        `MySQL-driven WhatsApp nudge, delivered through the Meta Cloud API. ` +
+        `Reads the Simplibank database READ-ONLY for flow "${flow}" (${windowText}) and sends the approved ` +
+        `Meta template "${t.templateName}" in ${WHATSAPP_TEMPLATE_LANGUAGE_DEFAULT}. ` +
+        `The button opens ${CONSOLE_URL}?mobile=<recipient mobile>. ` +
+        `Ships disabled — create and approve the template in the Templates tab, then enable it. ` +
+        `Recipients are de-duplicated by phone number, so nobody is messaged twice.`,
+      enabled: false,
+      channel: 'whatsapp',
+      // null -> not lead-driven; filters.source routes it to MySQL instead
+      zohoCriteria: null,
+      filters: json({ source: 'mysql', flow, ...window }),
+      // reference copy of the Meta template body
+      bodyTemplate: t.body,
+      whatsappTemplateName: t.templateName,
+      whatsappLanguage: WHATSAPP_TEMPLATE_LANGUAGE_DEFAULT,
+      // body list is documented here; the engine supplies the real values from the query.
+      // The button variable resolves to the recipient's own mobile.
+      whatsappParams: json({ body: t.bodyVars, button: ['mobile_digits'] }),
+      maxEmailsPerLead: 1,
+      followUpDays: 0,
+    }
+  }),
+
+  // -------------------------------------------------------------------------
+  // Manual, sheet-driven WhatsApp nudges (pay-activation-fee CTA).
+  // -------------------------------------------------------------------------
+  ...Object.entries(WA_SHEET_FLOW_TEMPLATES).map(([key, t]): NudgeSeed => ({
+    key,
+    name: `WhatsApp · ${t.title}`,
+    description:
+      `MANUAL — paste a Google Sheet URL in the UI (Send from Sheet). WhatsApp equivalent of the ` +
+      `"${t.title.replace(' (WhatsApp)', '')}" email nudge. The sheet needs an email or mobile column; ` +
+      `the mobile drives the button to ${PAY_ACTIVATION_FEE_URL}?mobile=<mobile>. ` +
+      `Sends the approved Meta template "${t.templateName}" in ${WHATSAPP_TEMPLATE_LANGUAGE_DEFAULT}. ` +
+      `Ships disabled until that template is approved.`,
+    enabled: false,
+    channel: 'whatsapp',
+    zohoCriteria: null,
+    filters: json({ source: 'sheet', requirePhone: true }),
+    bodyTemplate: t.body,
+    whatsappTemplateName: t.templateName,
+    whatsappLanguage: WHATSAPP_TEMPLATE_LANGUAGE_DEFAULT,
+    whatsappParams: json({ body: [], button: ['mobile_digits'] }),
+    maxEmailsPerLead: 1,
+    followUpDays: 0,
+  })),
 ]

@@ -9,6 +9,8 @@
  */
 import { PrismaClient } from '@prisma/client'
 import { DEFAULT_NUDGES, LEAD_STATUS, KYC_COMPLETE_AT, ZOHO_CRITERIA } from '../src/lib/nudge-defaults.ts'
+import { collectMysqlRecipients, isMysqlFlowKey } from '../src/lib/mysql-nudges.ts'
+import { closeSbPool } from '../src/lib/sb-db.ts'
 
 const db = new PrismaClient()
 const force = process.argv.includes('--force')
@@ -45,11 +47,36 @@ const parse = (s) => {
 console.log('\nTargeting preview (live lead data):')
 const all = await db.nudge.findMany({ orderBy: { createdAt: 'asc' } })
 for (const n of all) {
+  const f = parse(n.filters)
+
+  // MySQL-driven flows: run the real collector so the numbers are live.
+  if (f.source === 'mysql') {
+    if (!isMysqlFlowKey(f.flow)) {
+      console.log(`  ${n.key.padEnd(30)} ⚠️  source=mysql but filters.flow is invalid`)
+      continue
+    }
+    try {
+      const recipients = await collectMysqlRecipients(f.flow, {
+        lookbackHours: f.lookbackHours,
+        lookbackDays: f.lookbackDays,
+      })
+      const withPhone = recipients.filter((r) => r.phone)
+      const window = f.lookbackHours ? `last ${f.lookbackHours}h` : `last ${f.lookbackDays} days`
+      const sample = withPhone.slice(0, 3).map((r) => r.phone).join(', ')
+      console.log(
+        `  ${n.key.padEnd(30)} ${String(withPhone.length).padStart(4)} recipient(s)  · MySQL ${f.flow} · ${window}` +
+          (sample ? `  e.g. ${sample}` : '')
+      )
+    } catch (err) {
+      console.log(`  ${n.key.padEnd(30)} ❌ query failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+    continue
+  }
+
   if (!n.zohoCriteria) {
     console.log(`  ${n.key.padEnd(30)} manual / sheet-driven — no lead targeting`)
     continue
   }
-  const f = parse(n.filters)
   // Channel-aware contact requirement, mirroring buildWhere(): email nudges need an
   // address, WhatsApp nudges need a phone (the test lead has no email on purpose).
   const and = []
@@ -98,4 +125,6 @@ console.log('  leads before 2026-08-01 (still in DB, not re-fetched):', clean(ju
 console.log('  statuses:', JSON.stringify(clean(statuses)))
 console.log(`\nKYC complete threshold: ${KYC_COMPLETE_AT} · pending statuses: ${LEAD_STATUS.ONBOARDING_STARTED} / ${LEAD_STATUS.AGREEMENT_SIGNED}`)
 
+// The MySQL pool keeps sockets open, which would hold the event loop alive.
+await closeSbPool()
 await db.$disconnect()

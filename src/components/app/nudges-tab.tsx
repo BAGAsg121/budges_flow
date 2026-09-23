@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import {
-  Play, Eye, Pencil, Trash2, Plus, Send, RefreshCcw, Loader2, AlertCircle, Mail, MessageCircle, Info, Sheet,
+  Play, Eye, Pencil, Trash2, Plus, Send, RefreshCcw, Loader2, AlertCircle, Mail, MessageCircle, Info, Sheet, Database,
 } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -56,6 +56,17 @@ function ChannelBadge({ channel }: { channel: NudgeChannel }) {
       <Mail className="h-3 w-3" /> Email
     </Badge>
   )
+}
+
+/** A nudge is driven by one of three sources, encoded in its existing fields. */
+function nudgeSourceOf(n: NudgeDto): 'zoho' | 'mysql' | 'sheet' {
+  try {
+    const f = JSON.parse(n.filters || '{}') as { source?: string }
+    if (f.source === 'mysql') return 'mysql'
+  } catch {
+    // unparseable filters -> fall through
+  }
+  return n.zohoCriteria && n.zohoCriteria.trim() ? 'zoho' : 'sheet'
 }
 
 function reasonBadge(reason: string, detail?: string) {
@@ -288,7 +299,9 @@ export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onCha
         <Card><CardContent className="p-8 text-center text-sm text-muted-foreground">No nudges yet — create one.</CardContent></Card>
       ) : (
         <div className="grid gap-4 lg:grid-cols-2">
-          {nudges.map((n) => (
+          {nudges.map((n) => {
+            const source = nudgeSourceOf(n)
+            return (
             <Card key={n.id}>
               <CardContent className="p-4 sm:p-6 space-y-4">
                 <div className="flex items-start justify-between gap-3">
@@ -296,7 +309,12 @@ export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onCha
                     <div className="flex items-center gap-2 flex-wrap">
                       <h4 className="font-medium truncate">{n.name}</h4>
                       <ChannelBadge channel={n.channel} />
-                      {!n.zohoCriteria && (
+                      {source === 'mysql' && (
+                        <Badge variant="outline" className="gap-1">
+                          <Database className="h-3 w-3" /> MySQL / DB
+                        </Badge>
+                      )}
+                      {source === 'sheet' && (
                         <Badge variant="outline" className="gap-1">
                           <Sheet className="h-3 w-3" /> Manual / Sheet
                         </Badge>
@@ -321,26 +339,29 @@ export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onCha
                 <Separator />
 
                 <div className="flex flex-wrap gap-2">
-                  {/* A nudge with no Zoho criteria is MANUAL / sheet-driven. Offering Run or
-                      Preview here would email every synced lead that has an address, so those
-                      buttons are withheld and only the sheet flow is exposed. */}
-                  {n.zohoCriteria ? (
+                  {/* Lead-driven (Zoho) and MySQL-driven nudges can be Run directly.
+                      Sheet nudges cannot: running one would email every synced lead, so
+                      only the sheet flow is exposed for them. */}
+                  {(source === 'zoho' || source === 'mysql') && (
                     <>
-                      <Button size="sm" onClick={() => { setRunWithSync(true); setRunTarget(n) }} disabled={!n.enabled}>
+                      <Button size="sm" onClick={() => { setRunWithSync(source === 'zoho'); setRunTarget(n) }} disabled={!n.enabled}>
                         {running === n.id ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Play className="h-4 w-4 mr-1" />}
                         Run
                       </Button>
-                      <Button size="sm" variant="outline" onClick={() => openPreview(n)}>
-                        <Eye className="h-4 w-4 mr-1" /> Preview
-                      </Button>
+                      {source === 'zoho' && (
+                        <Button size="sm" variant="outline" onClick={() => openPreview(n)}>
+                          <Eye className="h-4 w-4 mr-1" /> Preview
+                        </Button>
+                      )}
                     </>
-                  ) : (
-                    <Button size="sm" onClick={() => openSheetRun(n)} disabled={!n.enabled}>
-                      <Sheet className="h-4 w-4 mr-1" /> Send from Sheet
-                    </Button>
                   )}
-                  {n.zohoCriteria && n.channel === 'email' && (
-                    <Button size="sm" variant="outline" onClick={() => openSheetRun(n)} disabled={!n.enabled}>
+                  {(source === 'sheet' || (source === 'zoho' && n.channel === 'email')) && (
+                    <Button
+                      size="sm"
+                      variant={source === 'sheet' ? 'default' : 'outline'}
+                      onClick={() => openSheetRun(n)}
+                      disabled={!n.enabled}
+                    >
                       <Sheet className="h-4 w-4 mr-1" /> Send from Sheet
                     </Button>
                   )}
@@ -353,7 +374,8 @@ export function NudgesTab({ refreshKey, onChanged }: { refreshKey: number; onCha
                 </div>
               </CardContent>
             </Card>
-          ))}
+            )
+          })}
         </div>
       )}
 

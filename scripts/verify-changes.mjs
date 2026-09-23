@@ -5,7 +5,9 @@
  */
 import { renderTemplate, escapeHtml, injectTrackingPixel, htmlToText } from '../src/lib/template.ts'
 import { isCronAuthorized, isWebhookAuthorized } from '../src/lib/cron-auth.ts'
-import { DEFAULT_NUDGES, ZOHO_CRITERIA, LEAD_STATUS, PAY_ACTIVATION_FEE_URL, WHATSAPP_TEST_STATUS } from '../src/lib/nudge-defaults.ts'
+import { DEFAULT_NUDGES, ZOHO_CRITERIA, LEAD_STATUS, PAY_ACTIVATION_FEE_URL, WHATSAPP_TEST_STATUS, MYSQL_FLOW_TEMPLATES, WA_SHEET_FLOW_TEMPLATES, MYSQL_FLOW_LOOKBACK, CONSOLE_URL } from '../src/lib/nudge-defaults.ts'
+import { MYSQL_FLOW_KEYS, isMysqlFlowKey } from '../src/lib/mysql-nudges.ts'
+import { buildWhatsAppParams as buildWhatsAppParamsRaw } from '../src/lib/whatsapp-params.ts'
 import { buildTemplatePayload, validateTemplateInput, countTemplateVars } from '../src/lib/whatsapp-templates.ts'
 
 let failures = 0
@@ -118,12 +120,15 @@ check('whatsapp_sample targets exactly one status', filtersOf('whatsapp_sample')
 checkTrue('whatsapp_sample asks for a phone', filtersOf('whatsapp_sample').requirePhone === true)
 check('whatsapp_sample is capped at 1 message/lead', wa.maxEmailsPerLead, 1)
 checkTrue('whatsapp_sample body renders first_name', renderTemplate(wa.bodyTemplate, { first_name: 'Asha' }).includes('Hi Asha'))
-check('documents_pending_wa is the only other whatsapp nudge', DEFAULT_NUDGES.filter((n) => n.channel === 'whatsapp').length, 2)
+check('whatsapp nudges: sample + legacy doc twin + 6 MySQL flows + 2 sheet', DEFAULT_NUDGES.filter((n) => n.channel === 'whatsapp').length, 10)
 const waDocs = byKey['documents_pending_wa']
 check('documents_pending_wa template language is en_US (not en)', waDocs.whatsappLanguage, 'en_US')
 check('documents_pending_wa supplies 3 params for its 3 variables', JSON.parse(waDocs.whatsappParams).length, countTemplateVars(waDocs.bodyTemplate))
 checkTrue('no nudge ships with the bare "en" locale', !JSON.stringify(DEFAULT_NUDGES).includes('"whatsappLanguage":"en"'))
-checkTrue('no Infinito references remain in the nudge definitions', !JSON.stringify(DEFAULT_NUDGES).toLowerCase().includes('infinito'))
+// No live Infinito wiring: the word may appear in prose explaining its removal, but the
+// API host, key and templateinfo plumbing must be gone.
+checkTrue('no Infinito API host in the nudge definitions', !JSON.stringify(DEFAULT_NUDGES).includes('goinfinito'))
+checkTrue('no templateinfo plumbing in the nudge definitions', !JSON.stringify(DEFAULT_NUDGES).includes('templateinfo'))
 
 // --- WhatsApp template builder ----------------------------------------------
 check('countTemplateVars counts the highest placeholder', countTemplateVars('Hi {{1}}, {{2}} and {{3}}'), 3)
@@ -169,6 +174,58 @@ check('url variable must be at the end', validateTemplateInput({ ...goodTemplate
 check('over-long body rejected', validateTemplateInput({ ...goodTemplate, bodyText: 'x'.repeat(1025) }).errors.length > 0, true)
 check('over-long footer rejected', validateTemplateInput({ ...goodTemplate, footerText: 'x'.repeat(61) }).errors.length > 0, true)
 check('empty body rejected', validateTemplateInput({ ...goodTemplate, bodyText: '' }).errors.length > 0, true)
+
+// --- MySQL-driven WhatsApp flows (ported from n8n, Meta-only) ---------------
+check('six MySQL flows are defined', Object.keys(MYSQL_FLOW_TEMPLATES).length, 6)
+check('flow keys match the collectors', Object.keys(MYSQL_FLOW_TEMPLATES).sort().join(','), [...MYSQL_FLOW_KEYS].sort().join(','))
+check('two manual WhatsApp sheet flows are defined', Object.keys(WA_SHEET_FLOW_TEMPLATES).length, 2)
+checkTrue('isMysqlFlowKey accepts a real key', isMysqlFlowKey('csp_details_pending'))
+check('isMysqlFlowKey rejects anything else', isMysqlFlowKey('nope'), false)
+
+const byKeyAll = Object.fromEntries(DEFAULT_NUDGES.map((n) => [n.key, n]))
+for (const flow of MYSQL_FLOW_KEYS) {
+  const n = byKeyAll[flow]
+  checkTrue(`nudge exists for flow ${flow}`, Boolean(n))
+  check(`${flow} is a whatsapp nudge`, n?.channel, 'whatsapp')
+  check(`${flow} ships disabled`, n?.enabled, false)
+  check(`${flow} language is en_US`, n?.whatsappLanguage, 'en_US')
+  check(`${flow} has no zohoCriteria (not lead-driven)`, n?.zohoCriteria, null)
+  check(`${flow} filters mark source=mysql`, JSON.parse(n?.filters || '{}').source, 'mysql')
+  check(`${flow} filters name the flow`, JSON.parse(n?.filters || '{}').flow, flow)
+  checkTrue(`${flow} has a look-back window`, Boolean(MYSQL_FLOW_LOOKBACK[flow]))
+  check(`${flow} template name matches the flow key`, n?.whatsappTemplateName, MYSQL_FLOW_TEMPLATES[flow].templateName)
+  check(`${flow} params use the mobile for the button`, JSON.parse(n?.whatsappParams || '{}').button[0], 'mobile_digits')
+}
+
+// only E and F carry a body variable (the document list)
+check('documents_pending_upload body has one variable', countTemplateVars(MYSQL_FLOW_TEMPLATES.documents_pending_upload.body), 1)
+check('documents_reupload_required body has one variable', countTemplateVars(MYSQL_FLOW_TEMPLATES.documents_reupload_required.body), 1)
+check('csp_details_pending body has no variables', countTemplateVars(MYSQL_FLOW_TEMPLATES.csp_details_pending.body), 0)
+
+// button targets: console for the six flows, pay page for the two sheet nudges
+check('console button URL', `${CONSOLE_URL}?mobile={{1}}`, 'https://eps.eko.in/console?mobile={{1}}')
+check('pay button URL', `${PAY_ACTIVATION_FEE_URL}?mobile={{1}}`, 'https://eps.eko.in/console/pay-activation-fee?mobile={{1}}')
+for (const flow of MYSQL_FLOW_KEYS) {
+  checkTrue(`${flow} button text is set`, MYSQL_FLOW_TEMPLATES[flow].buttonText.length > 0)
+}
+
+const waTransacting = byKeyAll['whatsapp_onboarded_transacting']
+const waNotTransacting = byKeyAll['whatsapp_onboarded_not_transacting']
+check('whatsapp_onboarded_transacting is whatsapp + disabled', `${waTransacting.channel}|${waTransacting.enabled}`, 'whatsapp|false')
+check('whatsapp_onboarded_not_transacting is whatsapp + disabled', `${waNotTransacting.channel}|${waNotTransacting.enabled}`, 'whatsapp|false')
+check('transacting WhatsApp template name', waTransacting.whatsappTemplateName, 'onboarded_transacting_pay')
+check('not-transacting WhatsApp template name', waNotTransacting.whatsappTemplateName, 'onboarded_not_transacting_pay')
+checkTrue('not-transacting WhatsApp copy mentions activation', WA_SHEET_FLOW_TEMPLATES.whatsapp_onboarded_not_transacting.body.includes('successfully activated'))
+checkTrue('not-transacting WhatsApp copy has the discount line', WA_SHEET_FLOW_TEMPLATES.whatsapp_onboarded_not_transacting.body.includes('Special discounts'))
+
+// the extended param config form
+check('array form yields body only', JSON.stringify(buildWhatsAppParamsRaw('["a","b"]', { a: '1', b: '2' })), JSON.stringify({ body: ['1', '2'], button: [] }))
+check(
+  'object form yields body + button',
+  JSON.stringify(buildWhatsAppParamsRaw('{"body":["a"],"button":["mobile_digits"]}', { a: '1', mobile_digits: '9876543210' })),
+  JSON.stringify({ body: ['1'], button: ['9876543210'] })
+)
+check('missing values fall back, preserving position', JSON.stringify(buildWhatsAppParamsRaw('["a","b"]', { b: '2' }).body), JSON.stringify(['-', '2']))
 
 console.log(failures === 0 ? '\nAll checks passed.' : `\n${failures} check(s) FAILED.`)
 process.exit(failures === 0 ? 0 : 1)
