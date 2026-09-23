@@ -1,0 +1,85 @@
+# Render Blueprint for nudge-engine.
+#
+# NOTE: this file lives in deploy/ ON PURPOSE. Render only auto-detects render.yaml at the
+# REPOSITORY ROOT. Your service was created by hand in the dashboard, so putting this at the
+# root would make Render offer to create a SECOND, duplicate service. Either use this as a
+# checklist for the dashboard fields, or deliberately move it to the root if you want Render
+# to manage the service as code.
+#
+# No persistent disk is needed: the app's data lives in MySQL, not on the instance's
+# filesystem, so it survives deploys, restarts and spin-downs.
+
+services:
+  - type: web
+    name: nudge-engine
+    runtime: node
+    region: singapore # match your existing service
+    plan: free
+    branch: main
+    autoDeploy: true
+    # No database step: the three app tables already exist in MySQL and are created once
+    # with `npm run db:create-tables`, not on every deploy.
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      # Render runs the app in a container and sets HOSTNAME; Next's standalone server binds
+      # to it if present. Pin it so the app always listens on all interfaces.
+      - key: HOSTNAME
+        value: 0.0.0.0
+      # Open-tracking pixels must point at a URL the recipient's mail client can reach.
+      - key: APP_BASE_URL
+        value: https://nudge-engine.onrender.com
+      - key: AUTH_ENABLED
+        value: "true"
+      # A sleeping instance cannot run an in-process scheduler. Leave this false and trigger
+      # POST /api/cron/run from an external cron instead.
+      - key: SCHEDULER_ENABLED
+        value: "false"
+      - key: NUDGE_MAX_PER_RUN
+        value: "50"
+      # --- secrets: sync:false means Render prompts for them in the dashboard ---
+      - key: DATABASE_URL
+        sync: false
+      - key: APP_USERNAME
+        sync: false
+      - key: APP_PASSWORD
+        sync: false
+      - key: CRON_SECRET
+        sync: false
+      - key: EMAIL_WEBHOOK_SECRET
+        sync: false
+      - key: SB_READ_HOST
+        sync: false
+      - key: SB_USER
+        sync: false
+      - key: SB_PASSWORD
+        sync: false
+      - key: SB_NAME
+        sync: false
+      - key: SB_PORT
+        sync: false
+      - key: ZOHO_CLIENT_ID
+        sync: false
+      - key: ZOHO_CLIENT_SECRET
+        sync: false
+      - key: ZOHO_REFRESH_TOKEN
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: MAIL_FROM
+        sync: false
+      - key: WHATSAPP_TOKEN
+        sync: false
+      - key: WHATSAPP_PHONE_NUMBER_ID
+        sync: false
+      - key: WHATSAPP_VERIFY_TOKEN
+        sync: false

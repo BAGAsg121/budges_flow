@@ -104,3 +104,42 @@ Stage Summary:
 - Read scaling note: pool defaults to 5 connections; production MySQL 5.7 with 1024 tables — keep ad-hoc queries limited and indexed.
 - Decision (recorded 2026-09-22): the connection layer is all that's wanted for now — no MySQL-backed flow is being built yet. When one is added, the contact number for a CSP is **`'91' + csp_number`** (same as the original n8n flow), not `alternate_mobile` from `cspdata_json`. Confirm at that point that `csp_number` is a 10-digit mobile rather than an agent code.
 - Ready for the next step: `queryRead`/`queryReadOne` from @/lib/sb-db, `GET /api/db/health?tables=1&describe=<table>` for schema discovery, `npm run db:check` for a connectivity smoke test.
+
+---
+
+Task ID: 5
+Agent: Main agent (DeepSeek Harness)
+Task: Diagnose the Render deployment warning and remediate the credential exposure found while doing so.
+
+Work Log:
+- Render: user's service nudge-engine (https://nudge-engine.onrender.com) runs on the Free instance type. Render's free tier spins down when idle and does not support persistent disks. For this app that is not cosmetic: the SQLite file is on an ephemeral filesystem, so every deploy/restart wipes MessageLog -> the per-lead sequence state resets (leads get re-emailed up to maxEmailsPerLead), every trackingId disappears (pixels still return a GIF but match no row, so opens/replies stop being recorded), the in-process scheduler never fires while asleep, and ~30-60s cold starts exceed mail-client image timeouts.
+- SECURITY INCIDENT (the more serious finding): the repo BAGAsg121/budges_flow is PUBLIC ("visibility":"public" via the GitHub API) and `.env` was tracked. Confirmed present in HEAD:.env: ZOHO_CLIENT_SECRET, ZOHO_REFRESH_TOKEN, ZOHO_MAIL_REFRESH_TOKEN, INFINITO_API_KEY, APP_PASSWORD, CRON_SECRET, WHATSAPP_VERIFY_TOKEN. db/custom.db was tracked as well. The Simplibank MySQL password was NOT yet exposed (still uncommitted at the time of writing), but it sat in the same tracked file.
+- Remediation applied: `git rm --cached .env db/custom.db` (files kept on disk, staged for removal) so neither can be re-committed. .env already matched `.env*` in .gitignore; added an explicit `!.env.example` exception and created a value-free .env.example template. NOTE: this removes them going forward only — both remain in git history, so rotation is still mandatory.
+- Deployment hardening: new public GET /api/health (liveness only, no data) added to middleware's PUBLIC_PREFIXES so it can serve as a Render health check and a keep-alive target; new `db:deploy` script (`prisma db push --skip-generate`) because the DB file is no longer committed, so a fresh clone has no tables; new deploy/render.yaml reference blueprint (kept out of the repo root so Render does not offer to create a duplicate service) documenting the disk mount, DATABASE_URL=file:/var/data/custom.db, HOSTNAME=0.0.0.0 (containers set HOSTNAME, which Next's standalone server binds to) and APP_BASE_URL; README gained a "Deploying to Render" section with the free-vs-paid trade-off table and the exact dashboard settings.
+- Verified: tsc --noEmit clean, eslint clean, git status shows the two staged deletions with both files still present on disk.
+
+Stage Summary:
+- USER ACTION REQUIRED, in this order: (1) rotate every credential listed above — they are public and must be considered compromised; (2) make the repo private and/or purge history (filter-repo/BFG) — removing the files does not remove them from past commits; (3) before the next deploy, set all env vars in Render's Environment tab, because .env will no longer ship with the repo (otherwise the next deploy starts with no configuration); (4) decide on storage: Starter instance + persistent disk, or migrate the app store to Postgres. Staying on free means duplicate emails to real customers.
+
+---
+
+Task ID: 6
+Agent: Main agent (DeepSeek Harness)
+Task: Move the app's own store off ephemeral SQLite and into the existing Simplibank MySQL server — create the required tables once and point the app at them. Nothing else.
+
+Work Log:
+- Constraint from the user, treated as absolute: create the tables once, then only insert/update rows in them; never create additional tables; never delete or alter anything; all data lives in that database.
+- Added scripts/create-nudge-tables.mjs — the ONLY thing permitted to create these tables. It emits exactly three `CREATE TABLE IF NOT EXISTS` statements (nudge_lead, nudge_config, nudge_message_log), is idempotent, and has a self-guard that refuses to run if any statement is not a CREATE TABLE IF NOT EXISTS or contains DROP/ALTER/TRUNCATE/RENAME/DELETE FROM.
+- Table names are prefixed `nudge_` deliberately: the database already contains its own `messagelog`, so an un-prefixed `MessageLog` would have collided on a case-insensitive server and been a landmine on a case-sensitive one.
+- Ran it once. Verified 1024 -> 1027 tables, i.e. exactly three added, nothing else touched. Column types chosen to need no later ALTER: TEXT for description/zohoCriteria/filters/subjectTemplate/whatsappParams/sendError/subject, LONGTEXT for bodyTemplate (full HTML emails), VARCHAR(512) for sheetRowRef, VARCHAR(255) for messageId with a 191-byte prefix index (SMTP ids can exceed Prisma's 191 default, and a plain VARCHAR(191) would have errored on insert in strict mode).
+- prisma/schema.prisma: provider sqlite -> mysql, added @@map to the three prefixed tables, @db.Text/@db.LongText/@db.VarChar annotations, and @@index([messageId(length: 191)]). Regenerated the client.
+- .env: DATABASE_URL is now mysql://appuser:***@104.211.95.160:3306/ekodb_icici (the password's "@" percent-encoded as %40). Old SQLite value left commented for reference; db/custom.db is now unused.
+- Safety: `prisma db push` / `prisma migrate` must never run against this database — Prisma diffs the schema against the ENTIRE database and can propose destroying the ~1024 business tables it does not recognise. Added scripts/refuse-schema-push.mjs and wired db:push / db:push:force / db:deploy to it so the destructive command cannot be run by accident. Removed db:deploy from the Render build command.
+- Docs: README gained a "Two stores inside one MySQL server" section (app store vs read-only business data, with the why-prefixed rationale and the db-push warning); the Render section was rewritten because the free-tier durability problem is now solved (remaining issues are only scheduler-while-asleep and cold-start pixel timeouts); render.yaml drops the disk/Starter requirement; .env.example updated.
+- Verified end-to-end against the live server: Prisma connected to ekodb_icici (MySQL 5.7.29), saw all three nudge_* tables, read counts (0/0/0 on the fresh tables), and an INSERT inside a deliberately rolled-back transaction succeeded and left nothing behind. tsc --noEmit clean, eslint clean.
+- src/lib/sb-db.ts is unchanged and still read-only — the app's own writes go through Prisma models, which only ever address the three nudge_* tables. Business tables remain unreachable for writes.
+
+Stage Summary:
+- The app now stores leads, nudge config and the message log in MySQL, so deploy/restart/spin-down no longer wipes the send ledger and cannot cause duplicate re-sends.
+- Exactly three tables were created, in one pass, with no drop/alter anywhere; the create script is idempotent and self-guarded, and schema-push is actively blocked.
+- Still outstanding from Task 5: credential rotation, repo visibility, and setting env vars in Render (DATABASE_URL now included) before the next deploy.

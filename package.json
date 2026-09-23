@@ -11,9 +11,11 @@
     "typecheck": "tsc --noEmit",
     "verify": "node scripts/verify-changes.mjs",
     "db:check": "node --env-file=.env scripts/check-sb-db.mjs",
+    "db:create-tables": "node --env-file=.env scripts/create-nudge-tables.mjs",
     "postinstall": "prisma generate",
-    "db:push": "prisma db push",
-    "db:push:force": "prisma db push --accept-data-loss",
+    "db:push": "node scripts/refuse-schema-push.mjs",
+    "db:push:force": "node scripts/refuse-schema-push.mjs",
+    "db:deploy": "node scripts/refuse-schema-push.mjs",
     "db:generate": "prisma generate",
     "db:studio": "prisma studio",
     "seed:whatsapp": "node scripts/seed-whatsapp-nudge.ts"

@@ -10,8 +10,9 @@
  */
 import { NextRequest, NextResponse } from 'next/server'
 
-// Public: /api/track/* and /api/cron/* (validated in-route) plus non-sensitive static assets.
-const PUBLIC_PREFIXES = ['/api/track/', '/api/cron/', '/logo.svg', '/robots.txt', '/favicon.ico']
+// Public: /api/health (liveness only), /api/track/* and /api/cron/* (validated in-route)
+// plus non-sensitive static assets.
+const PUBLIC_PREFIXES = ['/api/health', '/api/track/', '/api/cron/', '/logo.svg', '/robots.txt', '/favicon.ico']
 
 function safeEqual(a: string, b: string): boolean {
   const ab = new TextEncoder().encode(a)

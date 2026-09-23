@@ -61,8 +61,8 @@ npm start                   # node .next/standalone/server.js  (PORT env, defaul
 
 | Group | Keys | Notes |
 | --- | --- | --- |
-| Database | `DATABASE_URL`, `PRISMA_LOG_QUERY` | The app's own SQLite store (`file:../db/custom.db`, relative to `prisma/`) |
-| Simplibank MySQL | `SB_READ_HOST`, `SB_WRITE_HOST`, `SB_USER`, `SB_PASSWORD`, `SB_NAME`, `SB_PORT`, `SB_CONNECTION_LIMIT`, `SB_CONNECT_TIMEOUT_MS`, `SB_LOG_QUERY` | External business DB — **read-only**, see below |
+| App store | `DATABASE_URL`, `PRISMA_LOG_QUERY` | MySQL DSN into `ekodb_icici`; the app's own three tables live there (see below) |
+| Simplibank MySQL | `SB_READ_HOST`, `SB_WRITE_HOST`, `SB_USER`, `SB_PASSWORD`, `SB_NAME`, `SB_PORT`, `SB_CONNECTION_LIMIT`, `SB_CONNECT_TIMEOUT_MS`, `SB_LOG_QUERY` | Connection details for the external business data — read **read-only** through `src/lib/sb-db.ts` |
 | Access control | `AUTH_ENABLED`, `APP_USERNAME`, `APP_PASSWORD` | Basic auth over the whole app |
 | Scheduler | `SCHEDULER_ENABLED`, `SCHEDULE_INTERVAL_MINUTES`, `SCHEDULE_SYNC_FROM_ZOHO`, `NUDGE_MAX_PER_RUN`, `CRON_SECRET` | |
 | Zoho CRM | `ZOHO_CLIENT_ID`, `ZOHO_CLIENT_SECRET`, `ZOHO_REFRESH_TOKEN`, `ZOHO_API_BASE`, `ZOHO_ACCOUNTS_BASE`, `ZOHO_ACCESS_TOKEN` | Refresh-token flow; the static token is a fallback only |
@@ -77,11 +77,36 @@ npm start                   # node .next/standalone/server.js  (PORT env, defaul
 
 ---
 
-## External database: Simplibank MySQL (read-only)
+## Two stores inside one MySQL server
 
-`src/lib/sb-db.ts` holds a pooled, **read-only** connection to the business database the original
-n8n CSP/WhatsApp flows read from (`csp_application`, `customer_agreement_history`, `csp_docs`, …).
-It is completely separate from the app's own SQLite store.
+Both live on the same MySQL 5.7.29 server, but they are strictly separate:
+
+| | App store (Prisma) | Business data (`src/lib/sb-db.ts`) |
+| --- | --- | --- |
+| Tables | `nudge_lead`, `nudge_config`, `nudge_message_log` | `csp_application`, `csp_docs`, … (~1024 tables) |
+| Access | read + write, via Prisma models | **read-only** |
+| Purpose | what the app *records* (send ledger, nudge config, lead cache) | what the app *reads* to decide who to nudge |
+
+The three app tables are prefixed `nudge_` precisely because that database already contains its
+own `messagelog` — an un-prefixed `MessageLog` would have collided.
+
+### Creating the app tables
+
+```bash
+npm run db:create-tables     # CREATE TABLE IF NOT EXISTS ×3, idempotent, nothing else touched
+```
+
+`scripts/create-nudge-tables.mjs` is the only thing that may create these tables. It emits exactly
+three `CREATE TABLE IF NOT EXISTS` statements and refuses to run if the file ever contains a
+`DROP`/`ALTER`/`TRUNCATE`/`DELETE`. Re-running it is a no-op.
+
+> ⚠️ **Never run `prisma db push` or `prisma migrate` against this database.** Prisma diffs your
+> schema against the *entire* database and can propose destroying tables it does not recognise —
+> one `--accept-data-loss` away from deleting production data. The `db:push*` scripts are wired to
+> `scripts/refuse-schema-push.mjs` and will exit with an explanation. Change these three tables with
+> a hand-reviewed additive statement instead.
+
+### Reading the business data
 
 ```ts
 import { queryRead, queryReadOne } from '@/lib/sb-db'
@@ -98,8 +123,7 @@ Read-only is enforced in three layers:
 2. `SET SESSION TRANSACTION READ ONLY` on every pooled connection.
 3. No write helper is exported at all.
 
-Layer 3 is the contract; 1 and 2 are defence in depth. Also grant `appuser` SELECT-only rights
-server-side.
+Layer 3 is the contract; 1 and 2 are defence in depth.
 
 Verify connectivity any time:
 
@@ -110,8 +134,9 @@ npm run db:check        # ping, table list, column dump, and a write-rejection c
 or `GET /api/db/health?tables=1` (behind the app password); add `&describe=csp_application` for
 column metadata.
 
-> Verified working against `ekodb_icici` (MySQL 5.7.29): connection ok, session read-only, 1024
-> tables visible, and a `DELETE` attempt is rejected by the guard.
+> Verified against `ekodb_icici` (MySQL 5.7.29): business reads work, session is read-only and a
+> `DELETE` is rejected; the three `nudge_*` tables were created in one pass (1024 → 1027 tables)
+> and Prisma reads and writes them.
 
 ---
 
@@ -165,13 +190,70 @@ request timeout; leftover leads are deferred to the next cycle (shown as `deferr
   `WHATSAPP_PHONE_NUMBER_ID`, and set the Meta webhook to `{APP_BASE_URL}/api/track/whatsapp` with
   `WHATSAPP_VERIFY_TOKEN`. Deliveries/reads and inbound replies update the logs automatically.
 
+## Deploying to Render
+
+Current service: `nudge-engine` → https://nudge-engine.onrender.com (repo `BAGAsg121/budges_flow`).
+
+### Storage on the free plan
+
+The app's data now lives in MySQL, **not** on the instance's filesystem, so Render's
+"free instances do not support persistent disks" limitation no longer causes data loss. Send
+history, sequence state and tracking IDs all survive deploys, restarts and spin-downs.
+
+Two free-tier behaviours still matter, and both are about *timing*, not data:
+
+| Free-tier behaviour | Effect | Mitigation |
+| --- | --- | --- |
+| Spins down when idle | The in-process scheduler never fires, so automatic nudges silently stop | Keep `SCHEDULER_ENABLED=false` and drive `POST /api/cron/run` from an external cron |
+| Cold start (~30–60 s) | Mail clients time out fetching tracking pixels, so opens on a sleeping instance are lost | Point a keep-alive pinger at `/api/health`, or move to a paid always-on instance |
+
+`deploy/render.yaml` is a reference blueprint (deliberately not at the repo root so Render does
+not offer to create a second service).
+
+### Dashboard settings
+
+| Field | Value |
+| --- | --- |
+| Build Command | `npm ci && npm run build` |
+| Start Command | `npm start` |
+| Health Check Path | `/api/health` |
+| Env vars | everything in `.env.example` — fill values in the dashboard, **not** in a committed `.env` |
+
+No database step is needed at build time: the three app tables already exist in MySQL and are
+created once with `npm run db:create-tables`, not on every deploy.
+
+Set `APP_BASE_URL=https://nudge-engine.onrender.com`, otherwise tracking pixels will be
+written with a `localhost` URL and never register. Also make sure the MySQL server accepts
+connections from Render — Render's outbound IPs are not static on the free/Starter tier, so an
+IP allow-list on that box would block the deploy even though your laptop can reach it.
+
+### Scheduling on a host that sleeps
+
+With `SCHEDULER_ENABLED=false`, drive runs externally — the request itself wakes the
+instance:
+
+```bash
+curl -X POST https://nudge-engine.onrender.com/api/cron/run \
+  -H "x-cron-secret: $CRON_SECRET"
+```
+
+A free cron service (e.g. cron-job.org) every 15 minutes works. Expect the first request
+after a sleep to take ~30–60 s.
+
+---
+
 ## Security notes
 
-- Every mutating route sits behind Basic auth. The only public endpoints are the tracking ones,
-  which cannot authenticate (inboxes, Meta).
-- The credentials originally pasted into the n8n workflows were moved into `.env` and redacted from
-  `upload/*.txt`. **Rotate them anyway** — they were committed in plain text at some point.
-- `db/custom.db` holds real lead and message data and is git-ignored.
+> **This repository is public.** `.env` and `db/custom.db` were committed before they were
+> git-ignored, and .gitignore does not untrack files that are already tracked. They have been
+> removed from the index, but they remain in git *history* — so **every credential they ever
+> contained must be rotated.**
+
+- Every mutating route sits behind Basic auth. The only public endpoints are `/api/health`
+  (liveness only), the tracking routes (inboxes and Meta cannot authenticate) and `/api/cron/*`
+  (shared-secret checked in-route).
+- Credentials belong in `.env` locally and in the host's environment dashboard when deployed —
+  never in a committed file. `.env.example` is the committed template with no values.
 - Basic auth is enforced by edge middleware, so in a **production** build `APP_PASSWORD` /
   `APP_USERNAME` are baked in at `npm run build` time — change them and rebuild. `npm run dev`
   re-reads `.env` on restart.

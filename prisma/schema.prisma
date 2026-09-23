@@ -1,9 +1,25 @@
+// The app's OWN store, now living in the Simplibank MySQL database.
+//
+// Three tables only, created once by scripts/create-nudge-tables.mjs:
+//   nudge_lead, nudge_config, nudge_message_log
+//
+// They are deliberately prefixed `nudge_` so they cannot collide with the existing
+// business tables (that database already has its own `messagelog`).
+//
+// IMPORTANT: never run `prisma db push` / `prisma migrate` against this database.
+// This schema shares a database with live production data, and schema-push can propose
+// destructive changes to tables it does not know about. Any change to these three
+// tables must be a hand-reviewed, additive DDL statement.
+//
+// The external business data (csp_application, csp_docs, ...) is NOT modelled here and
+// is read read-only through src/lib/sb-db.ts.
+
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "mysql"
   url      = env("DATABASE_URL")
 }
 
@@ -36,6 +52,7 @@ model Lead {
 
   @@index([leadStatus])
   @@index([businessVertical])
+  @@map("nudge_lead")
 }
 
 // A reusable nudge definition. channel decides how it is delivered:
@@ -44,21 +61,21 @@ model Nudge {
   id                   String    @id @default(cuid())
   key                  String    @unique
   name                 String
-  description          String?
+  description          String?   @db.Text
   enabled              Boolean   @default(true)
   channel              String    @default("email") // email | whatsapp
   // Zoho search criteria string; when set, running the nudge syncs leads with it first
-  zohoCriteria         String?
+  zohoCriteria         String?   @db.Text
   // JSON lead-selection filters applied on local DB:
   // { requireEmail, requirePhone, excludeStatuses[], businessVertical, maxKycCount, minKycCount, createdAfter }
-  filters              String    @default("{}")
+  filters              String    @default("{}") @db.Text
   // email channel
-  subjectTemplate      String?
-  bodyTemplate         String? // email: HTML body; whatsapp: reference copy of the Meta template body
+  subjectTemplate      String?   @db.Text
+  bodyTemplate         String?   @db.LongText // email: HTML body; whatsapp: reference copy of the Meta template body
   // whatsapp channel
   whatsappTemplateName String? // Meta-approved template name
   whatsappLanguage     String? // template language code, e.g. "en"
-  whatsappParams       String? // JSON array of variable sources: ["first_name","company"] -> {{1}}, {{2}}
+  whatsappParams       String?   @db.Text // JSON array of variable sources: ["first_name","company"] -> {{1}}, {{2}}
   maxEmailsPerLead     Int       @default(1)
   followUpDays         Int       @default(0)
   lastRunAt            DateTime?
@@ -66,6 +83,8 @@ model Nudge {
   updatedAt            DateTime  @updatedAt
 
   messageLogs MessageLog[]
+
+  @@map("nudge_config")
 }
 
 // One row per message sent (email or whatsapp)
@@ -77,15 +96,15 @@ model MessageLog {
   nudge            Nudge     @relation(fields: [nudgeId], references: [id], onDelete: Cascade)
   channel          String    @default("email") // email | whatsapp
   messageNumber    Int       @default(1)
-  sheetRowRef      String?   // e.g. "<sheetUrl>|<email>" — set for sheet-sourced sends
+  sheetRowRef      String?   @db.VarChar(512) // e.g. "<sheetUrl>|<email>" — set for sheet-sourced sends
   toEmail          String?
   toPhone          String?
-  subject          String? // email only
+  subject          String?   @db.Text // email only
   templateName     String? // whatsapp template used
-  messageId        String? // SMTP message-id or WhatsApp wamid (indexed for webhook lookups)
+  messageId        String?   @db.VarChar(255) // SMTP message-id or WhatsApp wamid (indexed for webhook lookups)
   trackingId       String    @unique // email: pixel id; whatsapp: internal id
   sentOk           Boolean   @default(false)
-  sendError        String?
+  sendError        String?   @db.Text
   sentAt           DateTime?
   opened           Boolean   @default(false)
   opensCount       Int       @default(0)
@@ -97,5 +116,6 @@ model MessageLog {
 
   @@index([leadId, nudgeId])
   @@index([nudgeId, createdAt])
-  @@index([messageId])
+  @@index([messageId(length: 191)])
+  @@map("nudge_message_log")
 }
