@@ -46,6 +46,7 @@ npm start                   # node .next/standalone/server.js  (PORT env, defaul
 | `npm run build` / `npm start` | Production build / standalone server |
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm run verify` | In-process checks for templating, escaping and shared-secret auth |
+| `npm run db:check` | Ping the external Simplibank MySQL, list tables, verify read-only |
 | `npm run lint` | ESLint |
 | `npm run db:push` | Apply schema changes (safe) |
 | `npm run db:push:force` | Apply with `--accept-data-loss` (drops data) |
@@ -60,7 +61,8 @@ npm start                   # node .next/standalone/server.js  (PORT env, defaul
 
 | Group | Keys | Notes |
 | --- | --- | --- |
-| Database | `DATABASE_URL`, `PRISMA_LOG_QUERY` | `file:../db/custom.db` (relative to `prisma/`) |
+| Database | `DATABASE_URL`, `PRISMA_LOG_QUERY` | The app's own SQLite store (`file:../db/custom.db`, relative to `prisma/`) |
+| Simplibank MySQL | `SB_READ_HOST`, `SB_WRITE_HOST`, `SB_USER`, `SB_PASSWORD`, `SB_NAME`, `SB_PORT`, `SB_CONNECTION_LIMIT`, `SB_CONNECT_TIMEOUT_MS`, `SB_LOG_QUERY` | External business DB — **read-only**, see below |
 | Access control | `AUTH_ENABLED`, `APP_USERNAME`, `APP_PASSWORD` | Basic auth over the whole app |
 | Scheduler | `SCHEDULER_ENABLED`, `SCHEDULE_INTERVAL_MINUTES`, `SCHEDULE_SYNC_FROM_ZOHO`, `NUDGE_MAX_PER_RUN`, `CRON_SECRET` | |
 | Zoho CRM | `ZOHO_CLIENT_ID`, `ZOHO_CLIENT_SECRET`, `ZOHO_REFRESH_TOKEN`, `ZOHO_API_BASE`, `ZOHO_ACCOUNTS_BASE`, `ZOHO_ACCESS_TOKEN` | Refresh-token flow; the static token is a fallback only |
@@ -75,6 +77,44 @@ npm start                   # node .next/standalone/server.js  (PORT env, defaul
 
 ---
 
+## External database: Simplibank MySQL (read-only)
+
+`src/lib/sb-db.ts` holds a pooled, **read-only** connection to the business database the original
+n8n CSP/WhatsApp flows read from (`csp_application`, `customer_agreement_history`, `csp_docs`, …).
+It is completely separate from the app's own SQLite store.
+
+```ts
+import { queryRead, queryReadOne } from '@/lib/sb-db'
+
+const apps = await queryRead(
+  'SELECT Id, csp_number, customer_id, submittedAt FROM csp_application WHERE submittedAt >= ? ORDER BY submittedAt DESC LIMIT 50',
+  [since]
+)
+```
+
+Read-only is enforced in three layers:
+
+1. `assertReadOnly()` — only `SELECT`/`SHOW`/`DESCRIBE`/`EXPLAIN`/`WITH`, one statement, no stacking.
+2. `SET SESSION TRANSACTION READ ONLY` on every pooled connection.
+3. No write helper is exported at all.
+
+Layer 3 is the contract; 1 and 2 are defence in depth. Also grant `appuser` SELECT-only rights
+server-side.
+
+Verify connectivity any time:
+
+```bash
+npm run db:check        # ping, table list, column dump, and a write-rejection check
+```
+
+or `GET /api/db/health?tables=1` (behind the app password); add `&describe=csp_application` for
+column metadata.
+
+> Verified working against `ekodb_icici` (MySQL 5.7.29): connection ok, session read-only, 1024
+> tables visible, and a `DELETE` attempt is rejected by the guard.
+
+---
+
 ## HTTP surface
 
 | Route | Auth | Purpose |
@@ -86,6 +126,7 @@ npm start                   # node .next/standalone/server.js  (PORT env, defaul
 | `POST /api/zoho/sync` | Basic | Pull leads for a criteria string |
 | `GET /api/leads`, `GET /api/logs`, `GET /api/stats` | Basic | Data for the UI |
 | `GET /api/scheduler` | Basic | Scheduler status |
+| `GET /api/db/health` | Basic | External MySQL connectivity (`?tables=1`, `?describe=<table>`) |
 | `GET /api/track/open/{trackingId}` · `GET /api/track/open?tid=` | **public** | Email open pixel (always returns a 1×1 GIF) |
 | `GET/POST /api/track/whatsapp` | **public** | Meta webhook (verify handshake + statuses + inbound) |
 | `GET/POST /api/track/email` | shared secret | Inbound reply webhook |

@@ -82,3 +82,25 @@ Stage Summary:
 - The app now runs on this machine (Windows, npm) instead of only in the original Linux sandbox.
 - Every credential lives in .env; the pasted workflow files are redacted. Rotate the Zoho/Mail/Infinito secrets anyway — they were in plain text.
 - Remaining user actions to go live: set SMTP_USER/SMTP_PASS (mailbox password for do.not.reply@eko.co.in) to send email; fill WHATSAPP_TOKEN + WHATSAPP_PHONE_NUMBER_ID after Meta approves the number/template; set APP_BASE_URL for working pixels; optionally enable IMAP_ENABLED for email reply tracking.
+
+---
+
+Task ID: 4
+Agent: Main agent (DeepSeek Harness)
+Task: Wire up the external Simplibank MySQL (the source the original n8n CSP/WhatsApp flows read from) as a read-only connection.
+
+Work Log:
+- .env: added a documented "Simplibank MySQL (EXTERNAL source, READ-ONLY)" section — SB_READ_HOST/SB_WRITE_HOST/SB_USER/SB_PASSWORD/SB_NAME/SB_PORT plus new knobs SB_CONNECTION_LIMIT, SB_CONNECT_TIMEOUT_MS, SB_LOG_QUERY. Clearly separated from the app's own SQLite store.
+- New src/lib/sb-db.ts: mysql2/promise pool (lazy singleton on globalThis), big-number-safe and date-string config, multipleStatements off. Exposes queryRead / queryReadOne / pingSbDb / listSbTables / describeSbTable / closeSbPool. No write helper exists, by design.
+- Read-only enforced in three layers: (1) assertReadOnly() allows only SELECT/SHOW/DESCRIBE/EXPLAIN/WITH and rejects stacked statements; (2) SET SESSION TRANSACTION READ ONLY on every pooled connection; (3) no write API exported.
+- New GET /api/db/health (behind the app password) — connectivity, server version, current user, read-only-session flag, latency; ?tables=1 lists tables, ?describe=<table> dumps columns.
+- New scripts/check-sb-db.mjs + `npm run db:check` — ping, table list, column dump for the three tables the n8n flow used, and a write-rejection assertion.
+- Installed mysql2.
+- Bug found and fixed while verifying: the first type-safe version used `connection.query(...).catch()` in the pool 'connection' handler, but mysql2 hands over the *callback-style* connection there, so that call returned a non-promise and the SET silently never ran (runtime warning: "called .then()/.catch() on a result that is not a promise"). Reverted to the callback API behind an explicit cast so it is both type-safe and actually executes.
+- Verified against the live DB: connected as appuser@% to 104.211.95.160:3306/ekodb_icici (MySQL 5.7.29), ~180ms latency, readOnlySession=true, 1024 tables visible, csp_application (18 cols), customer_agreement_history (14) and csp_docs (7) all present with exactly the columns the n8n queries referenced, and `DELETE FROM csp_application` is rejected by the guard. `tsc --noEmit` clean, `eslint .` clean.
+
+Stage Summary:
+- The external business DB is available to any flow that needs it via `queryRead`/`queryReadOne` from @/lib/sb-db, and cannot write.
+- Read scaling note: pool defaults to 5 connections; production MySQL 5.7 with 1024 tables — keep ad-hoc queries limited and indexed.
+- Decision (recorded 2026-09-22): the connection layer is all that's wanted for now — no MySQL-backed flow is being built yet. When one is added, the contact number for a CSP is **`'91' + csp_number`** (same as the original n8n flow), not `alternate_mobile` from `cspdata_json`. Confirm at that point that `csp_number` is a 10-digit mobile rather than an agent code.
+- Ready for the next step: `queryRead`/`queryReadOne` from @/lib/sb-db, `GET /api/db/health?tables=1&describe=<table>` for schema discovery, `npm run db:check` for a connectivity smoke test.
