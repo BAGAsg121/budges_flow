@@ -68,7 +68,7 @@ function StatusBadge({ t }: { t: WaTemplate }) {
   const s = (t.status || '').toUpperCase()
   if (s === 'APPROVED')
     return (
-      <Badge className="bg-emerald-600 hover:bg-emerald-600 gap-1">
+      <Badge className="bg-success text-success-foreground hover:bg-success gap-1">
         <CheckCircle2 className="h-3 w-3" /> Approved
       </Badge>
     )
@@ -77,7 +77,7 @@ function StatusBadge({ t }: { t: WaTemplate }) {
       <TooltipProvider delayDuration={100}>
         <Tooltip>
           <TooltipTrigger asChild>
-            <Badge className="bg-amber-500 hover:bg-amber-500 gap-1">
+            <Badge className="bg-warning text-warning-foreground hover:bg-warning gap-1">
               <Clock className="h-3 w-3" /> {s === 'PENDING' ? 'Pending review' : s.replace(/_/g, ' ').toLowerCase()}
             </Badge>
           </TooltipTrigger>
@@ -338,7 +338,7 @@ export function TemplatesTab({
       </div>
 
       {!configured && (
-        <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+        <div className="flex items-start gap-2 rounded-md border border-warning/30 bg-warning/10 p-3 text-xs text-warning">
           <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
           <div>
             <p className="font-medium">WhatsApp template management is not configured</p>
@@ -351,7 +351,7 @@ export function TemplatesTab({
       )}
 
       {error && configured && (
-        <div className="flex items-start gap-2 rounded-md border border-red-200 bg-red-50 p-3 text-xs text-red-900">
+        <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive">
           <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
           <div className="space-y-1">
             <p className="font-medium">{error}</p>
@@ -364,7 +364,7 @@ export function TemplatesTab({
         <div className="flex flex-wrap gap-4 text-xs text-muted-foreground">
           <span>{templates.length} template(s) on the account</span>
           <span className="text-emerald-700">{approved.length} approved — ready to use</span>
-          <span className="text-amber-600">{pending.length} awaiting review</span>
+          <span className="text-warning">{pending.length} awaiting review</span>
         </div>
       )}
 
@@ -494,7 +494,7 @@ export function TemplatesTab({
                       </TableCell>
                       <TableCell>
                         {n.subjectTemplate && n.bodyTemplate ? (
-                          <Badge className="bg-emerald-600 hover:bg-emerald-600 gap-1">
+                          <Badge className="bg-success text-success-foreground hover:bg-success gap-1">
                             <CheckCircle2 className="h-3 w-3" /> ready
                           </Badge>
                         ) : (
@@ -639,7 +639,7 @@ export function TemplatesTab({
             </div>
 
             {formErrors.length > 0 && (
-              <div className="rounded-md border border-red-200 bg-red-50 p-3 text-xs text-red-900 space-y-1">
+              <div className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive space-y-1">
                 {formErrors.map((e, i) => (
                   <p key={i} className="flex items-start gap-1.5">
                     <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" /> {e}

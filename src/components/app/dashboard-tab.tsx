@@ -7,27 +7,43 @@ import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { SchedulerStatusDto, StatsDto } from '@/lib/app-types'
 
+/**
+ * One headline number.
+ *
+ * The accent is passed in rather than guessed from the label, so the colour actually means
+ * something: brand for volume, success for things that worked, warning for attention.
+ */
 function StatCard({
   icon: Icon,
   label,
   value,
   sub,
+  accent = 'primary',
 }: {
   icon: React.ElementType
   label: string
   value: string | number
   sub?: string
+  accent?: 'primary' | 'success' | 'warning' | 'info' | 'destructive'
 }) {
+  const chip = {
+    primary: 'bg-primary/10 text-primary',
+    success: 'bg-success/12 text-success',
+    warning: 'bg-warning/15 text-warning',
+    info: 'bg-info/12 text-info',
+    destructive: 'bg-destructive/12 text-destructive',
+  }[accent]
+
   return (
-    <Card>
-      <CardContent className="p-4 flex items-start gap-3">
-        <div className="rounded-md bg-muted p-2">
-          <Icon className="h-4 w-4 text-muted-foreground" />
+    <Card className="panel-hover overflow-hidden">
+      <CardContent className="flex items-start gap-3 p-4">
+        <div className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl ${chip}`}>
+          <Icon className="h-[18px] w-[18px]" />
         </div>
-        <div className="min-w-0">
-          <p className="text-xs text-muted-foreground">{label}</p>
-          <p className="text-2xl font-semibold leading-tight">{value}</p>
-          {sub ? <p className="text-xs text-muted-foreground truncate">{sub}</p> : null}
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-xs font-medium text-muted-foreground">{label}</p>
+          <p className="stat-value mt-1">{value}</p>
+          {sub ? <p className="mt-1 truncate text-xs text-muted-foreground">{sub}</p> : null}
         </div>
       </CardContent>
     </Card>
@@ -36,8 +52,8 @@ function StatCard({
 
 function statusBadge(s: string, sentOk: boolean, opens: number) {
   if (!sentOk) return <Badge variant="destructive">failed</Badge>
-  if (s === 'replied') return <Badge className="bg-emerald-600 hover:bg-emerald-600">replied</Badge>
-  if (s === 'opened') return <Badge className="bg-amber-500 hover:bg-amber-500">opened ×{opens}</Badge>
+  if (s === 'replied') return <Badge className="bg-success text-success-foreground hover:bg-success">replied</Badge>
+  if (s === 'opened') return <Badge className="bg-warning text-warning-foreground hover:bg-warning">opened ×{opens}</Badge>
   return <Badge variant="secondary">sent</Badge>
 }
 
@@ -81,11 +97,17 @@ export function DashboardTab({ refreshKey }: { refreshKey: number }) {
   return (
     <div className="space-y-6">
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
-        <StatCard icon={Users} label="Leads (synced)" value={stats.leads} sub="from Zoho CRM" />
-        <StatCard icon={Send} label="Messages sent" value={stats.messagesSent} sub={stats.messagesFailed ? `${stats.messagesFailed} failed` : 'email + WhatsApp'} />
-        <StatCard icon={MailOpen} label="Opened" value={stats.opened} sub={`open rate ${stats.openRate}%`} />
-        <StatCard icon={Reply} label="Replied" value={stats.replied} sub="replies detected" />
-        <StatCard icon={TrendingUp} label="Nudges" value={stats.nudges} sub="configured flows" />
+        <StatCard icon={Users} label="Leads synced" value={stats.leads} sub="EPS, from Zoho CRM" accent="primary" />
+        <StatCard
+          icon={Send}
+          label="Messages sent"
+          value={stats.messagesSent}
+          sub={stats.messagesFailed ? `${stats.messagesFailed} failed` : 'email + WhatsApp'}
+          accent={stats.messagesFailed ? 'warning' : 'info'}
+        />
+        <StatCard icon={MailOpen} label="Opened" value={stats.opened} sub={`open rate ${stats.openRate}%`} accent="info" />
+        <StatCard icon={Reply} label="Replied" value={stats.replied} sub="replies detected" accent="success" />
+        <StatCard icon={TrendingUp} label="Nudges" value={stats.nudges} sub="configured flows" accent="primary" />
       </div>
 
       <Card>
@@ -95,7 +117,7 @@ export function DashboardTab({ refreshKey }: { refreshKey: number }) {
               <Clock className="h-4 w-4 text-muted-foreground" /> Scheduler
             </h3>
             {scheduler?.enabled ? (
-              <Badge className="bg-emerald-600 hover:bg-emerald-600">
+              <Badge className="bg-success text-success-foreground hover:bg-success">
                 {scheduler.running ? 'cycle running…' : `every ${scheduler.intervalMinutes} min`}
               </Badge>
             ) : (
@@ -113,7 +135,7 @@ export function DashboardTab({ refreshKey }: { refreshKey: number }) {
                 email replies via IMAP:{' '}
                 {scheduler.imapConfigured ? (
                   scheduler.lastReplySync?.error ? (
-                    <span className="text-red-600">error — {scheduler.lastReplySync.error}</span>
+                    <span className="text-destructive">error — {scheduler.lastReplySync.error}</span>
                   ) : (
                     `${scheduler.lastReplySync?.matched ?? 0} matched of ${scheduler.lastReplySync?.scanned ?? 0} scanned`
                   )
@@ -133,7 +155,7 @@ export function DashboardTab({ refreshKey }: { refreshKey: number }) {
               {scheduler.lastResults
                 .filter((r) => r.error)
                 .map((r) => (
-                  <p key={r.nudgeKey} className="flex items-start gap-1.5 text-xs text-red-600">
+                  <p key={r.nudgeKey} className="flex items-start gap-1.5 text-xs text-destructive">
                     <TriangleAlert className="h-3.5 w-3.5 shrink-0 mt-0.5" />
                     {r.nudgeKey}: {r.error}
                   </p>
@@ -161,7 +183,7 @@ export function DashboardTab({ refreshKey }: { refreshKey: number }) {
                 {stats.recentLogs.map((l) => (
                   <div key={l.id} className="flex items-center gap-3 rounded-md px-3 py-2 text-sm hover:bg-muted/60">
                     {l.channel === 'whatsapp' ? (
-                      <MessageCircle className="h-4 w-4 shrink-0 text-emerald-600" />
+                      <MessageCircle className="h-4 w-4 shrink-0 text-success" />
                     ) : (
                       <Mail className="h-4 w-4 shrink-0 text-muted-foreground" />
                     )}

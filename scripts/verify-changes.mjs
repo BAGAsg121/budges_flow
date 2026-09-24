@@ -5,7 +5,7 @@
  */
 import { renderTemplate, escapeHtml, injectTrackingPixel, htmlToText } from '../src/lib/template.ts'
 import { isCronAuthorized, isWebhookAuthorized } from '../src/lib/cron-auth.ts'
-import { DEFAULT_NUDGES, ZOHO_CRITERIA, LEAD_STATUS, PAY_ACTIVATION_FEE_URL, WHATSAPP_TEST_STATUS, MYSQL_FLOW_TEMPLATES, WA_SHEET_FLOW_TEMPLATES, MYSQL_FLOW_LOOKBACK, CONSOLE_URL } from '../src/lib/nudge-defaults.ts'
+import { DEFAULT_NUDGES, ZOHO_CRITERIA, LEAD_STATUS, PAY_ACTIVATION_FEE_URL, WHATSAPP_TEST_STATUS, MYSQL_FLOW_TEMPLATES, WA_SHEET_FLOW_TEMPLATES, MYSQL_FLOW_LOOKBACK, CONSOLE_URL, zohoTodayIso, zohoTodayCriteria, zohoCriteriaSince, ZOHO_LEADS_CREATED_AFTER, ZOHO_TZ_OFFSET } from '../src/lib/nudge-defaults.ts'
 import { MYSQL_FLOW_KEYS, isMysqlFlowKey } from '../src/lib/mysql-nudges.ts'
 import { buildWhatsAppParams as buildWhatsAppParamsRaw } from '../src/lib/whatsapp-params.ts'
 import { extractInboundText, appendInbound, INBOUND_KEEP } from '../src/lib/whatsapp-inbound.ts'
@@ -75,6 +75,22 @@ checkTrue('fetch criteria targets EPS', ZOHO_CRITERIA.includes('Business_vertica
 checkTrue('fetch criteria starts at 2026-08-01', ZOHO_CRITERIA.includes('greater_than:2026-08-01T00:00:00+05:30'))
 check('fetch criteria carries NO KYC filter', ZOHO_CRITERIA.includes('KYC_Document_Upload_Count'), false)
 check('fetch criteria carries NO status filter', ZOHO_CRITERIA.includes('Lead_Status'), false)
+
+// --- "today so far" window (the second Sync button) --------------------------
+// 2026-09-23 02:00 UTC is 07:30 IST on the 23rd, so the window must open at 01:00 IST that day.
+check('today window is 01:00 on the IST day', zohoTodayIso(new Date('2026-09-23T02:00:00Z')), `2026-09-23T01:00:00${ZOHO_TZ_OFFSET}`)
+// 2026-09-22 20:00 UTC is ALREADY 2026-09-23 01:30 IST — the server's UTC date is a day behind,
+// which is exactly the bug a naive `toISOString().slice(0,10)` would introduce.
+check('today window follows IST, not the server clock', zohoTodayIso(new Date('2026-09-22T20:00:00Z')), `2026-09-23T01:00:00${ZOHO_TZ_OFFSET}`)
+// 2026-09-22 19:00 UTC is 2026-09-23 00:30 IST — the IST day has already rolled over, and
+// "today 01:00" is still 30 minutes in the FUTURE, so the window is empty by design.
+// (See the note on zohoTodayIso: before 01:00 IST the button finds nothing new, which is
+// the literal reading of "created after 1am today" rather than a bug.)
+check('today window opens at today 01:00 even just after midnight', zohoTodayIso(new Date('2026-09-22T19:00:00Z')), `2026-09-23T01:00:00${ZOHO_TZ_OFFSET}`)
+checkTrue('today criteria keeps the EPS filter', zohoTodayCriteria(new Date('2026-09-23T02:00:00Z')).includes('Business_vertical:equals:EPS'))
+checkTrue('today criteria has no upper bound', !zohoTodayCriteria(new Date('2026-09-23T02:00:00Z')).includes('less_than'))
+check('today criteria differs from the full window', zohoTodayCriteria(new Date('2026-09-23T02:00:00Z')) === ZOHO_CRITERIA, false)
+check('zohoCriteriaSince builds the same shape as the default', zohoCriteriaSince(ZOHO_LEADS_CREATED_AFTER), ZOHO_CRITERIA)
 
 checkTrue('onboarding_started_agreement exists (email)', byKey['onboarding_started_agreement']?.channel === 'email')
 checkTrue('documents_pending exists (email)', byKey['documents_pending']?.channel === 'email')

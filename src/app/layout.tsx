@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { Toaster } from "@/components/ui/toaster";
+import { ThemeProvider } from "@/components/app/theme-provider";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -22,6 +23,15 @@ export const metadata: Metadata = {
   },
 };
 
+export const viewport = {
+  width: "device-width",
+  initialScale: 1,
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#fdfdfe" },
+    { media: "(prefers-color-scheme: dark)", color: "#171a21" },
+  ],
+};
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -32,8 +42,11 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased bg-background text-foreground`}
       >
-        {children}
-        <Toaster />
+        {/* ThemeProvider must wrap the tree so the .dark class lands on <html> before paint. */}
+        <ThemeProvider>
+          {children}
+          <Toaster />
+        </ThemeProvider>
       </body>
     </html>
   );

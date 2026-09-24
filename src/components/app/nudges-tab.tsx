@@ -46,7 +46,7 @@ type FormState = typeof emptyForm
 function ChannelBadge({ channel }: { channel: NudgeChannel }) {
   if (channel === 'whatsapp') {
     return (
-      <Badge className="bg-emerald-600 hover:bg-emerald-600 gap-1">
+      <Badge className="bg-success text-success-foreground hover:bg-success gap-1">
         <MessageCircle className="h-3 w-3" /> WhatsApp
       </Badge>
     )
@@ -72,11 +72,11 @@ function nudgeSourceOf(n: NudgeDto): 'zoho' | 'mysql' | 'sheet' {
 function reasonBadge(reason: string, detail?: string) {
   switch (reason) {
     case 'replied':
-      return <Badge className="bg-emerald-600 hover:bg-emerald-600">replied</Badge>
+      return <Badge className="bg-success text-success-foreground hover:bg-success">replied</Badge>
     case 'max_reached':
       return <Badge variant="secondary">max reached{detail ? ` · ${detail}` : ''}</Badge>
     case 'waiting_followup':
-      return <Badge className="bg-amber-500 hover:bg-amber-500">waiting{detail ? ` · ${detail}` : ''}</Badge>
+      return <Badge className="bg-warning text-warning-foreground hover:bg-warning">waiting{detail ? ` · ${detail}` : ''}</Badge>
     case 'no_email':
       return <Badge variant="destructive">no email</Badge>
     case 'no_valid_phone':
@@ -86,7 +86,7 @@ function reasonBadge(reason: string, detail?: string) {
     case 'duplicate_contact':
       return <Badge variant="outline">duplicate email{detail ? ` · ${detail}` : ''}</Badge>
     case 'delivery_cap_backoff':
-      return <Badge className="bg-amber-500 hover:bg-amber-500">capped by Meta{detail ? ` · ${detail}` : ''}</Badge>
+      return <Badge className="bg-warning text-warning-foreground hover:bg-warning">capped by Meta{detail ? ` · ${detail}` : ''}</Badge>
     case 'email_fallback_missing':
       return <Badge variant="destructive">fallback nudge missing{detail ? ` · ${detail}` : ''}</Badge>
     case 'email_fallback':
@@ -360,7 +360,7 @@ export function NudgesTab({
             {activeCount > 0 ? (
               <span className="ml-2 text-xs font-normal text-emerald-700">{activeCount} active</span>
             ) : (
-              <span className="ml-2 text-xs font-normal text-amber-600">all paused — nothing will send</span>
+              <span className="ml-2 text-xs font-normal text-warning">all paused — nothing will send</span>
             )}
           </h3>
           <p className="text-xs text-muted-foreground">
@@ -434,13 +434,13 @@ export function NudgesTab({
                   {n.channel === 'whatsapp' ? (
                     n.whatsappTemplateName ? (
                       <p className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                        <MessageCircle className="h-3.5 w-3.5 text-emerald-600 shrink-0" />
+                        <MessageCircle className="h-3.5 w-3.5 text-success shrink-0" />
                         <span className="text-muted-foreground">Template</span>
                         <code className="font-mono">{n.whatsappTemplateName}</code>
                         <Badge variant="outline" className="font-mono">{n.whatsappLanguage || 'en_US'}</Badge>
                       </p>
                     ) : (
-                      <p className="flex items-center gap-2 text-amber-700">
+                      <p className="flex items-center gap-2 text-warning">
                         <AlertCircle className="h-3.5 w-3.5 shrink-0" />
                         No template attached — sends free-form text, which Meta only allows inside the 24h window.
                       </p>
@@ -671,22 +671,22 @@ export function NudgesTab({
                 ? `${runResult.syncedFromZoho} leads synced from Zoho · `
                 : ''}
               {runResult?.leadsConsidered} leads considered ·{' '}
-              <b className="text-emerald-600">{runResult?.sent} sent</b> ·{' '}
-              {runResult?.failed ? <span className="text-red-600">{runResult.failed} failed</span> : '0 failed'}
+              <b className="text-success">{runResult?.sent} sent</b> ·{' '}
+              {runResult?.failed ? <span className="text-destructive">{runResult.failed} failed</span> : '0 failed'}
               {runResult?.deferred ? (
-                <span className="block mt-1 text-amber-600">
+                <span className="block mt-1 text-warning">
                   {runResult.deferred} lead(s) deferred — the per-run cap is {runResult.batchLimit}. They are picked up on
                   the next scheduled run, or run again now.
                 </span>
               ) : null}
               {runResult?.channel === 'email' && !runResult?.smtpConfigured && (
-                <span className="flex items-start gap-1.5 mt-2 text-amber-600">
+                <span className="flex items-start gap-1.5 mt-2 text-warning">
                   <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
                   SMTP not configured — attempts were logged as failed. Set SMTP_USER / SMTP_PASS / MAIL_FROM in .env.
                 </span>
               )}
               {runResult?.channel === 'whatsapp' && !runResult?.whatsappConfigured && (
-                <span className="flex items-start gap-1.5 mt-2 text-amber-600">
+                <span className="flex items-start gap-1.5 mt-2 text-warning">
                   <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
                   WhatsApp not configured — attempts were logged as failed. Set WHATSAPP_TOKEN + WHATSAPP_PHONE_NUMBER_ID in .env (after Meta approves your number and template).
                 </span>
@@ -800,15 +800,15 @@ export function NudgesTab({
             {sheetResult && (
               <div className="rounded-md border p-3 space-y-2">
                 <div className="flex gap-4 text-sm font-medium">
-                  <span className="text-emerald-600">✓ {sheetResult.sent} sent</span>
-                  <span className="text-red-600">✗ {sheetResult.failed} failed</span>
+                  <span className="text-success">✓ {sheetResult.sent} sent</span>
+                  <span className="text-destructive">✗ {sheetResult.failed} failed</span>
                   <span className="text-muted-foreground">— {sheetResult.skipped} skipped</span>
                 </div>
                 {sheetResult.failedEntries.length > 0 && (
                   <div className="space-y-1">
-                    <p className="text-xs font-medium text-red-600">Failed:</p>
+                    <p className="text-xs font-medium text-destructive">Failed:</p>
                     {sheetResult.failedEntries.map((f, i) => (
-                      <div key={i} className="text-xs rounded bg-red-50 px-2 py-1">
+                      <div key={i} className="text-xs rounded bg-destructive/10 px-2 py-1">
                         <span className="font-mono">{f.email}</span> — {f.error}
                       </div>
                     ))}

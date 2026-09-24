@@ -48,10 +48,42 @@ npm start                   # node .next/standalone/server.js  (PORT env, defaul
 | `npm run verify` | In-process checks for templating, escaping and shared-secret auth |
 | `npm run db:check` | Ping the external Simplibank MySQL, list tables, verify read-only |
 | `npm run lint` | ESLint |
+| `npm run mcp:check` | Zoho MCP config + OAuth discovery |
+| `npm run mcp:register` | Prove dynamic client registration against Zoho |
+| `npm run mcp:tools` | Connect and list every MCP tool (read-only) |
+| `npm run email:check` | Email transport config, or send a real test |
 | `npm run db:push` | Apply schema changes (safe) |
 | `npm run db:push:force` | Apply with `--accept-data-loss` (drops data) |
 | `npm run db:studio` | Prisma Studio |
 | `npm run seed:whatsapp` | Idempotently add the WhatsApp twin nudge |
+
+---
+
+## The interface
+
+A sidebar shell (a mobile drawer below `lg`, plus a swipeable tab strip) over five tabs:
+
+| Tab | What it is for |
+| --- | --- |
+| **Dashboard** | Delivery, opens, replies and scheduler state |
+| **Leads** | EPS leads synced from Zoho CRM with status and KYC progress |
+| **Nudges** | Every flow, which template it uses, and whether it is running |
+| **Templates** | WhatsApp templates and their Meta approval state, plus the email copy |
+| **Logs** | Every message, why any failed, and what customers actually replied |
+
+The **Connections** panel at the bottom of the sidebar answers "is this actually wired up?" without
+spending an API call: database, Zoho CRM REST, Zoho CRM MCP, WhatsApp and email, each with the names
+of any missing variables. `off` means deliberately unconfigured and is not treated as an error —
+only the database reads as a problem. `GET /api/status` is the same data as JSON.
+
+Colour is meaningful rather than decorative: the palette is a violet-indigo brand over cool slate,
+with real `success` / `warning` / `info` / `destructive` tokens that work in **light and dark**.
+Dark mode follows the OS by default and can be pinned from the toggle in the header. Previously the
+theme was pure greyscale and status colours were hardcoded `emerald-600` / `amber-500` classes,
+which read as flat in light mode and harsh in dark.
+
+Both header sync buttons hit the same endpoint with a different window — see
+[Zoho CRM: MCP first, REST fallback](#zoho-crm-mcp-first-rest-fallback).
 
 ---
 
@@ -65,7 +97,8 @@ npm start                   # node .next/standalone/server.js  (PORT env, defaul
 | Simplibank MySQL | `SB_READ_HOST`, `SB_WRITE_HOST`, `SB_USER`, `SB_PASSWORD`, `SB_NAME`, `SB_PORT`, `SB_CONNECTION_LIMIT`, `SB_CONNECT_TIMEOUT_MS`, `SB_LOG_QUERY` | Connection details for the external business data — read **read-only** through `src/lib/sb-db.ts` |
 | Access control | `AUTH_ENABLED`, `APP_USERNAME`, `APP_PASSWORD` | Basic auth over the whole app |
 | Scheduler | `SCHEDULER_ENABLED`, `SCHEDULE_INTERVAL_MINUTES`, `SCHEDULE_SYNC_FROM_ZOHO`, `NUDGE_MAX_PER_RUN`, `CRON_SECRET` | ⚠️ `SCHEDULER_ENABLED=true` sends to real leads automatically once SMTP works |
-| Zoho CRM | `ZOHO_CLIENT_ID`, `ZOHO_CLIENT_SECRET`, `ZOHO_REFRESH_TOKEN`, `ZOHO_API_BASE`, `ZOHO_ACCOUNTS_BASE`, `ZOHO_ACCESS_TOKEN` | Refresh-token flow; the static token is a fallback only |
+| Zoho CRM | `ZOHO_CLIENT_ID`, `ZOHO_CLIENT_SECRET`, `ZOHO_REFRESH_TOKEN`, `ZOHO_API_BASE`, `ZOHO_ACCOUNTS_BASE`, `ZOHO_ACCESS_TOKEN` | Refresh-token flow; this is the **fallback** path — MCP is preferred |
+| Zoho CRM MCP | `ZOHO_MCP_URL`, `ZOHO_MCP_CLIENT_ID`, `ZOHO_MCP_CLIENT_SECRET`, `ZOHO_MCP_REFRESH_TOKEN`, `ZOHO_MCP_TOKEN`, `ZOHO_MCP_REDIRECT_URI`, `ZOHO_MCP_LEADS_TOOL`, `ZOHO_MCP_LEADS_ARGS` | CRM reads via Zoho's MCP server; the last three are optional pins. Nothing here is stored in the database |
 | Zoho Mail | `ZOHO_MAIL_*` | Kept from the n8n flow for reference / IMAP |
 | SMTP | `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` | `SMTP_USER`/`SMTP_PASS` must be filled in to send |
 | Reply tracking | `IMAP_ENABLED`, `IMAP_HOST`, `IMAP_PORT`, `IMAP_SECURE`, `IMAP_USER`, `IMAP_PASS`, `IMAP_MAILBOX`, `IMAP_REPLY_LOOKBACK_DAYS`, `EMAIL_WEBHOOK_SECRET` | |
@@ -140,6 +173,80 @@ column metadata.
 > Verified against `ekodb_icici` (MySQL 5.7.29): business reads work, session is read-only and a
 > `DELETE` is rejected; the three `nudge_*` tables were created in one pass (1024 → 1027 tables)
 > and Prisma reads and writes them.
+
+---
+
+## Zoho CRM: MCP first, REST fallback
+
+CRM data is read through **Zoho's own MCP server** rather than the REST API. The REST client
+(`src/lib/zoho.ts`) is still there and still works — it is the fallback, not the primary path.
+
+### Connecting (once)
+
+```bash
+npm run mcp:check        # config + OAuth discovery, no writes
+npm run mcp:register     # prove dynamic client registration works
+```
+
+Then open **`<APP_BASE_URL>/api/zoho/mcp/connect`** in a browser and approve the consent screen.
+Zoho redirects to `/api/zoho/mcp/callback`, which prints exactly three values:
+
+```
+ZOHO_MCP_CLIENT_ID=…
+ZOHO_MCP_CLIENT_SECRET=…
+ZOHO_MCP_REFRESH_TOKEN=…
+```
+
+Add them to the host's environment (Render → Environment) and redeploy. The callback is behind the
+app password, so the refresh token is never public, and **nothing is written to the database** —
+credentials live in the environment exactly like `ZOHO_*` and `ZOHO_MAIL_*`.
+
+Set `ZOHO_MCP_URL` first; it is the `…/mcp/<server-id>/message` URL from Zoho.
+
+### How it works
+
+| Piece | File | Notes |
+| --- | --- | --- |
+| MCP transport | `src/lib/mcp-client.ts` | JSON-RPC over Streamable HTTP; handles both `application/json` and SSE replies, the `Mcp-Session-Id` handshake, and `tools/call` results that report failure *inside* an HTTP 200 |
+| Zoho specifics | `src/lib/zoho-mcp.ts` | OAuth discovery, dynamic client registration, PKCE, refresh, tool selection |
+| Connect flow | `src/app/api/zoho/mcp/connect` + `/callback` | One-time consent; prints the env block |
+| General access | `GET/POST /api/zoho/mcp` | Status + full tool list; call **any** tool by name |
+
+The access token is cached **in memory only** and refreshed a minute before expiry. Refresh tokens
+from Zoho do not rotate on use, so the pasted value keeps working.
+
+### Which tool reads Leads
+
+The tool list is only knowable after connecting, so `pickLeadsTool()` scores names and descriptions —
+read-shaped names up, write-shaped names down hard, because a sync must never pick a tool that
+creates or deletes CRM records. Pin it explicitly once you have seen the list:
+
+```bash
+npm run mcp:tools        # prints every tool, and which one it would use
+```
+
+```
+ZOHO_MCP_LEADS_TOOL=…    # exact tool name
+ZOHO_MCP_LEADS_ARGS={"criteria":"{{criteria}}"}   # full override; {{criteria}} is substituted
+```
+
+### Sync windows
+
+`POST /api/zoho/sync` takes a `window`:
+
+| Body | Window |
+| --- | --- |
+| `{"window":"all"}` | every EPS lead created since **1 Aug 2026** |
+| `{"window":"today"}` | same filter, created time moved to **01:00 today** (IST) |
+| `{"criteria":"((…))"}` | explicit override; wins over `window` |
+
+Both buttons in the header call this — **Sync today** and **Sync all leads**. The date is built in
+the CRM's timezone (`+05:30`), not the server's: Render runs in UTC, where "today" would otherwise
+start 5.5 hours late.
+
+`via` controls the data path (`auto` by default). `auto` prefers MCP and falls back to the REST API
+if the MCP call fails, reporting `via` and `fellBack` in the response — a silent fallback would hide
+a broken MCP setup, so the UI says which path ran.
 
 ---
 
@@ -426,7 +533,11 @@ kind of change.
 | `GET/PATCH/DELETE /api/nudges/{id}` | Basic | Read / update / delete one nudge |
 | `POST /api/nudges/{id}/run` | Basic | Run now (`{ "sync": true }`) |
 | `GET /api/nudges/{id}/preview` | Basic | Dry run — who would send / skip |
-| `POST /api/zoho/sync` | Basic | Pull leads for a criteria string |
+| `POST /api/zoho/sync` | Basic | Pull leads for a criteria string, or `{ "window": "today" \| "all" }` |
+| `GET/POST /api/zoho/mcp` | Basic | Zoho MCP status + tool list / call any MCP tool |
+| `GET /api/zoho/mcp/connect` | Basic | Start the one-time Zoho MCP consent (redirects to Zoho) |
+| `GET /api/zoho/mcp/callback` | Basic | Consumes the consent code, prints the env block |
+| `GET /api/status` | Basic | Which integrations are wired up (booleans only) |
 | `GET/POST /api/whatsapp/test` | Basic | WhatsApp config check / one real test send |
 | `GET/POST /api/email/test` | Basic | Email config check / one real test send (`{ "to": "…" }`, defaults to the from-address) |
 | `GET /api/leads`, `GET /api/logs`, `GET /api/stats` | Basic | Data for the UI |

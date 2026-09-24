@@ -32,6 +32,41 @@ export const LEAD_STATUS = {
  */
 export const ZOHO_LEADS_CREATED_AFTER = '2026-08-01T00:00:00+05:30'
 
+/** The CRM's timezone. Zoho compares the criteria's offset literally, so keep it explicit. */
+export const ZOHO_TZ_OFFSET = '+05:30'
+
+/**
+ * The EPS fetch criteria for any cut-off. There is deliberately no upper bound:
+ * `greater_than` the cut-off and nothing else means the window always runs up to "now".
+ */
+export function zohoCriteriaSince(createdAfter: string): string {
+  return `((Business_vertical:equals:EPS)and(Created_Time:greater_than:${createdAfter}))`
+}
+
+/**
+ * "Today so far" — 01:00 in the CRM's timezone on the current day, up to whenever the
+ * sync runs. Built at call time rather than as a constant so it does not go stale at
+ * midnight, and computed from the timezone-of-record rather than the server's local
+ * clock (Render runs in UTC, where "today" starts 5.5 hours late).
+ *
+ * Edge case, deliberate: between 00:00 and 01:00 IST, today's 01:00 is still in the
+ * future, so this window matches nothing. That is the literal reading of "leads created
+ * after 1am today" and it is self-correcting — the window is never wrong, just empty.
+ */
+export function zohoTodayIso(now: Date = new Date()): string {
+  const offsetMinutes = 5 * 60 + 30 // +05:30
+  const shifted = new Date(now.getTime() + offsetMinutes * 60 * 1000)
+  const y = shifted.getUTCFullYear()
+  const m = String(shifted.getUTCMonth() + 1).padStart(2, '0')
+  const d = String(shifted.getUTCDate()).padStart(2, '0')
+  return `${y}-${m}-${d}T01:00:00${ZOHO_TZ_OFFSET}`
+}
+
+/** Same filter as ZOHO_CRITERIA, but only leads created since 01:00 today. */
+export function zohoTodayCriteria(now: Date = new Date()): string {
+  return zohoCriteriaSince(zohoTodayIso(now))
+}
+
 /** KYC is considered complete at 11 uploads, so pending means < 11. */
 export const KYC_COMPLETE_AT = 11
 
@@ -41,8 +76,7 @@ export const KYC_COMPLETE_AT = 11
  */
 export const WHATSAPP_TEST_STATUS = 'WhatsApp Test'
 
-export const ZOHO_CRITERIA =
-  `((Business_vertical:equals:EPS)and(Created_Time:greater_than:${ZOHO_LEADS_CREATED_AFTER}))`
+export const ZOHO_CRITERIA = zohoCriteriaSince(ZOHO_LEADS_CREATED_AFTER)
 
 /** Payment link used by the two onboarding nudges. */
 export const PAY_ACTIVATION_FEE_URL = 'https://eps.eko.in/console/pay-activation-fee'

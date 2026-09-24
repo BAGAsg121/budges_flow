@@ -20,7 +20,7 @@ function ChannelBadge({ channel }: { channel: string }) {
       <TooltipProvider delayDuration={100}>
         <Tooltip>
           <TooltipTrigger asChild>
-            <Badge className="bg-emerald-600 hover:bg-emerald-600 p-1"><MessageCircle className="h-3 w-3" /></Badge>
+            <Badge className="bg-success text-success-foreground hover:bg-success p-1"><MessageCircle className="h-3 w-3" /></Badge>
           </TooltipTrigger>
           <TooltipContent side="top" className="text-xs">WhatsApp</TooltipContent>
         </Tooltip>
@@ -58,8 +58,8 @@ function StatusBadge({ log }: { log: LogDto }) {
       </TooltipProvider>
     )
   }
-  if (log.engagementStatus === 'replied') return <Badge className="bg-emerald-600 hover:bg-emerald-600">replied</Badge>
-  if (log.engagementStatus === 'opened') return <Badge className="bg-amber-500 hover:bg-amber-500">opened ×{log.opensCount}</Badge>
+  if (log.engagementStatus === 'replied') return <Badge className="bg-success text-success-foreground hover:bg-success">replied</Badge>
+  if (log.engagementStatus === 'opened') return <Badge className="bg-warning text-warning-foreground hover:bg-warning">opened ×{log.opensCount}</Badge>
   return <Badge variant="secondary">sent</Badge>
 }
 

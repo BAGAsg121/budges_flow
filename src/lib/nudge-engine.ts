@@ -7,6 +7,7 @@
 import { randomUUID } from 'crypto'
 import { db } from '@/lib/db'
 import { searchAllLeads, mapZohoLead } from '@/lib/zoho'
+import { callZohoMcpTool, buildLeadsToolArgs, extractRecords, isZohoMcpConfigured, listZohoMcpTools, pickLeadsTool } from '@/lib/zoho-mcp'
 import { sendEmail, isMailerConfigured } from '@/lib/mailer'
 import { sendWhatsAppTemplate, sendWhatsAppText, isWhatsAppConfigured, normalizePhone, getDefaultTemplateLanguage } from '@/lib/whatsapp'
 import { renderTemplate, injectTrackingPixel, htmlToText } from '@/lib/template'
@@ -143,6 +144,90 @@ export async function syncLeadsFromCriteria(criteria: string): Promise<number> {
     })
   }
   return leads.length
+}
+
+export interface McpSyncResult {
+  count: number
+  tool: string
+  args: Record<string, unknown>
+  recordsRead: number
+}
+
+/**
+ * The same upsert, but read through the Zoho CRM MCP server instead of the REST API.
+ *
+ * There is no pagination loop here on purpose: the tool decides how much it returns, and
+ * a tool that silently caps its page size would make a naive "fetch page 2" loop wrong.
+ * Whatever comes back is upserted, and the caller is told how many records arrived so a
+ * suspiciously round number (200, 500) can be spotted as a cap rather than a total.
+ */
+export async function syncLeadsViaMcp(criteria: string): Promise<McpSyncResult> {
+  const tools = await listZohoMcpTools()
+  const tool = pickLeadsTool(tools)
+  if (!tool) {
+    throw new Error(
+      `No Leads-reading tool found on the Zoho MCP server (it exposes ${tools.length} tool(s): ` +
+        `${tools.map((t) => t.name).join(', ') || 'none'}). ` +
+        'Pin the right one with ZOHO_MCP_LEADS_TOOL.'
+    )
+  }
+
+  const args = buildLeadsToolArgs(tool, criteria)
+  const result = await callZohoMcpTool(tool.name, args)
+  if (!result.ok) {
+    throw new Error(`MCP tool "${tool.name}" failed: ${result.error || result.text || 'no detail'}`)
+  }
+
+  const records = extractRecords(result.json ?? result.text)
+  let count = 0
+  for (const record of records) {
+    const data = mapZohoLead(record as Parameters<typeof mapZohoLead>[0])
+    if (!data.zohoId) continue // a record without an id cannot be upserted safely
+    await db.lead.upsert({
+      where: { zohoId: data.zohoId },
+      create: data,
+      update: { ...data },
+    })
+    count++
+  }
+
+  return { count, tool: tool.name, args, recordsRead: records.length }
+}
+
+export interface SyncOutcome {
+  synced: number
+  /** Which data path actually did the work. */
+  via: 'mcp' | 'api'
+  /** Set when MCP was preferred but the REST API had to cover for it. */
+  fellBack?: string
+  tool?: string
+}
+
+/**
+ * Sync preferring MCP, falling back to the REST API.
+ *
+ * The MCP path is chosen when the app is connected, so CRM reads go through the MCP server
+ * as intended. But a previously working sync must not break because the MCP tool list
+ * changed shape, so any MCP failure falls through to the REST path and the reason is
+ * reported rather than swallowed.
+ */
+export async function syncLeads(criteria: string, opts: { via?: 'mcp' | 'api' | 'auto' } = {}): Promise<SyncOutcome> {
+  const via = opts.via ?? 'auto'
+
+  if (via !== 'api' && isZohoMcpConfigured()) {
+    try {
+      const result = await syncLeadsViaMcp(criteria)
+      return { synced: result.count, via: 'mcp', tool: result.tool }
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err)
+      if (via === 'mcp') throw err
+      const synced = await syncLeadsFromCriteria(criteria)
+      return { synced, via: 'api', fellBack: reason }
+    }
+  }
+
+  const synced = await syncLeadsFromCriteria(criteria)
+  return { synced, via: 'api' }
 }
 
 interface SendDecision {
