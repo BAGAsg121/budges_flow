@@ -99,8 +99,10 @@ Common causes:
     • ZOHO_MAIL_ACCOUNT_ID or ZOHO_MAIL_FROM_ADDRESS wrong for that account
     • from address not a verified sender on the account
     • "Invalid OAuth scope" — the token needs ZohoMail.messages.CREATE
-    • "Internal Error" — burst throttling. The sender spaces sends and retries automatically;
-      if it still fails, raise ZOHO_MAIL_MIN_GAP_MS (default 1100) or check the daily limit.
+    • "550 5.4.6 Unusual sending activity" — Zoho has BLOCKED this account from sending to
+      external recipients. Internal (same-domain) mail still works, so a test to your own
+      address looks fine while every customer send fails. Retrying makes it worse. See
+      zoho.in/mail/help/usage-policy.html
   SMTP
     • SMTP_USER/SMTP_PASS empty (a Zoho mailbox needs an app-specific password)
     • port 465 with SMTP_SECURE=true, or port 587 with SMTP_SECURE=false`)

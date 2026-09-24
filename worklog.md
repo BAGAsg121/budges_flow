@@ -542,3 +542,48 @@ Stage Summary:
 - Both activation-fee nudges now use UTILITY templates (pending Meta review); the promo line moved to email, where no cap applies.
 - The Zoho Mail 500s are explained and fixed: burst throttling, now spaced and retried with jittered backoff, proven by reproducing the burst.
 - A Failures tab with per-row and bulk retry, which refuses to re-send what cannot succeed and refuses to re-message someone who replied.
+
+---
+
+Task ID: 24
+Agent: Main agent (DeepSeek Harness)
+Task: Diagnose why the email failures continued after the "throttling" fix. (My Task 23 diagnosis was WRONG.)
+
+Work Log:
+- CORRECTING MY OWN MISTAKE, FIRST. In Task 23 I concluded the Zoho 500s were burst throttling, based on 39 failures landing inside a 34-second window. The user reported it was still broken, and the evidence killed my conclusion: the fix WAS deployed (the stored errors now read "gave up after 4 attempt(s)", which only the new code writes), the failures were now spread over 5 minutes at 1.1s spacing, and EVERY attempt failed 4/4. A burst rate limit cannot fail the first message of a run spaced that far apart. I had pattern-matched a plausible cause from timing alone instead of reading the provider's actual response.
+- THE REAL CAUSE, extracted rather than inferred. Zoho answers a rejected message with status.description="Internal Error" and puts the ONLY useful sentence in data.moreInfo — and mailer.ts recorded just the former. So every rejection collapsed into "Internal Error (code 500)" and a hard account block looked exactly like transient throttling. Wrote scripts/diagnose-zoho-mail.mjs (npm run mail:diagnose) to call the Zoho API directly and print the RAW body, varying one field at a time. Reading moreInfo gave:
+    "Unable to send message;Reason:550 5.4.6 Unusual sending activity detected. Please try after sometime."
+  That is Zoho's anti-abuse block on the ACCOUNT, and it applies to EXTERNAL recipients only — internal same-domain mail keeps working. That asymmetry is why every test to do.not.reply@eko.co.in passed (mine, the deployed /api/email/test, the 5-message burst test, all 8 diagnostic variants) while all 38 customer sends failed. Content was ruled out by experiment: the exact real template, emoji subject, CTA HTML and typographic punctuation every one returned 200 to an internal address and 550 to an external one.
+- WHY IT MATTERED THAT I GOT IT WRONG: my "retryable throttle" classification made the app retry each blocked message FOUR times with backoff — and Zoho lengthens this block for repeated attempts, so the fix was actively making it worse. The wrong label ("provider throttled") also told the operator to keep trying.
+- FIXES: (1) parse data.moreInfo (strip the anchor tag) and record it, so the error names the real reason; (2) detect the block and return after ONE attempt — no backoff loop, no retries (measured 497ms instead of ~9s per message); (3) classify it in mail-errors.ts as "sending blocked by Zoho", NOT retryable, with a detail that explains the internal-vs-external asymmetry and warns against retrying; (4) a bare "Internal Error" is now also not retryable — on this account every one of them was the block, and the transport already retried internally before logging; (5) the specific rule is ordered BEFORE the generic /internal error/ rule, because Zoho puts both phrases in the same message and the generic one would otherwise win; (6) check-email's "common causes" hint no longer claims Internal Error means throttling.
+- Verified through the real mailer path, not just the classifier: check-email.mjs to an external address now prints the 550 reason plus the remediation, in one attempt.
+- The burst spacing and jittered retry from Task 23 are kept — they are correct for genuine transient 5xx, they simply were not the cause of this one. Documented as such rather than deleted, with the correction stated in the README.
+- WHAT CODE CANNOT FIX, and said plainly to the user: the block is Zoho's decision. Switching to SMTP on the same account hits the same policy; the real fix for volume sending is a transactional provider (ZeptoMail/SES/Postmark/SendGrid), which needs NO code change — point SMTP_HOST/SMTP_USER/SMTP_PASS/MAIL_FROM at it and set MAIL_TRANSPORT=smtp, because both transports already exist.
+- verify now 288 assertions, including that the account-block message (which contains BOTH "Internal Error" and "5.4.6") resolves to the specific rule and is non-retryable. tsc clean, eslint clean.
+
+Stage Summary:
+- The email failure is now correctly identified: Zoho has blocked this account from sending to external recipients. Every email nudge is currently unable to reach any customer.
+- The app now says that instead of "Internal Error", and no longer retries it — retrying was extending the block.
+- User decision required: wait out the Zoho block, take it up with Zoho, or move sending to a transactional provider via the existing SMTP transport.
+
+---
+
+Task ID: 25
+Agent: Main agent (DeepSeek Harness)
+Task: The two family charts showed identical data — find out whether the logs are bifurcated at all.
+
+Work Log:
+- THE USER WAS RIGHT AND THE CAUSE WAS MINE. The two charts were pixel-identical because GET /api/stats/onboarding built ONE daily series across all four nudges and returned it as a top-level `series`, and the dashboard passed that same field to both family charts:
+      {data.families.map((f) => <HistoryChart key={f.id} family={f} series={data.series} />)}
+  The lifetime totals WERE correctly split (they were keyed by nudge key), which is what made this so deceptive: the cards above the charts showed different numbers while the charts below them did not, and both looked plausible.
+- WHY IT SURVIVED REVIEW: the bucketing lived inline in the route, where nothing could test it. Extracted src/lib/engagement-stats.ts with buildDailySeries({ logs, nudgeIds, days, since }) — the nudge-id list is now a REQUIRED argument, so "which nudges am I counting?" cannot be left implicit. The route calls it once per family with that family's own two nudge ids.
+- REMOVED THE FOOTGUN, not just the bug: the response no longer contains a combined `series` at all, so a chart cannot be pointed at the wrong field. Each family carries its own `series` plus `nudgeKeys`, and each chart now prints the nudge key it is counting, so the split is visible on screen rather than taken on trust.
+- PROVED THE FAMILIES GENUINELY DIFFER, straight from the database rather than from the UI that lied: new scripts/report-engagement-split.mjs (npm run engage:report) prints the per-family split. On 23 Sep the not-transacting WhatsApp nudge sent 30 / failed 28 / opened 20 and the transacting one sent 33 / failed 16 / opened 22. Different data all along.
+- 15 new assertions, including the actual regression test: two families given different logs must NOT produce equal series, a log for one family must not appear in the other's, an unrelated nudge must appear in neither, plus IST day-bucketing (a 20:00Z log belongs to the NEXT IST day) and that a never-sent failure still charts via createdAt. One of my new assertions was itself malformed — it called check() without an expected value and its expression was vacuous — which the runner caught as a failure rather than passing silently; replaced with a real zero-filled-buckets test.
+- verify now 303 assertions. tsc clean, eslint clean.
+- NOT VERIFIED: the dev server cannot spawn here, so the corrected charts have not been rendered. The fix is proven at the data layer (the split is real and the series builder is tested); the rendering still needs a deploy to eyeball.
+
+Stage Summary:
+- The charts were showing combined data for both families. That is fixed, the combined series is gone from the API, and each chart now names the nudge it counts.
+- The split is verifiable independently of the UI with `npm run engage:report`.
+- The two families do have genuinely different engagement — the graph was hiding it, not the data.

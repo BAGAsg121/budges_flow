@@ -52,6 +52,8 @@ npm start                   # node .next/standalone/server.js  (PORT env, defaul
 | `npm run mcp:register` | Prove dynamic client registration against Zoho |
 | `npm run mcp:tools` | Connect and list every MCP tool (read-only) |
 | `npm run email:check` | Email transport config, or send a real test |
+| `npm run mail:diagnose` | Raw Zoho Mail API responses, varying one field at a time |
+| `npm run engage:report` | Per-family engagement split, straight from the database (sanity-checks the charts) |
 | `npm run nudges:set-cap` | Set the per-lead message cap on the four activation-fee nudges (dry run; `--apply` to write) |
 | `npm run db:push` | Apply schema changes (safe) |
 | `npm run db:push:force` | Apply with `--accept-data-loss` (drops data) |
@@ -130,7 +132,24 @@ column, which is why one endpoint can report both.
 
 Below that, one history chart per family with a **Email / WhatsApp** toggle, plotting sent, opened
 and failed per day over a 7/14/30-day window. They are a toggle rather than six series on one axis
-because at 14 days the bars overlap into noise.
+because at 14 days the bars overlap into noise. Each chart names the nudge key it is counting.
+
+> **A bug worth knowing about, because the screen could not show it.** The two charts were once fed a
+> single daily series built across all four nudges, so both families plotted *identical* graphs — and
+> the numbers were plausible enough that nothing looked wrong. The response no longer carries a
+> combined series at all: each family has its own `series`, built by `buildDailySeries()` from an
+> explicit list of nudge ids, so the same mistake cannot be made by picking the wrong field.
+>
+> Check the split independently of the UI:
+>
+> ```bash
+> npm run engage:report          # last 7 days, per family, straight from the database
+> npm run engage:report 30
+> ```
+>
+> If the two families print the same numbers there, the split is genuinely broken. In production they
+> differ — on 23 Sep the not-transacting WhatsApp nudge sent 30 / failed 28, the transacting one sent
+> 33 / failed 16.
 
 The four nudges allow **3 messages per lead, spaced 2 days apart**. The spacing is not decoration:
 with `maxEmailsPerLead: 3` and `followUpDays: 0` the scheduler would fire all three on consecutive
@@ -517,7 +536,50 @@ npm run email:check you@example.com  # send a real test email
 npm run email:check you@example.com --burst 5   # reproduce a sheet-run burst
 ```
 
-### Burst throttling (the second email failure)
+### The real email failure: Zoho's account sending block
+
+Zoho answers a rejected message with `status.description = "Internal Error"` and puts the **only
+useful sentence** in `data.moreInfo`. The sender used to record just the former, so every rejection
+became an indistinguishable `Internal Error (code 500)` — and that is how a hard account block
+masqueraded as transient throttling.
+
+The actual reason, once `moreInfo` is read:
+
+```
+550 5.4.6 Unusual sending activity detected. Please try after sometime.
+```
+
+That is **Zoho's anti-abuse block on the account, and it applies to external recipients only**.
+Internal (same-domain) mail keeps working — which is exactly why a test to `do.not.reply@eko.co.in`
+succeeds while every customer send fails. It is not a rate limit, not a content problem, and not a
+credential problem; all three were ruled out by experiment (`npm run mail:diagnose` varies one field
+at a time and prints Zoho's raw response).
+
+**Retrying makes it worse** — Zoho lengthens the block for repeated attempts. So:
+
+| Behaviour | |
+| --- | --- |
+| `moreInfo` is parsed and recorded | The error now names the real cause instead of "Internal Error" |
+| A sending block is **not** retried | Returns after one attempt; the 4-attempt backoff is skipped entirely (measured: 497 ms instead of ~9 s) |
+| Classified `sending blocked by Zoho`, not retryable | The Failures tab will not offer a retry that would extend the block |
+| A bare `Internal Error` is also not retryable | On this account every one of those was the block; the transport already retried internally |
+
+```bash
+npm run mail:diagnose                    # raw Zoho responses, one variable at a time
+npm run mail:diagnose someone@example.com
+```
+
+**What to do about the block.** It is Zoho's decision and it is not something code can lift: pause
+email sending, then either wait it out or take it up with Zoho, and send from a warmed-up domain at a
+sane volume afterwards. Note that simply switching to **SMTP on the same account will hit the same
+policy** — a real fix for volume sending is a transactional provider (Zoho ZeptoMail, SES, Postmark,
+SendGrid), which needs no code change: point `SMTP_HOST`/`SMTP_USER`/`SMTP_PASS`/`MAIL_FROM` at it and
+set `MAIL_TRANSPORT=smtp`.
+
+The spacing and jittered retry described below are still correct for genuine transient 5xx faults —
+they were just not the cause of this one.
+
+### Burst spacing and retry
 
 Once Zoho Mail became the transport, a new failure appeared: **39 sends in a 34-second window, all
 failing with `Zoho Mail API: Internal Error (code 500)`**, while a single send immediately afterwards
@@ -568,7 +630,8 @@ Meta-side delivery failures are normal and are **not** app errors:
 templates (`onboarded_transacting_pay`, `onboarded_not_transacting_pay`) were classified
 **MARKETING** because of the discount wording, and marketing templates are subject to the frequency
 cap above. In the first live batch of 58 sends, 30 were delivered and 28 were dropped by Meta for
-exactly these reasons.
+exactly these reasons. They have since been replaced by UTILITY templates — see
+[What was actually done about it](#what-was-actually-done-about-it).
 
 ### Fallbacks for the marketing cap
 

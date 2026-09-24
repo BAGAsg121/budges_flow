@@ -28,14 +28,35 @@ const RULES: Array<{ match: RegExp; help: MailErrorHelp }> = [
     },
   },
   {
-    // Zoho reports burst throttling as a bare 500 rather than a 429. Measured in production:
-    // 39 sends in 34 seconds, all of them "Internal Error".
+    // MUST come before the generic "internal error" rule below: Zoho wraps this reason in a
+    // 500 "Internal Error", so both strings appear in the same message. This is the real one.
+    //
+    // This is an ACCOUNT-LEVEL sending block that applies to external recipients only —
+    // internal (same-domain) mail keeps working, which is why a test to the sending address
+    // succeeds while every customer send fails. It is not a rate limit and NOT retryable:
+    // Zoho lengthens the block for repeated attempts.
+    match: /unusual sending activity|5\.4\.6|usage-policy/i,
+    help: {
+      label: 'sending blocked by Zoho',
+      detail:
+        'Zoho has blocked this account from sending to external recipients ("550 5.4.6 Unusual sending activity"). Internal mail still works, so a test to your own address will look fine while customer mail fails. Do NOT keep retrying — that extends the block. Pause sending and review the account with Zoho, or move to another sender. See zoho.in/mail/help/usage-policy.html',
+      retryable: false,
+    },
+  },
+  {
+    // A bare "Internal Error" with no reason attached. On this account every one of these
+    // turned out to be the sending block above — the API response always carried the reason in
+    // data.moreInfo, and the transport recorded only "Internal Error" until that was fixed.
+    // Non-retryable because the transport already retried internally before logging it.
     match: /internal error/i,
     help: {
-      label: 'provider throttled',
+      label: 'provider error',
       detail:
-        'Zoho returned a bare "Internal Error", which is how it reports burst throttling. The sender spaces sends and retries automatically, so retrying now is worthwhile — if it keeps happening, raise ZOHO_MAIL_MIN_GAP_MS or check the account\'s daily sending limit.',
-      retryable: true,
+        'Zoho returned "Internal Error" with no reason recorded. On this account these were all the ' +
+        'external-sending block above — the real reason was in the response but was not captured until ' +
+        'newer code. The transport already retried internally, so retrying again is unlikely to help; ' +
+        'a newer failure will name the actual cause.',
+      retryable: false,
     },
   },
   {

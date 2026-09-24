@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from '@/components/ui/chart'
 import { cn } from '@/lib/utils'
+import { seriesIsEmpty, type DayBucket } from '@/lib/engagement-stats'
 
 /* ─────────────────────────────── types ─────────────────────────────── */
 
@@ -35,23 +36,19 @@ interface Family {
     whatsappMax: number | null
     whatsappFollowUpDays: number | null
   }
-}
-
-interface DayBucket {
-  date: string
-  emailSent: number
-  emailOpened: number
-  emailFailed: number
-  waSent: number
-  waOpened: number
-  waFailed: number
+  /** The two nudge keys this family counts. Shown in the UI so the split is auditable. */
+  nudgeKeys: string[]
+  /**
+   * This family's OWN daily buckets. There is deliberately no combined series in the payload:
+   * one used to exist and both families rendered it, so the two charts were identical.
+   */
+  series: DayBucket[]
 }
 
 interface Payload {
   ok: boolean
   days: number
   families: Family[]
-  series: DayBucket[]
   missingNudges: string[]
 }
 
@@ -84,7 +81,11 @@ function HistoryChart({ family, series }: { family: Family; series: DayBucket[] 
     [series, channel]
   )
 
-  const hasAny = data.some((d) => d.sent || d.opened || d.failed)
+  const hasAny = !seriesIsEmpty(series)
+
+  // Which nudge key this chart is counting, so the split between the two families is visible
+  // rather than taken on trust.
+  const sourceKey = channel === 'email' ? family.nudgeKeys[0] : family.nudgeKeys[1]
 
   return (
     <Card>
@@ -99,6 +100,7 @@ function HistoryChart({ family, series }: { family: Family; series: DayBucket[] 
               {channel === 'email' ? 'Email' : 'WhatsApp'} · last {series.length} day(s)
               {channel === 'whatsapp' ? ' · opened = read receipt' : ''}
             </p>
+            <p className="mono mt-0.5 text-[11px] text-muted-foreground">{sourceKey}</p>
           </div>
           <div className="flex rounded-lg border border-border p-0.5">
             {(['email', 'whatsapp'] as const).map((c) => (
@@ -315,7 +317,7 @@ export function OnboardingMetrics({ refreshKey }: { refreshKey: number }) {
 
       <div className="grid gap-4 lg:grid-cols-2">
         {data.families.map((f) => (
-          <HistoryChart key={f.id} family={f} series={data.series} />
+          <HistoryChart key={f.id} family={f} series={f.series} />
         ))}
       </div>
 

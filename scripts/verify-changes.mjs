@@ -16,6 +16,7 @@ import { pickLeadsTool, buildLeadsToolArgs, withPage, extractPagingInfo, extract
 import { explainMailError, isRetryableMailError } from '../src/lib/mail-errors.ts'
 import { isRetryableWhatsAppError } from '../src/lib/whatsapp-errors.ts'
 import { buildSheetVars, normaliseMobileDigits, pickSheetEmail, pickSheetMobile } from '../src/lib/sheet-vars.ts'
+import { buildDailySeries, seriesIsEmpty, istDayKey } from '../src/lib/engagement-stats.ts'
 
 let failures = 0
 /** --quiet prints only failures and the summary; useful when iterating in a tight loop. */
@@ -409,14 +410,98 @@ check('a count response yields no records', extractRecords({ count: 42 }).length
 // --- retry classification ----------------------------------------------------
 // The failures view offers a Retry button based on these, so getting them backwards either
 // re-sends things that can never work, or hides a retry that would have succeeded.
-checkTrue('a Zoho Internal Error is retryable', isRetryableMailError('Zoho Mail API: Internal Error (code 500)'))
-check('Zoho Internal Error is labelled throttling', explainMailError('Zoho Mail API: Internal Error (code 500)').label, 'provider throttled')
+//
+// The important case is the account block: Zoho wraps "550 5.4.6 Unusual sending activity" in
+// a 500 "Internal Error", so the message contains BOTH phrases and the specific rule must win.
+// Marking this retryable (as an earlier version did) actively extends the block.
+const ZOHO_BLOCK_MSG =
+  'Zoho Mail API: Unable to send message;Reason:550 5.4.6 Unusual sending activity detected. Please try after sometime. Learn more. (code 500)'
+check('an account sending block is detected, not the generic 500', explainMailError(ZOHO_BLOCK_MSG).label, 'sending blocked by Zoho')
+check('an account sending block is NOT retryable', isRetryableMailError(ZOHO_BLOCK_MSG), false)
+checkTrue(
+  'the account-block detail explains the internal-vs-external asymmetry',
+  /internal mail still works/i.test(explainMailError(ZOHO_BLOCK_MSG).detail)
+)
+checkTrue('the account-block detail warns against retrying', /do not keep retrying/i.test(explainMailError(ZOHO_BLOCK_MSG).detail))
+check('a bare Internal Error is not retryable either', isRetryableMailError('Zoho Mail API: Internal Error (code 500)'), false)
 check('missing mail config is not retryable', isRetryableMailError('SMTP not configured (set SMTP_HOST/SMTP_USER/SMTP_PASS/MAIL_FROM in .env)'), false)
 check('a rejected recipient is not retryable', isRetryableMailError('Zoho Mail API: recipient address rejected (code 550)'), false)
 check('a revoked refresh token is not retryable', isRetryableMailError('Zoho Mail token refresh failed: invalid_code'), false)
+checkTrue('a rate limit IS retryable', isRetryableMailError('Zoho Mail API: too many requests (code 429)'))
 checkTrue('a network error is retryable', isRetryableMailError('fetch failed'))
 check('an empty mail error yields no help', explainMailError('') === null, true)
 check('an unrecognised mail error is still retryable', explainMailError('something new happened').retryable, true)
+
+// --- per-family daily series -------------------------------------------------
+// THE REGRESSION THIS EXISTS FOR: the stats route used to build ONE daily series across all
+// four nudges and return it as `series`, and both family charts rendered that same field — so
+// the two graphs were pixel-identical and the split looked plausible. buildDailySeries now
+// takes an explicit nudge-id list, and these assertions prove a log lands in exactly one
+// family's series.
+const SERIES_SINCE = new Date('2026-09-20T00:00:00Z')
+const mkLog = (nudgeId, over = {}) => ({
+  nudgeId,
+  channel: 'whatsapp',
+  sentOk: true,
+  opened: false,
+  sentAt: new Date('2026-09-23T06:00:00Z'),
+  createdAt: new Date('2026-09-23T06:00:00Z'),
+  ...over,
+})
+
+const mixedLogs = [
+  mkLog('famA-wa', { opened: true }),
+  mkLog('famA-wa', { sentOk: false, opened: false, sentAt: null, createdAt: new Date('2026-09-23T06:05:00Z') }),
+  mkLog('famB-wa'),
+  mkLog('famB-wa'),
+  mkLog('famB-wa'),
+  mkLog('unrelated-wa'), // must appear in NEITHER family
+]
+
+const seriesA = buildDailySeries({ logs: mixedLogs, nudgeIds: ['famA-wa'], days: 4, since: SERIES_SINCE })
+const seriesB = buildDailySeries({ logs: mixedLogs, nudgeIds: ['famB-wa'], days: 4, since: SERIES_SINCE })
+
+const sum = (series, key) => series.reduce((n, d) => n + d[key], 0)
+const dayOf = (series, date) => series.find((d) => d.date === date)
+
+check('the two families do NOT produce the same series', JSON.stringify(seriesA) === JSON.stringify(seriesB), false)
+check('family A counts only its own successes', sum(seriesA, 'waSent'), 1)
+check('family A counts only its own failures', sum(seriesA, 'waFailed'), 1)
+check('family B counts only its own successes', sum(seriesB, 'waSent'), 3)
+check('family B has none of family A failures', sum(seriesB, 'waFailed'), 0)
+check('an unrelated nudge is in neither series', sum(seriesA, 'waSent') + sum(seriesB, 'waSent'), 4)
+check('a series has one bucket per requested day', seriesA.length, 4)
+check('the logged day carries the counts', dayOf(seriesA, '2026-09-23').waSent, 1)
+// A family whose two nudges have no logs at all must still return zero-filled buckets for
+// every day, or its chart would silently render as empty rather than as zero.
+const noLogs = buildDailySeries({ logs: mixedLogs, nudgeIds: ['nothing-here'], days: 4, since: SERIES_SINCE })
+check('a family with no logs still gets one bucket per day', noLogs.length, 4)
+check('those buckets are all zero', sum(noLogs, 'waSent') + sum(noLogs, 'waFailed'), 0)
+check('empty days are zero, not missing', dayOf(seriesA, '2026-09-20').waSent, 0)
+
+// A log at 20:00Z is 01:30 IST the NEXT day, so it must bucket on the IST date.
+const istLog = [mkLog('famA-wa', { sentAt: new Date('2026-09-22T20:00:00Z'), createdAt: new Date('2026-09-22T20:00:00Z') })]
+const istSeries = buildDailySeries({ logs: istLog, nudgeIds: ['famA-wa'], days: 5, since: SERIES_SINCE })
+check('bucketing follows IST, not UTC', dayOf(istSeries, '2026-09-23').waSent, 1)
+check('the UTC day it fell on is empty', dayOf(istSeries, '2026-09-22').waSent, 0)
+
+// A failed log with no sentAt must still chart, via createdAt.
+const neverSent = [mkLog('famA-wa', { sentOk: false, sentAt: null, createdAt: new Date('2026-09-21T04:00:00Z') })]
+const neverSeries = buildDailySeries({ logs: neverSent, nudgeIds: ['famA-wa'], days: 5, since: SERIES_SINCE })
+check('a never-sent failure still charts on its created day', dayOf(neverSeries, '2026-09-21').waFailed, 1)
+
+check('email and whatsapp go to different fields', (() => {
+  const s = buildDailySeries({
+    logs: [mkLog('x', { channel: 'email' }), mkLog('x', { channel: 'whatsapp' })],
+    nudgeIds: ['x'],
+    days: 5,
+    since: SERIES_SINCE,
+  })
+  return `${sum(s, 'emailSent')}/${sum(s, 'waSent')}`
+})(), '1/1')
+
+check('seriesIsEmpty is true for a blank series', seriesIsEmpty(buildDailySeries({ logs: [], nudgeIds: ['x'], days: 3, since: SERIES_SINCE })), true)
+check('seriesIsEmpty is false once something is counted', seriesIsEmpty(seriesB), false)
 checkTrue('a WhatsApp cap IS retryable', isRetryableWhatsAppError('not delivered to maintain healthy ecosystem engagement (code 131049)'))
 checkTrue('a marketing opt-out IS retryable', isRetryableWhatsAppError("User's number is part of an experiment (code 130472)"))
 check('an undeliverable number is not retryable', isRetryableWhatsAppError('Message undeliverable (code 131026)'), false)

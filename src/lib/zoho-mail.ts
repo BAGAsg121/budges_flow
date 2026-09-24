@@ -120,11 +120,7 @@ export async function sendViaZohoMail(opts: { to: string; subject: string; html:
         res = await attempt(await getMailAccessToken(true))
       }
 
-      const data = (await res.json().catch(() => ({}))) as {
-        status?: { code?: number; description?: string }
-        data?: { messageId?: string; mailId?: string }
-        error?: unknown
-      }
+      const data = (await res.json().catch(() => ({}))) as ZohoResponse
 
       // Zoho reports application errors in the body with an HTTP 200, so check both.
       const code = data.status?.code
@@ -135,16 +131,20 @@ export async function sendViaZohoMail(opts: { to: string; subject: string; html:
         return { ok: true, messageId: messageId === undefined ? undefined : String(messageId) }
       }
 
-      const detail =
-        data.status?.description || (data.error ? JSON.stringify(data.error).slice(0, 300) : `HTTP ${res.status}`)
-      lastError = `Zoho Mail API: ${detail}${code ? ` (code ${code})` : ''}`
+      const detail = zohoErrorDetail(data, res.status)
+      lastError = `Zoho Mail API: ${detail}${data.status?.code ? ` (code ${data.status.code})` : ''}`
+
+      // An account-level sending block is not a transient fault. Retrying cannot help and
+      // actively makes it worse — Zoho lengthens the block for repeated attempts — so this
+      // returns immediately instead of burning three more tries.
+      if (isSendingBlocked(detail)) {
+        return { ok: false, error: `${lastError}.${SENDING_BLOCKED_HINT}` }
+      }
 
       if (!isRetryable(res.status, code, detail) || n === attempts) {
         return {
           ok: false,
-          error:
-            `${lastError}${n > 1 ? ` — gave up after ${n} attempt(s)` : ''}` +
-            (isRetryable(res.status, code, detail) ? retryHint(detail) : ''),
+          error: `${lastError}${n > 1 ? ` — gave up after ${n} attempt(s)` : ''}`,
         }
       }
     } catch (err) {
@@ -158,6 +158,48 @@ export async function sendViaZohoMail(opts: { to: string; subject: string; html:
 
   return { ok: false, error: lastError }
 }
+
+interface ZohoResponse {
+  status?: { code?: number; description?: string }
+  data?: { messageId?: string; mailId?: string; moreInfo?: string }
+  error?: unknown
+}
+
+/**
+ * The real reason a send failed.
+ *
+ * Zoho answers a rejected message with `status.description = "Internal Error"` and puts the
+ * ONLY useful sentence in `data.moreInfo`. Reporting the former (as this code used to) turned
+ * every rejection into an indistinguishable "Internal Error (code 500)" — which is how a
+ * hard account block masqueraded as transient throttling for two days.
+ */
+function zohoErrorDetail(data: ZohoResponse, httpStatus: number): string {
+  const moreInfo = data.data?.moreInfo
+  if (moreInfo) return stripHtml(moreInfo)
+  if (data.status?.description) return data.status.description
+  if (data.error) return JSON.stringify(data.error).slice(0, 300)
+  return `HTTP ${httpStatus}`
+}
+
+/** moreInfo ships with an anchor tag; keep the sentence, drop the markup. */
+function stripHtml(s: string): string {
+  return s
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/** Zoho's account-level "unusual sending activity" block (SMTP 550 5.4.6). */
+function isSendingBlocked(detail: string): boolean {
+  return /unusual sending activity|5\.4\.6|usage-policy/i.test(detail)
+}
+
+export const SENDING_BLOCKED_HINT =
+  ' This is Zoho\'s account-level sending block for external recipients — internal (same-domain) ' +
+  'mail still works, which is why a test to the sending address succeeds while customer mail fails. ' +
+  'Retrying extends the block, so sending should be paused and the account reviewed with Zoho ' +
+  '(https://www.zoho.in/mail/help/usage-policy.html)'
 
 /** Zoho caps per_page style knobs loosely; guard against nonsense env values. */
 function positiveInt(raw: string | undefined, fallback: number): number {
@@ -184,16 +226,17 @@ function backoffMs(attempt: number): number {
  * single send immediately afterwards succeeded. So a retry could never help unless the sends
  * were also spaced out.
  */
+/**
+ * Is this worth trying again immediately?
+ *
+ * Note what is NOT retryable: an account-level sending block, which is checked before this is
+ * reached. A `500` on its own still is, because Zoho genuinely uses it for transient faults.
+ */
 function isRetryable(httpStatus: number, bodyCode: number | undefined, detail: string): boolean {
+  if (isSendingBlocked(detail)) return false
   if (httpStatus === 429 || httpStatus >= 500) return true
   if (bodyCode !== undefined && Number(bodyCode) >= 500) return true
-  return /internal error|temporarily|try again|too many|rate limit/i.test(detail)
-}
-
-function retryHint(detail: string): string {
-  return /internal error/i.test(detail)
-    ? ' — Zoho reports burst throttling as "Internal Error"; the app already spaces sends and retried this one, so check ZOHO_MAIL_MIN_GAP_MS (currently spaced) or the account\'s daily sending limit.'
-    : ''
+  return /temporarily|try again|too many|rate limit/i.test(detail)
 }
 
 /** Minimum gap between sends, enforced across concurrent callers. */

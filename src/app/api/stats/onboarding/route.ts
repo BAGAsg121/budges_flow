@@ -18,6 +18,7 @@
 import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { WA_EMAIL_TWIN } from '@/lib/nudge-defaults'
+import { buildDailySeries } from '@/lib/engagement-stats'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
@@ -165,33 +166,18 @@ export async function GET(req: Request) {
     if (log.replied) t.replied++
   }
 
-  // --- daily series ----------------------------------------------------------
-  const buckets = new Map<string, DayBucket>()
-  for (let i = 0; i < days; i++) {
-    const d = new Date(since.getTime() + i * 24 * 60 * 60 * 1000)
-    const key = istDayKey(d)
-    buckets.set(key, { date: key, emailSent: 0, emailOpened: 0, emailFailed: 0, waSent: 0, waOpened: 0, waFailed: 0 })
-  }
-
-  for (const log of windowLogs) {
-    // A log with no sentAt was never sent; fall back to createdAt so failures still chart.
-    const when = log.sentAt ?? log.createdAt
-    const bucket = buckets.get(istDayKey(when))
-    if (!bucket) continue
-
-    const isWa = log.channel === 'whatsapp'
-    if (isWa) {
-      if (log.sentOk) bucket.waSent++
-      else bucket.waFailed++
-      if (log.opened) bucket.waOpened++
-    } else {
-      if (log.sentOk) bucket.emailSent++
-      else bucket.emailFailed++
-      if (log.opened) bucket.emailOpened++
-    }
-  }
-
-  const series = [...buckets.values()]
+  // --- daily series, PER FAMILY ----------------------------------------------
+  // Built once per family from that family's own two nudge ids. It used to be built once
+  // across all four nudges and returned as a single `series`, which both charts then drew —
+  // so the two families showed identical graphs. The response no longer carries a combined
+  // series at all, so that mistake cannot be made again by picking the wrong field.
+  const seriesFor = (nudgeIds: string[]) =>
+    buildDailySeries({
+      logs: windowLogs,
+      nudgeIds: nudgeIds.map((k) => byKey.get(k)?.id).filter((id): id is string => Boolean(id)),
+      days,
+      since,
+    })
 
   return NextResponse.json(
     {
@@ -209,8 +195,10 @@ export async function GET(req: Request) {
           whatsappMax: byKey.get(f.whatsappKey)?.maxEmailsPerLead ?? null,
           whatsappFollowUpDays: byKey.get(f.whatsappKey)?.followUpDays ?? null,
         },
+        /** This family's own two nudges only — never the other family's. */
+        nudgeKeys: [f.emailKey, f.whatsappKey],
+        series: seriesFor([f.emailKey, f.whatsappKey]),
       })),
-      series,
       /** True when any of the four nudges is missing from the database. */
       missingNudges: keys.filter((k) => !byKey.has(k)),
     },
