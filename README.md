@@ -343,6 +343,12 @@ Groups every failed send by channel and error, explains Meta's codes in plain En
 active configuration. The Logs tab does the same inline: a failed WhatsApp row's badge names the
 cause (e.g. *failed · engagement cap*) and the tooltip carries Meta's raw text.
 
+To prove a **deployment's** credentials work without running a nudge against real leads, hit
+`GET /api/email/test` (reports the selected transport and which variables are missing, never their
+values) and `POST /api/email/test` with an optional `{"to":"…"}`. The WhatsApp equivalent is
+`/api/whatsapp/test`. Both run the same send path a nudge uses, so a success there is a real send,
+and both are behind the app password.
+
 ### Why WhatsApp messages fail
 
 Meta-side delivery failures are normal and are **not** app errors:
@@ -421,6 +427,8 @@ kind of change.
 | `POST /api/nudges/{id}/run` | Basic | Run now (`{ "sync": true }`) |
 | `GET /api/nudges/{id}/preview` | Basic | Dry run — who would send / skip |
 | `POST /api/zoho/sync` | Basic | Pull leads for a criteria string |
+| `GET/POST /api/whatsapp/test` | Basic | WhatsApp config check / one real test send |
+| `GET/POST /api/email/test` | Basic | Email config check / one real test send (`{ "to": "…" }`, defaults to the from-address) |
 | `GET /api/leads`, `GET /api/logs`, `GET /api/stats` | Basic | Data for the UI |
 | `GET /api/scheduler` | Basic | Scheduler status |
 | `GET /api/db/health` | Basic | External MySQL connectivity (`?tables=1`, `?describe=<table>`) |
