@@ -71,6 +71,7 @@ A sidebar shell (a mobile drawer below `lg`, plus a swipeable tab strip) over fi
 | **Nudges** | Every flow, which template it uses, and whether it is running |
 | **Templates** | WhatsApp templates and their Meta approval state, plus the email copy |
 | **Logs** | Every message, why any failed, and what customers actually replied |
+| **Failures** | Every failed send on both channels, with per-row and bulk retry through the original nudge |
 
 The **Connections** panel at the bottom of the sidebar answers "is this actually wired up?" without
 spending an API call: database, Zoho CRM REST, Zoho CRM MCP, WhatsApp and email, each with the names
@@ -85,6 +86,36 @@ which read as flat in light mode and harsh in dark.
 
 Both header sync buttons hit the same endpoint with a different window — see
 [Zoho CRM: MCP first, REST fallback](#zoho-crm-mcp-first-rest-fallback).
+
+### Retrying failures
+
+The **Failures** tab lists every failed send on both channels and can re-send them. Each failure is
+translated into plain English (the same translators the Logs tab uses), tagged **retryable** or not,
+and grouped by cause with counts. There is a per-row **Retry** and a header **Retry all failed**.
+
+A retry re-sends through **the nudge the message originally belonged to**, rebuilding the exact
+variables the first attempt used:
+
+- **Lead-driven** sends rebuild from the lead, exactly as `runNudge` does.
+- **Sheet-driven** sends re-fetch the source sheet from the URL recorded on the log and find the
+  matching row again — their variables live nowhere else. If the sheet is unreachable the retry fails
+  loudly rather than sending a body with an empty mobile link. The column pickers and mobile
+  normalisation are shared with `sheet-run` (`src/lib/sheet-vars.ts`), so a retry cannot render a
+  subtly different message from the original.
+
+Guard rails, all deliberate:
+
+| Rule | Why |
+| --- | --- |
+| Only `sentOk = false` rows are eligible | A retry never re-sends a success |
+| Already-recovered failures are skipped | Pressing the button twice does not message everyone twice |
+| Non-retryable errors are skipped | An undeliverable number or a missing template fails identically forever |
+| Anyone who replied is skipped | They answered; retrying should not mean ignoring that |
+| Sequential, capped batch | The original failure was often *caused* by sending too fast |
+
+The original failure row is **never mutated** — it is the audit trail of a real attempt. The retry
+writes a new row, and "recovered" is derived at read time by looking for a later success against the
+same nudge and address. That needed no new column on a production table.
 
 ### Activation-fee engagement
 
@@ -483,7 +514,27 @@ configured, then falls back to SMTP.
 ```bash
 npm run email:check                  # which transport is active, and why
 npm run email:check you@example.com  # send a real test email
+npm run email:check you@example.com --burst 5   # reproduce a sheet-run burst
 ```
+
+### Burst throttling (the second email failure)
+
+Once Zoho Mail became the transport, a new failure appeared: **39 sends in a 34-second window, all
+failing with `Zoho Mail API: Internal Error (code 500)`**, while a single send immediately afterwards
+succeeded. Zoho reports burst throttling as a bare `500`, not a `429` — and the sender only ever
+retried `401`, so every one of those was final.
+
+Two fixes in `src/lib/zoho-mail.ts`:
+
+| Fix | Detail |
+| --- | --- |
+| **Spacing** | A minimum gap between sends (`ZOHO_MAIL_MIN_GAP_MS`, default 1100 ms), enforced across concurrent callers so parallel sends queue instead of racing |
+| **Retry** | `5xx`/`429`/"Internal Error" are retried with exponential backoff **plus jitter** (`ZOHO_MAIL_MAX_ATTEMPTS`, default 4). Jitter matters because a burst fails together and would otherwise retry together |
+
+Verified by reproducing the failure mode: `--burst 5` now completes 5/5.
+
+`src/lib/mail-errors.ts` translates these into plain English for the Failures tab, and marks each one
+retryable or not — an "Internal Error" is offered for retry, a rejected recipient is not.
 
 ## Diagnosing failures
 
@@ -551,6 +602,29 @@ What no code can fix: if a user has genuinely opted out of marketing (131050) or
 at all (131026), only their opt-in or a different channel reaches them — which is what the email
 fallback is for.
 
+### What was actually done about it
+
+The two activation-fee templates were rebuilt as **UTILITY** and the nudges repointed at them:
+
+| Retired (MARKETING) | Now used (UTILITY) |
+| --- | --- |
+| `onboarded_transacting_pay` | `activation_fee_pending_transacting` |
+| `onboarded_not_transacting_pay` | `activation_fee_pending_not_transacting` |
+
+New names rather than edits, because an approved template's category cannot be changed by editing it —
+the edit only re-triggers review and Meta re-derives the category from the same text. The old
+approved templates are left on the WABA untouched: the send history references them, and deleting an
+approved template is not reversible.
+
+The promotional discount line now lives **only in the email twin**, where no cap exists. That is the
+trade: uncapped WhatsApp delivery in exchange for moving the offer to email.
+
+```bash
+npm run wa:repoint            # dry run — shows the template switch per nudge
+npm run wa:repoint -- --apply
+npm run wa:templates -- --create-missing   # submits the UTILITY templates for review
+```
+
 ## Reading customer replies
 
 The WhatsApp webhook stores **what the customer actually wrote**, not just that they replied:
@@ -584,6 +658,8 @@ kind of change.
 | `GET /api/zoho/mcp/callback` | Basic | Consumes the consent code, prints the env block |
 | `GET /api/status` | Basic | Which integrations are wired up (booleans only) |
 | `GET /api/stats/onboarding` | Basic | Per-family engagement totals + daily series (`?days=14`) |
+| `GET /api/logs/failures` | Basic | Failed sends, explained, with `resolved` + `retryable` per row |
+| `POST /api/logs/retry` | Basic | Re-send failures: `{ ids: […] }`, or `{ all: true, channel? }` |
 | `GET/POST /api/whatsapp/test` | Basic | WhatsApp config check / one real test send |
 | `GET/POST /api/email/test` | Basic | Email config check / one real test send (`{ "to": "…" }`, defaults to the from-address) |
 | `GET /api/leads`, `GET /api/logs`, `GET /api/stats` | Basic | Data for the UI |

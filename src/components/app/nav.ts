@@ -1,6 +1,6 @@
-import { LayoutDashboard, Users, BellRing, FileText, ScrollText } from 'lucide-react'
+import { LayoutDashboard, Users, BellRing, FileText, ScrollText, ShieldAlert } from 'lucide-react'
 
-export type TabId = 'dashboard' | 'leads' | 'nudges' | 'templates' | 'logs'
+export type TabId = 'dashboard' | 'leads' | 'nudges' | 'templates' | 'logs' | 'failures'
 
 export interface TabDef {
   id: TabId
@@ -44,6 +44,12 @@ export const TABS: TabDef[] = [
     label: 'Logs',
     icon: ScrollText,
     description: 'Every message sent, why any failed, and what customers replied.',
+  },
+  {
+    id: 'failures',
+    label: 'Failures',
+    icon: ShieldAlert,
+    description: 'Every failed delivery, with a one-click retry through its original nudge.',
   },
 ]
 

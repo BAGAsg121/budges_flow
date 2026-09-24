@@ -188,27 +188,61 @@ export const MYSQL_FLOW_TEMPLATES: Record<string, MysqlFlowTemplate> = {
   },
 }
 
+/**
+ * UTILITY-category copy for the two pay nudges.
+ *
+ * Meta decides a template's category from its CONTENT, and discount/promo wording makes it
+ * MARKETING — which is what triggers the per-user frequency cap. In production that dropped
+ * 36 + 9 sends with 131049 ("healthy ecosystem engagement") and 3 more with 130472
+ * ("part of an experiment"). UTILITY templates are not capped.
+ *
+ * So the WhatsApp copy carries no promotion at all — only "your activation fee is pending"
+ * and a Pay Now button — while the DISCOUNT LINE STAYS in the email twin (WA_EMAIL_TWIN),
+ * where no such cap exists. That is the whole trade: uncapped WhatsApp delivery in exchange
+ * for moving the offer to email.
+ *
+ * These are new template names rather than edits to the approved originals, because an
+ * approved template's category cannot be changed by editing it — the edit only re-triggers
+ * review and Meta re-derives the category from the same promo-free text anyway. New names
+ * also leave the old approved templates intact for the send history that references them.
+ * The retired names are recorded in WA_RETIRED_MARKETING_TEMPLATES.
+ */
+export const WA_UTILITY_SAFE_COPY: Record<string, { body: string; buttonText: string }> = {
+  activation_fee_pending_transacting: {
+    body:
+      'Hi 👋 Your Eko account activation fee payment is still pending.\n\n' +
+      'Please complete the one-time payment to keep your account fully active.',
+    buttonText: 'Pay Now',
+  },
+  activation_fee_pending_not_transacting: {
+    body:
+      'Hi 👋 Your Eko account has been activated and your production credentials were shared on your ' +
+      'registered email ID.\n\n' +
+      'Please complete your integration, and clear the pending one-time activation fee to keep the ' +
+      'account fully active.',
+    buttonText: 'Pay Now',
+  },
+}
+
+/** The original MARKETING-categorised templates. Kept for reference; no longer used. */
+export const WA_RETIRED_MARKETING_TEMPLATES: Record<string, string> = {
+  whatsapp_onboarded_transacting: 'onboarded_transacting_pay',
+  whatsapp_onboarded_not_transacting: 'onboarded_not_transacting_pay',
+}
+
 /** The manual, sheet-driven WhatsApp nudges (pay-activation-fee CTA). */
 export const WA_SHEET_FLOW_TEMPLATES = {
   whatsapp_onboarded_transacting: {
-    templateName: 'onboarded_transacting_pay',
+    templateName: 'activation_fee_pending_transacting',
     title: 'Onboarded and started transacting (WhatsApp)',
-    body:
-      'Hi 👋 🎉 Special discounts are expiring soon!\n\n' +
-      'Pay your one-time activation fee today to avail the discount before it expires.',
-    buttonText: 'REVIEW and PAY',
+    body: WA_UTILITY_SAFE_COPY.activation_fee_pending_transacting.body,
+    buttonText: WA_UTILITY_SAFE_COPY.activation_fee_pending_transacting.buttonText,
   },
   whatsapp_onboarded_not_transacting: {
-    templateName: 'onboarded_not_transacting_pay',
+    templateName: 'activation_fee_pending_not_transacting',
     title: 'Onboarded but not transacting (WhatsApp)',
-    body:
-      'Hi 👋 Great news — your account has been successfully activated with Eko.\n\n' +
-      'Your production credentials have been shared on your registered email ID. Please complete your ' +
-      'integration and start processing transactions. If you need any assistance, our support team is happy to help.\n\n' +
-      'Thank you for partnering with Eko.\n\n' +
-      '🎉 Special discounts are expiring soon! Pay your one-time activation fee today to avail the discount ' +
-      'before it expires.',
-    buttonText: 'REVIEW and PAY',
+    body: WA_UTILITY_SAFE_COPY.activation_fee_pending_not_transacting.body,
+    buttonText: WA_UTILITY_SAFE_COPY.activation_fee_pending_not_transacting.buttonText,
   },
 } as const
 
@@ -223,31 +257,6 @@ export const WA_SHEET_FLOW_TEMPLATES = {
 export const WA_EMAIL_TWIN: Record<string, string> = {
   whatsapp_onboarded_transacting: 'onboarded_transacting',
   whatsapp_onboarded_not_transacting: 'onboarded_not_transacting',
-}
-
-/**
- * UTILITY-safe alternative copy for the two pay nudges.
- *
- * Meta decides a template's category from its content, and discount/promo wording makes it
- * MARKETING — which is what triggers the per-user frequency cap. Purely transactional copy
- * ("your activation fee is pending") can qualify as UTILITY, which is not capped. Switch by
- * editing the template in the Templates tab (or replacing it) and pasting this body.
- */
-export const WA_UTILITY_SAFE_COPY: Record<string, { body: string; buttonText: string }> = {
-  onboarded_transacting_pay: {
-    body:
-      'Hi 👋 Your Eko account activation fee payment is still pending.\n\n' +
-      'Please complete the one-time payment to keep your account fully active.',
-    buttonText: 'Pay Now',
-  },
-  onboarded_not_transacting_pay: {
-    body:
-      'Hi 👋 Your Eko account has been activated and your production credentials were shared on your ' +
-      'registered email ID.\n\n' +
-      'Please complete your integration, and clear the pending one-time activation fee to keep the ' +
-      'account fully active.',
-    buttonText: 'Pay Now',
-  },
 }
 
 // ---------------------------------------------------------------------------

@@ -58,6 +58,9 @@ export async function GET(req: NextRequest) {
       templateName: l.templateName,
       sentOk: l.sentOk,
       sendError: l.sendError,
+      // createdAt is when the attempt was made; sentAt is only set on success. Without both,
+      // a failure looks undated and a burst of them cannot be told from a slow trickle.
+      createdAt: l.createdAt,
       sentAt: l.sentAt,
       opened: l.opened,
       openedAt: l.openedAt,

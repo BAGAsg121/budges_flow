@@ -105,36 +105,107 @@ export async function sendViaZohoMail(opts: { to: string; subject: string; html:
       }),
     })
 
-  try {
-    let res = await attempt(await getMailAccessToken())
+  const attempts = positiveInt(process.env.ZOHO_MAIL_MAX_ATTEMPTS, 4)
+  let lastError = 'unknown error'
 
-    // Access token may have just expired -> refresh once and retry.
-    if (res.status === 401) {
-      clearZohoMailTokenCache()
-      res = await attempt(await getMailAccessToken(true))
-    }
+  for (let n = 1; n <= attempts; n++) {
+    await throttleZohoMail()
 
-    const data = (await res.json().catch(() => ({}))) as {
-      status?: { code?: number; description?: string }
-      data?: { messageId?: string; mailId?: string }
-      error?: unknown
-    }
+    try {
+      let res = await attempt(await getMailAccessToken())
 
-    // Zoho reports application errors in the body with an HTTP 200, so check both.
-    const code = data.status?.code
-    const ok = res.ok && (code === undefined || Number(code) === 200)
+      // Access token may have just expired -> refresh once and retry immediately.
+      if (res.status === 401) {
+        clearZohoMailTokenCache()
+        res = await attempt(await getMailAccessToken(true))
+      }
 
-    if (!ok) {
+      const data = (await res.json().catch(() => ({}))) as {
+        status?: { code?: number; description?: string }
+        data?: { messageId?: string; mailId?: string }
+        error?: unknown
+      }
+
+      // Zoho reports application errors in the body with an HTTP 200, so check both.
+      const code = data.status?.code
+      const ok = res.ok && (code === undefined || Number(code) === 200)
+
+      if (ok) {
+        const messageId = data.data?.messageId ?? data.data?.mailId
+        return { ok: true, messageId: messageId === undefined ? undefined : String(messageId) }
+      }
+
       const detail =
         data.status?.description || (data.error ? JSON.stringify(data.error).slice(0, 300) : `HTTP ${res.status}`)
-      return { ok: false, error: `Zoho Mail API: ${detail}${code ? ` (code ${code})` : ''}` }
+      lastError = `Zoho Mail API: ${detail}${code ? ` (code ${code})` : ''}`
+
+      if (!isRetryable(res.status, code, detail) || n === attempts) {
+        return {
+          ok: false,
+          error:
+            `${lastError}${n > 1 ? ` — gave up after ${n} attempt(s)` : ''}` +
+            (isRetryable(res.status, code, detail) ? retryHint(detail) : ''),
+        }
+      }
+    } catch (err) {
+      // Network-level failure: also worth retrying.
+      lastError = err instanceof Error ? err.message : String(err)
+      if (n === attempts) return { ok: false, error: `${lastError} — gave up after ${n} attempt(s)` }
     }
 
-    const messageId = data.data?.messageId ?? data.data?.mailId
-    return { ok: true, messageId: messageId === undefined ? undefined : String(messageId) }
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    await sleep(backoffMs(n))
   }
+
+  return { ok: false, error: lastError }
+}
+
+/** Zoho caps per_page style knobs loosely; guard against nonsense env values. */
+function positiveInt(raw: string | undefined, fallback: number): number {
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+/**
+ * Exponential backoff with jitter.
+ *
+ * Jitter matters because a burst fails together and would otherwise retry together, landing
+ * the same thundering herd back on the API at the same instant.
+ */
+function backoffMs(attempt: number): number {
+  const base = positiveInt(process.env.ZOHO_MAIL_RETRY_BASE_MS, 800)
+  return Math.round(base * 2 ** (attempt - 1) * (0.7 + Math.random() * 0.6))
+}
+
+/**
+ * A burst of sends is throttled by Zoho, which reports it as a bare `500 Internal Error`
+ * rather than a 429. Measured in production: 39 sends inside 34 seconds, 39 failures, while a
+ * single send immediately afterwards succeeded. So a retry could never help unless the sends
+ * were also spaced out.
+ */
+function isRetryable(httpStatus: number, bodyCode: number | undefined, detail: string): boolean {
+  if (httpStatus === 429 || httpStatus >= 500) return true
+  if (bodyCode !== undefined && Number(bodyCode) >= 500) return true
+  return /internal error|temporarily|try again|too many|rate limit/i.test(detail)
+}
+
+function retryHint(detail: string): string {
+  return /internal error/i.test(detail)
+    ? ' — Zoho reports burst throttling as "Internal Error"; the app already spaces sends and retried this one, so check ZOHO_MAIL_MIN_GAP_MS (currently spaced) or the account\'s daily sending limit.'
+    : ''
+}
+
+/** Minimum gap between sends, enforced across concurrent callers. */
+let nextSendAllowedAt = 0
+
+async function throttleZohoMail(): Promise<void> {
+  const gap = positiveInt(process.env.ZOHO_MAIL_MIN_GAP_MS, 1100)
+  const now = Date.now()
+  const wait = Math.max(0, nextSendAllowedAt - now)
+  // Reserve this slot before awaiting, so parallel callers queue instead of racing.
+  nextSendAllowedAt = Math.max(now, nextSendAllowedAt) + gap
+  if (wait > 0) await sleep(wait)
 }
 
 /** Config summary for diagnostics — never returns secrets. */

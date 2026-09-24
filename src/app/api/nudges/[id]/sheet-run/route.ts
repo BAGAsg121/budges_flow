@@ -21,6 +21,7 @@ import { isDeliveryCapError, isPermanentDeliveryFailure } from '@/lib/whatsapp-e
 import { buildWhatsAppParams } from '@/lib/whatsapp-params'
 import { getBaseUrl } from '@/lib/base-url'
 import { parseSheetCsv, toSheetCsvUrl } from '@/lib/sheet-parser'
+import { buildSheetVars, pickSheetEmail, pickSheetMobile } from '@/lib/sheet-vars'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 300
@@ -125,20 +126,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
     // 4. For each row — render, deduplicate, send
     for (const row of rows) {
-      const email = row['email'] || row['email_address'] || ''
+      // Column names vary between sheets, so the pickers live in one place (sheet-vars.ts).
+      const email = pickSheetEmail(row)
 
       // `mobile` is needed by WhatsApp, and drives the link in the onboarding nudges.
-      // Sheets name that column inconsistently, so accept the common spellings.
-      const mobile =
-        row['mobile'] ||
-        row['mobile_number'] ||
-        row['mobilenumber'] ||
-        row['phone'] ||
-        row['phone_number'] ||
-        row['contact'] ||
-        row['contact_number'] ||
-        row['whatsapp'] ||
-        ''
+      const mobile = pickSheetMobile(row)
       const toPhone = isWhatsApp ? normalizePhone(mobile) : null
 
       if (isWhatsApp && !toPhone) {
@@ -166,24 +158,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         continue
       }
 
-      // Build template vars from row columns + synthetic fields
-      // Typed as the exact union renderTemplate expects so TS is happy
-      const vars: Record<string, string | number | null | undefined> = {
-        ...row,   // all cells are strings (from CSV parser)
-        email,
-        today: now.toISOString().slice(0, 10),
-        message_number: 1,
-        // convenience aliases
-        first_name: row['first_name'] || row['name'] || email.split('@')[0],
-        full_name: row['full_name'] || row['name'] || email.split('@')[0],
-      }
-
-      vars.mobile = mobile
-      vars.phone = row['phone'] || mobile
-      // normalise to digits, and strip a leading country code / trunk zero so the
-      // link is stable whether the sheet holds 9876543210 or +91 98765 43210
-      const mobileDigits = String(mobile).replace(/\D/g, '').replace(/^0+/, '').replace(/^91(?=\d{10}$)/, '')
-      vars.mobile_digits = mobileDigits
+      // Build template vars from row columns + synthetic fields. Shared with the retry path
+      // (src/lib/sheet-vars.ts) so a retry cannot render a subtly different message.
+      const vars = buildSheetVars(row, { email, mobile, now, messageNumber: 1 })
 
       const trackingId = randomUUID()
       const sheetRowRef = `${csvUrl}|${isWhatsApp ? toPhone : email}`

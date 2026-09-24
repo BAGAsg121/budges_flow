@@ -10,9 +10,12 @@ import { MYSQL_FLOW_KEYS, isMysqlFlowKey } from '../src/lib/mysql-nudges.ts'
 import { buildWhatsAppParams as buildWhatsAppParamsRaw } from '../src/lib/whatsapp-params.ts'
 import { extractInboundText, appendInbound, INBOUND_KEEP } from '../src/lib/whatsapp-inbound.ts'
 import { explainWhatsAppError, isDeliveryCapError, isPermanentDeliveryFailure } from '../src/lib/whatsapp-errors.ts'
-import { WA_EMAIL_TWIN, WA_UTILITY_SAFE_COPY } from '../src/lib/nudge-defaults.ts'
+import { WA_EMAIL_TWIN, WA_UTILITY_SAFE_COPY, WA_RETIRED_MARKETING_TEMPLATES } from '../src/lib/nudge-defaults.ts'
 import { buildTemplatePayload, validateTemplateInput, countTemplateVars } from '../src/lib/whatsapp-templates.ts'
 import { pickLeadsTool, buildLeadsToolArgs, withPage, extractPagingInfo, extractRecords } from '../src/lib/zoho-mcp.ts'
+import { explainMailError, isRetryableMailError } from '../src/lib/mail-errors.ts'
+import { isRetryableWhatsAppError } from '../src/lib/whatsapp-errors.ts'
+import { buildSheetVars, normaliseMobileDigits, pickSheetEmail, pickSheetMobile } from '../src/lib/sheet-vars.ts'
 
 let failures = 0
 /** --quiet prints only failures and the summary; useful when iterating in a tight loop. */
@@ -237,10 +240,18 @@ const waTransacting = byKeyAll['whatsapp_onboarded_transacting']
 const waNotTransacting = byKeyAll['whatsapp_onboarded_not_transacting']
 check('whatsapp_onboarded_transacting is whatsapp + disabled', `${waTransacting.channel}|${waTransacting.enabled}`, 'whatsapp|false')
 check('whatsapp_onboarded_not_transacting is whatsapp + disabled', `${waNotTransacting.channel}|${waNotTransacting.enabled}`, 'whatsapp|false')
-check('transacting WhatsApp template name', waTransacting.whatsappTemplateName, 'onboarded_transacting_pay')
-check('not-transacting WhatsApp template name', waNotTransacting.whatsappTemplateName, 'onboarded_not_transacting_pay')
-checkTrue('not-transacting WhatsApp copy mentions activation', WA_SHEET_FLOW_TEMPLATES.whatsapp_onboarded_not_transacting.body.includes('successfully activated'))
-checkTrue('not-transacting WhatsApp copy has the discount line', WA_SHEET_FLOW_TEMPLATES.whatsapp_onboarded_not_transacting.body.includes('Special discounts'))
+check('transacting WhatsApp template name', waTransacting.whatsappTemplateName, 'activation_fee_pending_transacting')
+check('not-transacting WhatsApp template name', waNotTransacting.whatsappTemplateName, 'activation_fee_pending_not_transacting')
+checkTrue(
+  'not-transacting WhatsApp copy still explains the activation',
+  WA_SHEET_FLOW_TEMPLATES.whatsapp_onboarded_not_transacting.body.includes('activated')
+)
+// Deliberately NO discount line here any more: promo wording is what made Meta categorise
+// these as MARKETING and cap them. The offer moved to the email twin (asserted above).
+checkTrue(
+  'not-transacting WhatsApp copy no longer carries the discount line',
+  !WA_SHEET_FLOW_TEMPLATES.whatsapp_onboarded_not_transacting.body.includes('Special discounts')
+)
 
 // the extended param config form
 check('array form yields body only', JSON.stringify(buildWhatsAppParamsRaw('["a","b"]', { a: '1', b: '2' })), JSON.stringify({ body: ['1', '2'], button: [] }))
@@ -299,10 +310,41 @@ for (const [waKey, emailKey] of Object.entries(WA_EMAIL_TWIN)) {
 }
 
 // UTILITY-safe alternative copy exists for both capped templates
-check('utility-safe copy for transacting', Boolean(WA_UTILITY_SAFE_COPY.onboarded_transacting_pay), true)
-check('utility-safe copy for not-transacting', Boolean(WA_UTILITY_SAFE_COPY.onboarded_not_transacting_pay), true)
+check('utility-safe copy for transacting', Boolean(WA_UTILITY_SAFE_COPY.activation_fee_pending_transacting), true)
+check('utility-safe copy for not-transacting', Boolean(WA_UTILITY_SAFE_COPY.activation_fee_pending_not_transacting), true)
 checkTrue('utility-safe copy drops the discount wording', !JSON.stringify(WA_UTILITY_SAFE_COPY).toLowerCase().includes('discount'))
-checkTrue('utility-safe copy keeps a payment CTA', WA_UTILITY_SAFE_COPY.onboarded_transacting_pay.buttonText.length > 0)
+checkTrue('utility-safe copy keeps a payment CTA', WA_UTILITY_SAFE_COPY.activation_fee_pending_transacting.buttonText.length > 0)
+// The two WhatsApp sheet nudges must point at the UTILITY templates, not the retired MARKETING
+// pair — that switch is the whole fix for Meta's per-user frequency cap.
+check('transacting nudge uses the UTILITY template', WA_SHEET_FLOW_TEMPLATES.whatsapp_onboarded_transacting.templateName, 'activation_fee_pending_transacting')
+check('not-transacting nudge uses the UTILITY template', WA_SHEET_FLOW_TEMPLATES.whatsapp_onboarded_not_transacting.templateName, 'activation_fee_pending_not_transacting')
+checkTrue(
+  'no nudge still references a retired MARKETING template',
+  !Object.values(WA_SHEET_FLOW_TEMPLATES).some((t) => Object.values(WA_RETIRED_MARKETING_TEMPLATES).includes(t.templateName))
+)
+checkTrue(
+  'the WhatsApp bodies carry no promo wording',
+  !/discount|offer|expiring soon/i.test(
+    Object.values(WA_SHEET_FLOW_TEMPLATES).map((t) => t.body).join(' ')
+  )
+)
+// The offer is not lost — it moves to the email twin, which has no cap.
+checkTrue(
+  'the email twins still carry the discount line',
+  DEFAULT_NUDGES.filter((n) => ['onboarded_transacting', 'onboarded_not_transacting'].includes(n.key)).every((n) =>
+    /discount/i.test((n.bodyTemplate || '') + (n.subjectTemplate || ''))
+  )
+)
+// Every activation-fee nudge allows 3 attempts.
+check(
+  'all four activation-fee nudges cap at 3 per lead',
+  DEFAULT_NUDGES.filter((n) => /^(whatsapp_)?onboarded_(not_)?transacting$/.test(n.key)).map((n) => n.maxEmailsPerLead).join(','),
+  '3,3,3,3'
+)
+checkTrue(
+  'all four space their follow-ups',
+  DEFAULT_NUDGES.filter((n) => /^(whatsapp_)?onboarded_(not_)?transacting$/.test(n.key)).every((n) => n.followUpDays > 0)
+)
 
 // --- Zoho MCP tool selection and argument building ---------------------------
 // The real tool list from the live server. The bug this guards against: every tool name
@@ -363,6 +405,46 @@ check(
 )
 check('records survive a JSON-string envelope', extractRecords(JSON.stringify({ data: [{ id: '2', Email: 'a@b.c' }] })).length, 1)
 check('a count response yields no records', extractRecords({ count: 42 }).length, 0)
+
+// --- retry classification ----------------------------------------------------
+// The failures view offers a Retry button based on these, so getting them backwards either
+// re-sends things that can never work, or hides a retry that would have succeeded.
+checkTrue('a Zoho Internal Error is retryable', isRetryableMailError('Zoho Mail API: Internal Error (code 500)'))
+check('Zoho Internal Error is labelled throttling', explainMailError('Zoho Mail API: Internal Error (code 500)').label, 'provider throttled')
+check('missing mail config is not retryable', isRetryableMailError('SMTP not configured (set SMTP_HOST/SMTP_USER/SMTP_PASS/MAIL_FROM in .env)'), false)
+check('a rejected recipient is not retryable', isRetryableMailError('Zoho Mail API: recipient address rejected (code 550)'), false)
+check('a revoked refresh token is not retryable', isRetryableMailError('Zoho Mail token refresh failed: invalid_code'), false)
+checkTrue('a network error is retryable', isRetryableMailError('fetch failed'))
+check('an empty mail error yields no help', explainMailError('') === null, true)
+check('an unrecognised mail error is still retryable', explainMailError('something new happened').retryable, true)
+checkTrue('a WhatsApp cap IS retryable', isRetryableWhatsAppError('not delivered to maintain healthy ecosystem engagement (code 131049)'))
+checkTrue('a marketing opt-out IS retryable', isRetryableWhatsAppError("User's number is part of an experiment (code 130472)"))
+check('an undeliverable number is not retryable', isRetryableWhatsAppError('Message undeliverable (code 131026)'), false)
+check('a missing template is not retryable', isRetryableWhatsAppError('template does not exist in the translation (code 132001)'), false)
+check('a parameter mismatch is not retryable', isRetryableWhatsAppError('number of parameters does not match (code 132000)'), false)
+check('a bad token is not retryable', isRetryableWhatsAppError('Invalid OAuth access token (code 190)'), false)
+
+// --- sheet variable building (shared by sheet-run and retry) -----------------
+// A retry must render the SAME link as the original send, so the mobile normalisation is
+// load-bearing: sheets store 9876543210, +91 98765 43210 and 0919876543210 interchangeably.
+check('digits: plain 10-digit number', normaliseMobileDigits('9876543210'), '9876543210')
+check('digits: strips +91 and spaces', normaliseMobileDigits('+91 98765 43210'), '9876543210')
+check('digits: strips a leading trunk zero', normaliseMobileDigits('09876543210'), '9876543210')
+check('digits: strips 91 only when 10 digits follow', normaliseMobileDigits('919876543210'), '9876543210')
+check('digits: keeps a 91 prefix that is part of the number', normaliseMobileDigits('9123456789'), '9123456789')
+check('digits: non-numeric input yields empty', normaliseMobileDigits('n/a'), '')
+
+const sheetRow = { email: 'a@b.com', mobile: '+91 98765 43210', name: 'Asha', company: 'Acme' }
+const sheetVars = buildSheetVars(sheetRow, { email: 'a@b.com', mobile: sheetRow.mobile, messageNumber: 2 })
+check('sheet vars: mobile_digits is normalised', sheetVars.mobile_digits, '9876543210')
+check('sheet vars: first_name falls back to the name column', sheetVars.first_name, 'Asha')
+check('sheet vars: message_number is carried', sheetVars.message_number, 2)
+check('sheet vars: the whole row is still addressable', sheetVars.company, 'Acme')
+const noName = buildSheetVars({ email: 'zed@x.com' }, { email: 'zed@x.com', mobile: '' })
+check('sheet vars: first_name falls back to the email local part', noName.first_name, 'zed')
+check('column picker accepts email_address', pickSheetEmail({ email_address: 'x@y.z' }), 'x@y.z')
+check('column picker accepts whatsapp for mobile', pickSheetMobile({ whatsapp: '999' }), '999')
+
 
 console.log(failures === 0 ? '\nAll checks passed.' : `\n${failures} check(s) FAILED.`)
 process.exit(failures === 0 ? 0 : 1)

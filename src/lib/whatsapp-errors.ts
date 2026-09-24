@@ -11,6 +11,11 @@ interface ErrorHelp {
   label: string
   /** What it means and what to do. */
   detail: string
+  /**
+   * Whether re-sending the same message could plausibly work. Caps are retryable (the window
+   * rolls); a number that is not on WhatsApp, or a template that does not exist, is not.
+   */
+  retryable?: boolean
 }
 
 const BY_CODE: Record<number, ErrorHelp> = {
@@ -160,6 +165,12 @@ export function capBackoffHours(): number {
  * or a code plus message.
  */
 export function explainWhatsAppError(input: ErrorInput): ErrorHelp | null {
+  const help = explainRaw(input)
+  if (!help) return null
+  return { ...help, retryable: isRetryableWhatsAppError(input, help) }
+}
+
+function explainRaw(input: ErrorInput): ErrorHelp | null {
   if (!input) return null
   if (typeof input === 'string') {
     const codeMatch = input.match(/\(code (\d+)/)
@@ -172,4 +183,25 @@ export function explainWhatsAppError(input: ErrorInput): ErrorHelp | null {
   if (input.code && BY_CODE[input.code]) return BY_CODE[input.code]
   if (input.message) return byText(input.message)
   return null
+}
+
+/**
+ * Should the failures view offer a Retry button for this error?
+ *
+ * Not retryable: the recipient is unreachable, or the failure is a configuration mistake on
+ * our side (a wrong template name, a parameter mismatch, a bad token) — re-sending the same
+ * thing would fail identically and just add noise. Retryable: engagement caps, rate limits,
+ * billing hiccups, and unexplained transport errors.
+ */
+export function isRetryableWhatsAppError(input: ErrorInput, help?: ErrorHelp | null): boolean {
+  const resolved = help ?? explainRaw(input)
+  const label = (resolved?.label || '').toLowerCase()
+
+  if (isPermanentDeliveryFailure(input)) return false
+  if (['not configured', 'template not found', 'template disabled', 'parameter mismatch', 'token invalid', 'number not registered'].includes(label)) {
+    return false
+  }
+  // A cap is explicitly retryable — that is the whole point of the backoff.
+  if (isDeliveryCapError(input)) return true
+  return true
 }

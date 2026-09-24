@@ -15,6 +15,7 @@ import { LeadsTab } from '@/components/app/leads-tab'
 import { NudgesTab } from '@/components/app/nudges-tab'
 import { TemplatesTab } from '@/components/app/templates-tab'
 import { LogsTab } from '@/components/app/logs-tab'
+import { FailuresTab } from '@/components/app/failures-tab'
 
 /** Counts the sidebar badge needs; kept out of the tab components so they stay independent. */
 interface NudgeSummary {
@@ -264,6 +265,9 @@ export default function Home() {
             ) : null}
             {tab === 'templates' ? <TemplatesTab refreshKey={refreshKey} onEditNudge={openNudgeEditor} /> : null}
             {tab === 'logs' ? <LogsTab refreshKey={refreshKey} /> : null}
+            {tab === 'failures' ? (
+              <FailuresTab refreshKey={refreshKey} onChanged={() => setRefreshKey((k) => k + 1)} />
+            ) : null}
           </div>
         </main>
 

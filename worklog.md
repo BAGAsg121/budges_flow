@@ -515,3 +515,30 @@ Stage Summary:
 - The dashboard answers "how are the activation-fee nudges doing?" per channel and over time, for both families.
 - All four nudges allow 3 messages per lead, spaced 2 days apart, applied to the live database.
 - User action: none required for the cap change (already applied). The MCP fix and the dashboard need a deploy to see.
+
+---
+
+Task ID: 23
+Agent: Main agent (DeepSeek Harness)
+Task: Move the two activation-fee WhatsApp templates to UTILITY, fix the "Zoho Mail Internal Error", and build a Failures tab with one-click retry.
+
+Work Log:
+- TEMPLATES → UTILITY. Diagnosed first: the WABA shows both pay templates as APPROVED **MARKETING**, which is exactly why Meta caps them. The fix is a content change (Meta derives the category from the copy, and the discount line was what made it marketing), but the MECHANISM matters: an approved template's category cannot be changed by editing it, so I created new templates with new names and repointed the nudges. `activation_fee_pending_transacting` and `activation_fee_pending_not_transacting`, both submitted with category UTILITY, both containing only "your activation fee payment is pending" + a Pay Now button. RETIRED and left untouched on the WABA: `onboarded_transacting_pay`, `onboarded_not_transacting_pay` — the send history references them and deleting an approved template is not reversible.
+  The discount line now lives ONLY in the email twin, where there is no cap. That is the trade and it is documented rather than hidden.
+  `--create-missing` reads template names from the DATABASE, so it initially skipped the new templates entirely — the DB rows still pointed at the old pair. Added scripts/repoint-whatsapp-templates.mjs (three columns, two rows, dry-run by default, never touches `enabled`), applied it, then created the templates. Both now PENDING on Meta.
+  Also fixed a design smell while here: nine verify assertions hardcoded the OLD marketing template names and promo copy. They were rewritten to assert the NEW intent (UTILITY names, no promo in WhatsApp, discount still present in email), because a test that pins the behaviour you are trying to change is worse than no test.
+- ZOHO MAIL "INTERNAL ERROR" — MEASURED, NOT GUESSED. `diag:sends` gave the shape of it: 39 failures, first 15:00:58, last 15:01:32 — a 34-second window, i.e. one sheet-run. A single send from BOTH locally and the deployment succeeded immediately. So it was never credentials and never config: Zoho throttles a burst and reports it as a bare **500 Internal Error rather than a 429**, and our sender only retried 401.
+  FIX, two parts: (1) a minimum gap between sends (ZOHO_MAIL_MIN_GAP_MS, default 1100ms) enforced across concurrent callers, so parallel sends queue rather than race; (2) retry on 5xx/429/"Internal Error" with exponential backoff AND jitter (ZOHO_MAIL_MAX_ATTEMPTS, default 4). Jitter matters specifically because a burst fails together and would otherwise retry together, recreating the same thundering herd.
+  VERIFIED BY REPRODUCING THE FAILURE: added `--burst N` to check-email.mjs and ran 5 sends back-to-back — 5/5 delivered, spaced ~1.1s. I also added `createdAt` to the logs API, because a failed row had no visible timestamp and the burst could not be told from a trickle.
+  New src/lib/mail-errors.ts translates mail failures and classifies retryability. Writing its tests found a real bug: the credentials rule matched "refresh token" but Zoho's actual strings are "token refresh failed" and "invalid_code", so dead credentials were being marked retryable. Broadened to both word orders.
+- FAILURES TAB. New GET /api/logs/failures (failed rows + plain-English cause + retryable flag + resolved flag + a by-cause breakdown) and POST /api/logs/retry (by ids, or all). UI: per-row Retry, header "Retry all failed", channel filter, search, per-cause chips, and a result summary listing what still failed and why.
+  A retry re-sends through the nudge the message originally belonged to, rebuilding the exact variables: lead-driven sends rebuild from the lead, sheet-driven sends re-fetch the source sheet from the URL stored on the log and find the row again (their variables exist nowhere else). Extracted src/lib/sheet-vars.ts so sheet-run and the retry path share ONE implementation of the column pickers and mobile normalisation — a retry that rendered a subtly different body, or an empty mobile link, would be worse than not retrying.
+  Guard rails, all deliberate: only failed rows are eligible; already-recovered ones are skipped so pressing the button twice does not message everyone twice; errors that cannot succeed (undeliverable number, missing template, bad token, rejected recipient) are skipped; anyone who has replied is skipped; the batch is capped and strictly sequential because too-fast sending is what caused many of these failures in the first place.
+  The original failure row is NEVER mutated — it is the audit trail of a real attempt. The retry writes a new row and "recovered" is DERIVED at read time by finding a later success against the same nudge+address. That avoided adding a column to a production table to record something the log already implies.
+- verify now 281 assertions (new coverage for mail-error classification and retryability, WhatsApp retryability, mobile normalisation across the five formats sheets actually use, and sheet var building). tsc clean, eslint clean.
+- NOT VERIFIED: the dev server cannot spawn here, so the Failures tab is typechecked and linted but has never been rendered, and the retry path has not been exercised end to end against real provider calls.
+
+Stage Summary:
+- Both activation-fee nudges now use UTILITY templates (pending Meta review); the promo line moved to email, where no cap applies.
+- The Zoho Mail 500s are explained and fixed: burst throttling, now spaced and retried with jittered backoff, proven by reproducing the burst.
+- A Failures tab with per-row and bulk retry, which refuses to re-send what cannot succeed and refuses to re-message someone who replied.
