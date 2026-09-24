@@ -372,8 +372,12 @@ export const DEFAULT_NUDGES: NudgeSeed[] = [
     filters: json({ requireEmail: true }),
     subjectTemplate: '🎉 Special discounts expiring soon — pay your activation fee today',
     bodyTemplate: ONBOARDED_TRANSACTING_BODY,
-    maxEmailsPerLead: 1,
-    followUpDays: 0,
+    // These four activation-fee nudges (two email, two WhatsApp) allow 3 attempts per lead,
+    // spaced 2 days apart. followUpDays is NOT optional here: with max=3 and a 0-day gap the
+    // scheduler would fire all three on consecutive cycles — three messages in a few hours,
+    // which is both spam and an instant way to hit Meta's per-user marketing cap.
+    maxEmailsPerLead: 3,
+    followUpDays: 2,
   },
   {
     key: 'onboarded_not_transacting',
@@ -386,8 +390,8 @@ export const DEFAULT_NUDGES: NudgeSeed[] = [
     filters: json({ requireEmail: true }),
     subjectTemplate: 'Your Eko account is activated — complete your integration',
     bodyTemplate: ONBOARDED_NOT_TRANSACTING_BODY,
-    maxEmailsPerLead: 1,
-    followUpDays: 0,
+    maxEmailsPerLead: 3,
+    followUpDays: 2,
   },
   {
     key: 'whatsapp_sample',
@@ -489,7 +493,7 @@ export const DEFAULT_NUDGES: NudgeSeed[] = [
     whatsappTemplateName: t.templateName,
     whatsappLanguage: WHATSAPP_TEMPLATE_LANGUAGE_DEFAULT,
     whatsappParams: json({ body: [], button: ['mobile_digits'] }),
-    maxEmailsPerLead: 1,
-    followUpDays: 0,
+    maxEmailsPerLead: 3,
+    followUpDays: 2,
   })),
 ]

@@ -416,10 +416,19 @@ export async function callZohoMcpTool(name: string, args: Record<string, unknown
 /**
  * Which of the server's tools reads Leads.
  *
- * The tool list is only knowable after connecting, so this is a heuristic with an escape
- * hatch: set `ZOHO_MCP_LEADS_TOOL` to pin the exact name once you have seen the list.
- * Read-shaped names score up, write-shaped ones score down hard — a sync must never
- * accidentally pick a tool that creates or deletes CRM records.
+ * The tool list is only knowable after connecting, so this scores names against the shape
+ * that actually works, and it learned two lessons the hard way against the live server:
+ *
+ *  - Zoho's MCP tools are generated per API operation, and a *count* endpoint sits right
+ *    next to the search one (`ZohoCRM_getRecordCount` vs `ZohoCRM_searchRecords`). A count
+ *    tool returns a number, not records, so picking it makes a sync report 0 new leads
+ *    while looking perfectly successful. Count/aggregate names score catastrophically.
+ *  - Arguments are nested under `path_variables` / `query_params`, so a tool is only
+ *    usable if its schema can actually carry a filter. That is worth real points.
+ *
+ * Write-shaped names score down hard — a sync must never pick a tool that creates or
+ * deletes CRM records. Pin the exact name with `ZOHO_MCP_LEADS_TOOL` once you have seen
+ * the list.
  */
 export function pickLeadsTool(tools: McpTool[]): McpTool | null {
   const explicit = (process.env.ZOHO_MCP_LEADS_TOOL || '').trim()
@@ -427,12 +436,29 @@ export function pickLeadsTool(tools: McpTool[]): McpTool | null {
 
   const scored = tools
     .map((t) => {
+      const name = t.name.toLowerCase()
       const hay = `${t.name} ${t.title ?? ''} ${t.description ?? ''}`.toLowerCase()
       let score = 0
+
       if (/lead/.test(hay)) score += 4
-      if (/(search|query|list|fetch|get|read|records)/.test(hay)) score += 2
+      if (/(search|query)/.test(name)) score += 6
+      if (/records?\b/.test(name) || /records?\b/.test(hay)) score += 4
       if (/(coql|criteria|filter)/.test(hay)) score += 1
-      if (/(create|update|delete|insert|upsert|add_|_add|remove)/.test(hay)) score -= 8
+
+      // Not a record reader.
+      if (/(count|statistic|stats|aggregate|summary|report)/.test(name)) score -= 20
+      // Never a reader, and never safe for a sync to touch.
+      if (/(create|update|delete|insert|upsert|add_|_add|remove|clone|convert)/.test(name)) score -= 50
+
+      // Can it carry the filter at all? Nested or flat.
+      const props = t.inputSchema?.properties ?? {}
+      const nestedQuery = (props.query_params as { properties?: Record<string, unknown> } | undefined)?.properties ?? {}
+      const names = [...Object.keys(props), ...Object.keys(nestedQuery)]
+      if (names.some((n) => ['criteria', 'search_criteria', 'coql', 'query', 'filter'].includes(n))) score += 5
+      // A module selector means it is not hardwired to one module.
+      const nestedPath = (props.path_variables as { properties?: Record<string, unknown> } | undefined)?.properties ?? {}
+      if (names.includes('module') || Object.keys(nestedPath).includes('module')) score += 2
+
       return { tool: t, score }
     })
     .filter((s) => s.score > 0)
@@ -440,6 +466,167 @@ export function pickLeadsTool(tools: McpTool[]): McpTool | null {
 
   return scored[0]?.tool ?? null
 }
+
+/** The parameter names a tool exposes, flat or nested under path_variables / query_params. */
+function schemaParamNames(tool: McpTool): { path: string[]; query: string[]; flat: string[]; nested: boolean } {
+  const props = tool.inputSchema?.properties ?? {}
+  const path = Object.keys((props.path_variables as { properties?: Record<string, unknown> } | undefined)?.properties ?? {})
+  const query = Object.keys((props.query_params as { properties?: Record<string, unknown> } | undefined)?.properties ?? {})
+  const nested = path.length > 0 || query.length > 0
+  const flat = nested ? [] : Object.keys(props)
+  return { path, query, flat, nested }
+}
+
+/** The first name present from a preference list. */
+function firstOf(available: string[], ...wanted: string[]): string | undefined {
+  return wanted.find((w) => available.includes(w))
+}
+
+const CRITERIA_NAMES = ['criteria', 'search_criteria', 'coql', 'query', 'filter', 'search', 'q'] as const
+const MODULE_NAMES = ['module', 'module_api_name', 'moduleName', 'module_name'] as const
+const PAGE_SIZE_NAMES = ['per_page', 'pageSize', 'page_size', 'limit'] as const
+
+/**
+ * Arguments for a leads tool, built against its own published `inputSchema`.
+ *
+ * Throws when it cannot place the criteria anywhere. That is deliberate: returning empty
+ * arguments would make the tool read unfiltered data (or nothing), and the sync would
+ * report "0 new leads" as a success. Failing here lets the caller fall back to the REST
+ * API and say why.
+ *
+ * Set `ZOHO_MCP_LEADS_ARGS` to a JSON object to override this entirely; the literal
+ * `{{criteria}}` is substituted.
+ */
+export function buildLeadsToolArgs(
+  tool: McpTool,
+  criteria: string,
+  fields?: string
+): Record<string, unknown> {
+  const override = (process.env.ZOHO_MCP_LEADS_ARGS || '').trim()
+  if (override) {
+    try {
+      const parsed = JSON.parse(override) as Record<string, unknown>
+      return Object.fromEntries(Object.entries(parsed).map(([k, v]) => [k, v === '{{criteria}}' ? criteria : v]))
+    } catch {
+      throw new Error('ZOHO_MCP_LEADS_ARGS is not valid JSON.')
+    }
+  }
+
+  const { path, query, flat, nested } = schemaParamNames(tool)
+  if (!path.length && !query.length && !flat.length) {
+    // A tool with no declared parameters cannot be filtered. Only acceptable if it takes none.
+    return {}
+  }
+
+  if (nested) {
+    const args: Record<string, unknown> = {}
+
+    if (path.length) {
+      const moduleProp = firstOf(path, ...MODULE_NAMES)
+      if (!moduleProp) {
+        throw new Error(
+          `MCP tool "${tool.name}" needs path_variables (${path.join(', ')}) but none of them is a module selector.`
+        )
+      }
+      args.path_variables = { [moduleProp]: 'Leads' }
+    }
+
+    const criteriaProp = firstOf(query, ...CRITERIA_NAMES)
+    if (!criteriaProp) {
+      throw new Error(
+        `MCP tool "${tool.name}" exposes no criteria parameter (query_params: ${query.join(', ') || 'none'}), ` +
+          'so it cannot be filtered. Pin a searchable tool with ZOHO_MCP_LEADS_TOOL or ' +
+          'ZOHO_MCP_LEADS_ARGS.'
+      )
+    }
+
+    const q: Record<string, unknown> = { [criteriaProp]: criteria }
+    const fieldsProp = firstOf(query, 'fields')
+    if (fieldsProp && fields) q[fieldsProp] = fields
+    const perPageProp = firstOf(query, ...PAGE_SIZE_NAMES)
+    if (perPageProp) q[perPageProp] = 200
+    if (query.includes('page')) q.page = 1
+
+    args.query_params = q
+    return args
+  }
+
+  // Flat shape.
+  const criteriaProp = firstOf(flat, ...CRITERIA_NAMES)
+  if (!criteriaProp) {
+    throw new Error(
+      `MCP tool "${tool.name}" exposes no criteria parameter (${flat.join(', ')}), so it cannot be filtered. ` +
+        'Pin a searchable tool with ZOHO_MCP_LEADS_TOOL or ZOHO_MCP_LEADS_ARGS.'
+    )
+  }
+
+  const args: Record<string, unknown> = {}
+  const moduleProp = firstOf(flat, ...MODULE_NAMES)
+  if (moduleProp) args[moduleProp] = 'Leads'
+  args[criteriaProp] = criteria
+  const fieldsProp = firstOf(flat, 'fields')
+  if (fieldsProp && fields) args[fieldsProp] = fields
+  const perPageProp = firstOf(flat, ...PAGE_SIZE_NAMES)
+  if (perPageProp) args[perPageProp] = 200
+  if (flat.includes('page')) args.page = 1
+  return args
+}
+
+/** Move a paged call to the next page, in whichever shape the tool declared. */
+export function withPage(args: Record<string, unknown>, page: number): Record<string, unknown> {
+  if (args.query_params && typeof args.query_params === 'object') {
+    return { ...args, query_params: { ...(args.query_params as Record<string, unknown>), page } }
+  }
+  return { ...args, page }
+}
+
+/**
+ * Paging state from whatever envelope the tool returned.
+ *
+ * Zoho reports `info.more_records` / `info.next_page_token`, and the wrapper varies, so
+ * this looks for the first `info`-ish object rather than assuming a path.
+ */
+export function extractPagingInfo(payload: unknown): { moreRecords: boolean; page: number | null } {
+  const seen = new Set<unknown>()
+
+  function walk(node: unknown, depth: number): { moreRecords: boolean; page: number | null } | null {
+    if (depth > 6 || node == null || typeof node !== 'object') {
+      if (typeof node === 'string' && (node.trim().startsWith('{') || node.trim().startsWith('['))) {
+        try {
+          return walk(JSON.parse(node), depth + 1)
+        } catch {
+          return null
+        }
+      }
+      return null
+    }
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        const found = walk(item, depth + 1)
+        if (found) return found
+      }
+      return null
+    }
+    if (seen.has(node)) return null
+    seen.add(node)
+
+    const obj = node as Record<string, unknown>
+    if ('more_records' in obj) {
+      return {
+        moreRecords: Boolean(obj.more_records),
+        page: typeof obj.page === 'number' ? obj.page : null,
+      }
+    }
+    for (const value of Object.values(obj)) {
+      const found = walk(value, depth + 1)
+      if (found) return found
+    }
+    return null
+  }
+
+  return walk(payload, 0) ?? { moreRecords: false, page: null }
+}
+
 
 /**
  * Pull record objects out of whatever envelope a tool returned. Zoho MCP tools generally
@@ -487,50 +674,5 @@ export function extractRecords(payload: unknown): Record<string, unknown>[] {  c
   }
 
   return walk(payload, 0)
-}
-
-/**
- * Best-effort arguments for a leads tool whose schema we have not seen before this call.
- *
- * The tool list is discovered at runtime, so the parameter names are matched against the
- * published `inputSchema` rather than hardcoded. Anything the tool does not declare is
- * omitted, because sending an unexpected argument is itself a validation error.
- *
- * Set `ZOHO_MCP_LEADS_ARGS` to a JSON object to override this entirely — that is the
- * escape hatch if the server's schema differs from every guess here.
- */
-export function buildLeadsToolArgs(tool: McpTool, criteria: string): Record<string, unknown> {
-  const override = (process.env.ZOHO_MCP_LEADS_ARGS || '').trim()
-  if (override) {
-    try {
-      const parsed = JSON.parse(override) as Record<string, unknown>
-      // Allow the criteria to be injected into the override rather than duplicated in env.
-      return Object.fromEntries(
-        Object.entries(parsed).map(([k, v]) => [k, v === '{{criteria}}' ? criteria : v])
-      )
-    } catch {
-      throw new Error('ZOHO_MCP_LEADS_ARGS is not valid JSON.')
-    }
-  }
-
-  const props = Object.keys(tool.inputSchema?.properties ?? {})
-  const args: Record<string, unknown> = {}
-  if (!props.length) return args
-
-  const has = (...names: string[]) => names.find((n) => props.includes(n))
-
-  // A module selector, when the tool serves more than Leads.
-  const moduleProp = has('module', 'module_api_name', 'moduleName', 'module_name')
-  if (moduleProp) args[moduleProp] = 'Leads'
-
-  // The filter itself — the order reflects how Zoho's own tools usually name it.
-  const criteriaProp = has('criteria', 'search_criteria', 'filter', 'query', 'coql', 'search', 'q')
-  if (criteriaProp) args[criteriaProp] = criteria
-
-  // Paging, only if the schema asks for it. Zoho caps per_page at 200.
-  const pageSizeProp = has('per_page', 'pageSize', 'page_size', 'limit')
-  if (pageSizeProp) args[pageSizeProp] = 200
-
-  return args
 }
 

@@ -108,6 +108,18 @@ if (!isZohoMcpConfigured()) {
       }
     }
 
+    // Full JSON Schema for one tool — the arguments actually have to be built against this,
+    // and these servers nest them (path_variables / query_params) rather than flattening.
+    const schemaIdx = args.indexOf('--schema')
+    if (schemaIdx !== -1) {
+      const wanted = args[schemaIdx + 1]
+      const list = wanted ? conn.tools.filter((t) => t.name === wanted) : conn.tools
+      for (const t of list) {
+        console.log(`\n── ${t.name}`)
+        console.log(JSON.stringify(t.inputSchema ?? {}, null, 2))
+      }
+    }
+
     const callIdx = args.indexOf('--call')
     if (callIdx !== -1) {
       const tool = args[callIdx + 1]

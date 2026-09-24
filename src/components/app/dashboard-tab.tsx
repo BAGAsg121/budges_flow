@@ -6,6 +6,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { SchedulerStatusDto, StatsDto } from '@/lib/app-types'
+import { OnboardingMetrics } from '@/components/app/onboarding-metrics'
 
 /**
  * One headline number.
@@ -84,10 +85,13 @@ export function DashboardTab({ refreshKey }: { refreshKey: number }) {
 
   if (loading && !stats) {
     return (
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
-        {Array.from({ length: 5 }).map((_, i) => (
-          <Skeleton key={i} className="h-24" />
-        ))}
+      <div className="space-y-4">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+          {Array.from({ length: 5 }).map((_, i) => (
+            <Skeleton key={i} className="h-24" />
+          ))}
+        </div>
+        <Skeleton className="h-64" />
       </div>
     )
   }
@@ -109,6 +113,9 @@ export function DashboardTab({ refreshKey }: { refreshKey: number }) {
         <StatCard icon={Reply} label="Replied" value={stats.replied} sub="replies detected" accent="success" />
         <StatCard icon={TrendingUp} label="Nudges" value={stats.nudges} sub="configured flows" accent="primary" />
       </div>
+
+      {/* Per-nudge engagement for the two activation-fee families. */}
+      <OnboardingMetrics refreshKey={refreshKey} />
 
       <Card>
         <CardContent className="p-4 sm:p-6 space-y-3">

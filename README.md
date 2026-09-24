@@ -52,6 +52,7 @@ npm start                   # node .next/standalone/server.js  (PORT env, defaul
 | `npm run mcp:register` | Prove dynamic client registration against Zoho |
 | `npm run mcp:tools` | Connect and list every MCP tool (read-only) |
 | `npm run email:check` | Email transport config, or send a real test |
+| `npm run nudges:set-cap` | Set the per-lead message cap on the four activation-fee nudges (dry run; `--apply` to write) |
 | `npm run db:push` | Apply schema changes (safe) |
 | `npm run db:push:force` | Apply with `--accept-data-loss` (drops data) |
 | `npm run db:studio` | Prisma Studio |
@@ -65,7 +66,7 @@ A sidebar shell (a mobile drawer below `lg`, plus a swipeable tab strip) over fi
 
 | Tab | What it is for |
 | --- | --- |
-| **Dashboard** | Delivery, opens, replies and scheduler state |
+| **Dashboard** | Delivery, opens, replies and scheduler state, plus per-nudge engagement for the two activation-fee families |
 | **Leads** | EPS leads synced from Zoho CRM with status and KYC progress |
 | **Nudges** | Every flow, which template it uses, and whether it is running |
 | **Templates** | WhatsApp templates and their Meta approval state, plus the email copy |
@@ -84,6 +85,35 @@ which read as flat in light mode and harsh in dark.
 
 Both header sync buttons hit the same endpoint with a different window — see
 [Zoho CRM: MCP first, REST fallback](#zoho-crm-mcp-first-rest-fallback).
+
+### Activation-fee engagement
+
+The Dashboard carries a section for the two onboarding nudge families — **onboarded but not
+transacting** and **onboarded and transacting** — each of which exists twice, as an email nudge and
+as its WhatsApp twin. For every channel it shows **sent, failed, opened and replied**, the accepted
+percentage, the last-sent time, and (for WhatsApp) how many were dropped by Meta's cap.
+
+**"Opened" means a different thing per channel**, and the UI labels it that way: for email it is the
+tracking pixel, for WhatsApp it is Meta's `read` receipt. Both are stored on the same `opened`
+column, which is why one endpoint can report both.
+
+Below that, one history chart per family with a **Email / WhatsApp** toggle, plotting sent, opened
+and failed per day over a 7/14/30-day window. They are a toggle rather than six series on one axis
+because at 14 days the bars overlap into noise.
+
+The four nudges allow **3 messages per lead, spaced 2 days apart**. The spacing is not decoration:
+with `maxEmailsPerLead: 3` and `followUpDays: 0` the scheduler would fire all three on consecutive
+cycles — three messages in a few hours, which is both spam and an instant way to hit Meta's
+per-user marketing cap. Change it with:
+
+```bash
+npm run nudges:set-cap                      # dry run, shows a before/after per nudge
+npm run nudges:set-cap -- --apply --max 3 --follow-up-days 2
+```
+
+That script exists instead of `seed:nudges --force` because `--force` rewrites *every* field,
+including templates edited in the UI. It touches two columns on four rows, prints a diff, and never
+touches `enabled` — pausing and resuming stays the operator's call.
 
 ---
 
@@ -217,13 +247,28 @@ from Zoho do not rotate on use, so the pasted value keeps working.
 
 ### Which tool reads Leads
 
-The tool list is only knowable after connecting, so `pickLeadsTool()` scores names and descriptions —
-read-shaped names up, write-shaped names down hard, because a sync must never pick a tool that
-creates or deletes CRM records. Pin it explicitly once you have seen the list:
+The tool list is only knowable after connecting, so `pickLeadsTool()` scores names and descriptions.
+Two things it learned the hard way against the live server:
+
+- Zoho generates one MCP tool per API operation, and the **count** endpoint sits right beside the
+  search one (`ZohoCRM_getRecordCount` vs `ZohoCRM_searchRecords`). A count tool returns a number,
+  not records, so picking it makes a sync report "0 new leads" while looking perfectly successful.
+  Count/aggregate names now score catastrophically; search/records names score up.
+- Arguments are **nested** under `path_variables` / `query_params`, so a tool is only usable if its
+  schema can actually carry a filter — which is worth real points. `buildLeadsToolArgs()` builds
+  against the tool's own published `inputSchema` and **throws** when it cannot place the criteria,
+  rather than sending empty arguments and reporting a successful sync of nothing.
+
+Write-shaped names score down hard — a sync must never pick a tool that creates or deletes CRM
+records. Pin the exact name with `ZOHO_MCP_LEADS_TOOL` once you have seen the list:
 
 ```bash
-npm run mcp:tools        # prints every tool, and which one it would use
+npm run mcp:tools                    # every tool, and which one it would use
+npm run mcp:check -- --schema ZohoCRM_searchRecords   # the exact JSON Schema
 ```
+
+Paging is handled: Zoho caps a search page at 200 records and reports `info.more_records`, so the
+sync loops (bounded at 25 pages) and reports `truncated` if it ever hits the guard.
 
 ```
 ZOHO_MCP_LEADS_TOOL=…    # exact tool name
@@ -538,6 +583,7 @@ kind of change.
 | `GET /api/zoho/mcp/connect` | Basic | Start the one-time Zoho MCP consent (redirects to Zoho) |
 | `GET /api/zoho/mcp/callback` | Basic | Consumes the consent code, prints the env block |
 | `GET /api/status` | Basic | Which integrations are wired up (booleans only) |
+| `GET /api/stats/onboarding` | Basic | Per-family engagement totals + daily series (`?days=14`) |
 | `GET/POST /api/whatsapp/test` | Basic | WhatsApp config check / one real test send |
 | `GET/POST /api/email/test` | Basic | Email config check / one real test send (`{ "to": "…" }`, defaults to the from-address) |
 | `GET /api/leads`, `GET /api/logs`, `GET /api/stats` | Basic | Data for the UI |

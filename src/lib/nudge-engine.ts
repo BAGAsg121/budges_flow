@@ -6,8 +6,17 @@
  */
 import { randomUUID } from 'crypto'
 import { db } from '@/lib/db'
-import { searchAllLeads, mapZohoLead } from '@/lib/zoho'
-import { callZohoMcpTool, buildLeadsToolArgs, extractRecords, isZohoMcpConfigured, listZohoMcpTools, pickLeadsTool } from '@/lib/zoho-mcp'
+import { searchAllLeads, mapZohoLead, LEAD_FIELDS } from '@/lib/zoho'
+import {
+  callZohoMcpTool,
+  buildLeadsToolArgs,
+  extractRecords,
+  extractPagingInfo,
+  isZohoMcpConfigured,
+  listZohoMcpTools,
+  pickLeadsTool,
+  withPage,
+} from '@/lib/zoho-mcp'
 import { sendEmail, isMailerConfigured } from '@/lib/mailer'
 import { sendWhatsAppTemplate, sendWhatsAppText, isWhatsAppConfigured, normalizePhone, getDefaultTemplateLanguage } from '@/lib/whatsapp'
 import { renderTemplate, injectTrackingPixel, htmlToText } from '@/lib/template'
@@ -151,15 +160,17 @@ export interface McpSyncResult {
   tool: string
   args: Record<string, unknown>
   recordsRead: number
+  pages: number
+  /** True when the last page still had `more_records`, so the result is partial. */
+  truncated: boolean
 }
 
 /**
  * The same upsert, but read through the Zoho CRM MCP server instead of the REST API.
  *
- * There is no pagination loop here on purpose: the tool decides how much it returns, and
- * a tool that silently caps its page size would make a naive "fetch page 2" loop wrong.
- * Whatever comes back is upserted, and the caller is told how many records arrived so a
- * suspiciously round number (200, 500) can be spotted as a cap rather than a total.
+ * Paginates: Zoho caps a search page at 200 records and reports `info.more_records`, so a
+ * single call would silently return only the first 200 of ~330 leads. The loop is bounded
+ * and reports `truncated` when the guard is hit rather than pretending it finished.
  */
 export async function syncLeadsViaMcp(criteria: string): Promise<McpSyncResult> {
   const tools = await listZohoMcpTools()
@@ -172,27 +183,44 @@ export async function syncLeadsViaMcp(criteria: string): Promise<McpSyncResult> 
     )
   }
 
-  const args = buildLeadsToolArgs(tool, criteria)
-  const result = await callZohoMcpTool(tool.name, args)
-  if (!result.ok) {
-    throw new Error(`MCP tool "${tool.name}" failed: ${result.error || result.text || 'no detail'}`)
-  }
+  const baseArgs = buildLeadsToolArgs(tool, criteria, LEAD_FIELDS)
 
-  const records = extractRecords(result.json ?? result.text)
   let count = 0
-  for (const record of records) {
-    const data = mapZohoLead(record as Parameters<typeof mapZohoLead>[0])
-    if (!data.zohoId) continue // a record without an id cannot be upserted safely
-    await db.lead.upsert({
-      where: { zohoId: data.zohoId },
-      create: data,
-      update: { ...data },
-    })
-    count++
+  let recordsRead = 0
+  let pages = 0
+  let truncated = false
+
+  for (let page = 1; page <= MAX_MCP_PAGES; page++) {
+    const result = await callZohoMcpTool(tool.name, page === 1 ? baseArgs : withPage(baseArgs, page))
+    if (!result.ok) {
+      throw new Error(`MCP tool "${tool.name}" failed: ${result.error || result.text || 'no detail'}`)
+    }
+
+    const records = extractRecords(result.json ?? result.text)
+    recordsRead += records.length
+    pages = page
+
+    for (const record of records) {
+      const data = mapZohoLead(record as Parameters<typeof mapZohoLead>[0])
+      if (!data.zohoId) continue // a record without an id cannot be upserted safely
+      await db.lead.upsert({
+        where: { zohoId: data.zohoId },
+        create: data,
+        update: { ...data },
+      })
+      count++
+    }
+
+    const paging = extractPagingInfo(result.json ?? result.text)
+    if (!paging.moreRecords || records.length === 0) break
+    if (page === MAX_MCP_PAGES) truncated = true
   }
 
-  return { count, tool: tool.name, args, recordsRead: records.length }
+  return { count, tool: tool.name, args: baseArgs, recordsRead, pages, truncated }
 }
+
+/** ~25 pages × 200 = 5000 leads, far beyond any window this app syncs. */
+const MAX_MCP_PAGES = 25
 
 export interface SyncOutcome {
   synced: number
@@ -201,6 +229,8 @@ export interface SyncOutcome {
   /** Set when MCP was preferred but the REST API had to cover for it. */
   fellBack?: string
   tool?: string
+  pages?: number
+  truncated?: boolean
 }
 
 /**
@@ -217,7 +247,13 @@ export async function syncLeads(criteria: string, opts: { via?: 'mcp' | 'api' | 
   if (via !== 'api' && isZohoMcpConfigured()) {
     try {
       const result = await syncLeadsViaMcp(criteria)
-      return { synced: result.count, via: 'mcp', tool: result.tool }
+      return {
+        synced: result.count,
+        via: 'mcp',
+        tool: result.tool,
+        pages: result.pages,
+        truncated: result.truncated,
+      }
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err)
       if (via === 'mcp') throw err

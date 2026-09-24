@@ -12,12 +12,17 @@ import { extractInboundText, appendInbound, INBOUND_KEEP } from '../src/lib/what
 import { explainWhatsAppError, isDeliveryCapError, isPermanentDeliveryFailure } from '../src/lib/whatsapp-errors.ts'
 import { WA_EMAIL_TWIN, WA_UTILITY_SAFE_COPY } from '../src/lib/nudge-defaults.ts'
 import { buildTemplatePayload, validateTemplateInput, countTemplateVars } from '../src/lib/whatsapp-templates.ts'
+import { pickLeadsTool, buildLeadsToolArgs, withPage, extractPagingInfo, extractRecords } from '../src/lib/zoho-mcp.ts'
 
 let failures = 0
+/** --quiet prints only failures and the summary; useful when iterating in a tight loop. */
+const QUIET = process.argv.includes('--quiet')
 function check(name, actual, expected) {
   const ok = actual === expected
   if (!ok) failures++
-  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok ? '' : `\n        expected: ${JSON.stringify(expected)}\n        actual:   ${JSON.stringify(actual)}`}`)
+  if (!ok || !QUIET) {
+    console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok ? '' : `\n        expected: ${JSON.stringify(expected)}\n        actual:   ${JSON.stringify(actual)}`}`)
+  }
 }
 function checkTrue(name, cond) {
   check(name, Boolean(cond), true)
@@ -298,6 +303,66 @@ check('utility-safe copy for transacting', Boolean(WA_UTILITY_SAFE_COPY.onboarde
 check('utility-safe copy for not-transacting', Boolean(WA_UTILITY_SAFE_COPY.onboarded_not_transacting_pay), true)
 checkTrue('utility-safe copy drops the discount wording', !JSON.stringify(WA_UTILITY_SAFE_COPY).toLowerCase().includes('discount'))
 checkTrue('utility-safe copy keeps a payment CTA', WA_UTILITY_SAFE_COPY.onboarded_transacting_pay.buttonText.length > 0)
+
+// --- Zoho MCP tool selection and argument building ---------------------------
+// The real tool list from the live server. The bug this guards against: every tool name
+// contains "get"/"record", so a naive scorer picked ZohoCRM_getRecordCount — which returns
+// a NUMBER, not records, so the sync reported "0 new leads" as a success.
+const MCP_TOOLS = [
+  { name: 'ZohoCRM_getModuleByApiName' },
+  { name: 'ZohoCRM_getRecordCount', inputSchema: { properties: { path_variables: { properties: { module: {} } }, query_params: { properties: { criteria: {} } } } } },
+  { name: 'ZohoCRM_getFields' },
+  {
+    name: 'ZohoCRM_getRecords',
+    inputSchema: { properties: { path_variables: { properties: { module: {} } }, query_params: { properties: { criteria: {}, fields: {}, per_page: {}, page: {} } } } },
+  },
+  { name: 'ZohoCRM_getOrganization' },
+  { name: 'ZohoCRM_getModules' },
+  { name: 'ZohoCRM_getRecord' },
+  {
+    name: 'ZohoCRM_searchRecords',
+    inputSchema: { properties: { path_variables: { properties: { module: {} } }, query_params: { properties: { criteria: {}, fields: {}, per_page: {}, page: {} } } } },
+  },
+  { name: 'ZohoCRM_getUsers' },
+  { name: 'ZohoCRM_getRelatedRecords' },
+  { name: 'ZohoCRM_createRecord', inputSchema: { properties: { path_variables: { properties: { module: {} } }, query_params: { properties: { criteria: {} } } } } },
+  { name: 'ZohoCRM_deleteRecord', inputSchema: { properties: { path_variables: { properties: { module: {} } }, query_params: { properties: { criteria: {} } } } } },
+]
+
+check('picks the search tool, not the count tool', pickLeadsTool(MCP_TOOLS)?.name, 'ZohoCRM_searchRecords')
+
+const searchTool = MCP_TOOLS.find((t) => t.name === 'ZohoCRM_searchRecords')
+const builtArgs = buildLeadsToolArgs(searchTool, '((Business_vertical:equals:EPS))', 'id,Full_Name')
+check('nested args: module goes in path_variables', builtArgs.path_variables.module, 'Leads')
+check('nested args: criteria goes in query_params', builtArgs.query_params.criteria, '((Business_vertical:equals:EPS))')
+check('nested args: fields are passed through', builtArgs.query_params.fields, 'id,Full_Name')
+check("nested args: per_page is Zoho's maximum", builtArgs.query_params.per_page, 200)
+check('nested args: starts on page 1', builtArgs.query_params.page, 1)
+
+// A tool that cannot carry a filter must throw so the caller falls back to the REST API,
+// rather than sending empty args and reporting "0 new leads" as a success.
+let threw = ''
+try {
+  buildLeadsToolArgs({ name: 'ZohoCRM_listSomething', inputSchema: { properties: { limit: {} } } }, 'x')
+} catch (err) {
+  threw = err instanceof Error ? err.message : String(err)
+}
+checkTrue('a tool with no criteria parameter is refused', threw.includes('no criteria parameter'))
+
+const nextPage = withPage(builtArgs, 3)
+check('paging goes inside query_params for nested schemas', nextPage.query_params.page, 3)
+check('paging leaves the criteria untouched', nextPage.query_params.criteria, builtArgs.query_params.criteria)
+check('paging builds a flat page for flat schemas', withPage({ criteria: 'x' }, 2).page, 2)
+
+check('paging info read from a nested envelope', extractPagingInfo({ data: [], info: { more_records: true, page: 2 } }).moreRecords, true)
+check('paging info is false when absent', extractPagingInfo({ data: [] }).moreRecords, false)
+check(
+  "records are read from Zoho's data envelope",
+  extractRecords({ data: [{ id: '1', Created_Time: '2026-09-24T01:00:00+05:30' }] }).length,
+  1
+)
+check('records survive a JSON-string envelope', extractRecords(JSON.stringify({ data: [{ id: '2', Email: 'a@b.c' }] })).length, 1)
+check('a count response yields no records', extractRecords({ count: 42 }).length, 0)
 
 console.log(failures === 0 ? '\nAll checks passed.' : `\n${failures} check(s) FAILED.`)
 process.exit(failures === 0 ? 0 : 1)
