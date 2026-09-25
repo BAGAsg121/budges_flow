@@ -77,3 +77,97 @@ export function buildSheetVars(
 
   return vars
 }
+
+/* ───────────────────── deciding who a sheet run sends to ───────────────────── */
+
+export interface SheetPlanOptions {
+  isWhatsApp: boolean
+  /** Injected so this module stays free of the WhatsApp/api dependencies. */
+  normalisePhone: (raw: string) => string | null
+}
+
+export interface PlannedSend {
+  /** Position in the sheet, 1-based, for reporting. */
+  rowNumber: number
+  row: SheetRow
+  email: string
+  mobile: string
+  /** The address the send is keyed on: a normalised phone for WhatsApp, else the email. */
+  address: string
+}
+
+export interface PlannedSkip {
+  rowNumber: number
+  lead: string
+  email: string | null
+  reason: 'no_valid_phone' | 'no_email_column' | 'duplicate_in_sheet'
+  detail?: string
+}
+
+export interface SheetPlan {
+  toSend: PlannedSend[]
+  skipped: PlannedSkip[]
+}
+
+/**
+ * Decide which sheet rows to send to — **the sheet is the source of truth**.
+ *
+ * History is deliberately NOT consulted. An earlier version skipped any address with a previous
+ * successful send on the same nudge, so re-uploading a corrected sheet silently delivered nothing
+ * and the operator saw "skipped · duplicate" for people who never received the message.
+ *
+ * The only de-duplication is within this run: an address repeated in the sheet is collapsed to a
+ * single send. Running the same sheet twice therefore sends twice — intended, and why the
+ * Send-from-Sheet button is not idempotent.
+ *
+ * Pure and synchronous, so the whole policy is unit-testable without a database or an API call.
+ */
+export function planSheetSends(rows: SheetRow[], opts: SheetPlanOptions): SheetPlan {
+  const toSend: PlannedSend[] = []
+  const skipped: PlannedSkip[] = []
+  const seen = new Set<string>()
+
+  rows.forEach((row, index) => {
+    const rowNumber = index + 1
+    const email = pickSheetEmail(row)
+    const mobile = pickSheetMobile(row)
+    const toPhone = opts.isWhatsApp ? opts.normalisePhone(mobile) : null
+
+    if (opts.isWhatsApp && !toPhone) {
+      skipped.push({
+        rowNumber,
+        lead: email || JSON.stringify(row).slice(0, 60),
+        email: email || null,
+        reason: 'no_valid_phone',
+        detail: 'WhatsApp sheet-run needs a mobile column',
+      })
+      return
+    }
+    if (!opts.isWhatsApp && !email) {
+      skipped.push({
+        rowNumber,
+        lead: JSON.stringify(row).slice(0, 60),
+        email: null,
+        reason: 'no_email_column',
+      })
+      return
+    }
+
+    const address = (opts.isWhatsApp ? (toPhone as string) : email).toLowerCase()
+    if (seen.has(address)) {
+      skipped.push({
+        rowNumber,
+        lead: email || mobile,
+        email: email || null,
+        reason: 'duplicate_in_sheet',
+        detail: 'this address appears more than once in the sheet — sent once',
+      })
+      return
+    }
+    seen.add(address)
+
+    toSend.push({ rowNumber, row, email, mobile, address })
+  })
+
+  return { toSend, skipped }
+}

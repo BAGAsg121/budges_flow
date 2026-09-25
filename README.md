@@ -113,12 +113,36 @@ parameter-count mismatch. `whatsappParams` is therefore `{ "body": [] }` for it 
 The whitelisting notice also has **no email twin**, so it has no fallback — the send is WhatsApp or
 nothing, and a failure appears in the Failures tab for a manual retry.
 
+#### Sheet nudges: the sheet decides who gets messaged
+
+**Every row is sent.** History is never consulted, so re-uploading a sheet really does re-send —
+including to people this nudge has already contacted. `maxEmailsPerLead` and `followUpDays` do not
+apply: they are read only by `decideSend`, which runs on the lead-driven paths (`runNudge`,
+`runMysqlNudge`, `previewNudge`). The sheet-run route never calls it.
+
+The **only** de-duplication is within a single run: an address repeated in the sheet is collapsed to
+one send and reported as `duplicate_in_sheet`. The address is normalised first, so
+`+91 98765 43210`, `09876543210` and `919876543210` are recognised as the same number.
+
+Two consequences worth knowing:
+
+- **Send-from-Sheet is not idempotent.** Running the same sheet twice sends twice. There is no
+  undo.
+- The email fallback (used when Meta drops a WhatsApp send) keeps its own "already emailed this
+  person" guard, so a repeated failure does not accumulate duplicate emails. It is the one place a
+  past send is still consulted.
+
+This was previously "one message per recipient, ever", which meant re-uploading a corrected sheet
+silently delivered nothing and reported `skipped · duplicate` for people who had never received the
+message. `planSheetSends()` in `src/lib/sheet-vars.ts` now expresses the policy as a pure function
+that takes **no history argument at all**, which makes "it will not skip someone we messaged before"
+structural rather than a promise — and unit-testable without a database or an API call.
+
 #### Sheet nudges have no per-lead message cap
 
 `maxEmailsPerLead` and `followUpDays` are read **only** by `decideSend`, which runs on the
 lead-driven paths (`runNudge`, `runMysqlNudge`, `previewNudge`). The sheet-run route never calls it:
-it applies its own rule instead — **one message per recipient, skipping anyone with an earlier
-successful send on the same nudge**.
+it applies its own rule instead — the sheet decides who gets messaged (see above).
 
 So a cap on a sheet nudge is a control that does nothing. That was true even while those nudges were
 set to "3 messages, spaced 2 days": nothing read it, and the sends were not spaced. Guarded now by

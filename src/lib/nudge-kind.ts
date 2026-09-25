@@ -39,12 +39,13 @@ export function isManualSheetNudge(n: NudgeLike): boolean {
  * Whether `maxEmailsPerLead` / `followUpDays` have any effect on this nudge.
  *
  * They do NOT for sheet nudges. Those are sent by the sheet-run route, which never calls
- * `decideSend`; it applies its own rule instead — one message per recipient, ever, skipping
- * anyone with an earlier successful send to the same address on the same nudge.
+ * `decideSend`: **the sheet decides who gets messaged.** Every row is sent, history is never
+ * consulted, and the only de-duplication is within a single run (a repeated address is collapsed
+ * to one send).
  *
  * This was assumed to apply for a while and it silently did not: the caps were "raised to 3,
- * spaced 2 days" on four sheet nudges and nothing changed, because nothing read them. Hence
- * this function, so the UI can stop offering a control that does nothing.
+ * spaced 2 days" on four sheet nudges and nothing changed, because nothing read them. Hence this
+ * function, so the UI can stop offering a control that does nothing.
  */
 export function capAppliesTo(n: NudgeLike): boolean {
   return nudgeSourceOf(n) !== 'sheet'
@@ -52,4 +53,10 @@ export function capAppliesTo(n: NudgeLike): boolean {
 
 /** The rule that actually governs a sheet nudge, for display. */
 export const SHEET_DEDUP_RULE =
-  'Each recipient is messaged once — anyone with an earlier successful send on this nudge is skipped.'
+  'Every row in the sheet is sent, even to someone this nudge has messaged before. ' +
+  'The only de-duplication is within one run: a repeated number or email is collapsed to a single send.'
+
+/** Does this nudge consult past sends before sending again? False for sheet nudges. */
+export function skipsAlreadyMessaged(n: NudgeLike): boolean {
+  return nudgeSourceOf(n) !== 'sheet'
+}

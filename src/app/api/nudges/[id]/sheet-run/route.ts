@@ -1,10 +1,19 @@
 /**
  * POST /api/nudges/{id}/sheet-run
  *
- * Reads a publicly-shared Google Sheet (via CSV export), renders the nudge's
- * email template for each row, and sends via SMTP.  Lead rows are NOT upserted
- * into the Lead table — MessageLog rows are created with leadId=null and
- * sheetRowRef="<csvUrl>|<email>" for dedup & audit.
+ * Reads a publicly-shared Google Sheet (via CSV export), renders the nudge's template for each
+ * row, and sends it (email, or a WhatsApp template). Lead rows are NOT upserted into the Lead
+ * table — MessageLog rows are created with leadId=null and sheetRowRef="<csvUrl>|<address>".
+ *
+ * SENDING POLICY — the sheet decides who gets messaged:
+ *   • Every row is sent. History is NEVER consulted, so re-uploading a sheet really does re-send,
+ *     including to people this nudge has contacted before.
+ *   • `maxEmailsPerLead` / `followUpDays` do not apply (see nudge-kind.ts: sheet nudges are not
+ *     lead-driven, and the engine's cap logic is never reached from here).
+ *   • The only de-duplication is WITHIN a single run: an address repeated in the sheet is
+ *     collapsed to one send, reported as `duplicate_in_sheet`.
+ *   Because nothing consults history, running the same sheet twice sends twice. That is intended
+ *   — but it does mean the Send-from-Sheet button is not idempotent.
  *
  * Body (JSON):
  *   { "sheetUrl": "https://docs.google.com/spreadsheets/d/…", "gid": "0" }
@@ -21,7 +30,7 @@ import { isDeliveryCapError, isPermanentDeliveryFailure } from '@/lib/whatsapp-e
 import { buildWhatsAppParams } from '@/lib/whatsapp-params'
 import { getBaseUrl } from '@/lib/base-url'
 import { parseSheetCsv, toSheetCsvUrl } from '@/lib/sheet-parser'
-import { buildSheetVars, pickSheetEmail, pickSheetMobile } from '@/lib/sheet-vars'
+import { buildSheetVars, planSheetSends } from '@/lib/sheet-vars'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 300
@@ -124,39 +133,19 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       }
     }
 
-    // 4. For each row — render, deduplicate, send
-    for (const row of rows) {
-      // Column names vary between sheets, so the pickers live in one place (sheet-vars.ts).
-      const email = pickSheetEmail(row)
+    // 4. Decide the recipients, then send.
+    //
+    // The plan comes from planSheetSends(), which never consults history: every row is sent even
+    // to someone this nudge has messaged before, and the only de-duplication is within this
+    // upload (a repeated address is collapsed to one send).
+    const plan = planSheetSends(rows, { isWhatsApp, normalisePhone: normalizePhone })
+    for (const s of plan.skipped) {
+      skipped.push({ lead: s.lead, email: s.email, reason: s.reason, detail: s.detail })
+    }
 
-      // `mobile` is needed by WhatsApp, and drives the link in the onboarding nudges.
-      const mobile = pickSheetMobile(row)
-      const toPhone = isWhatsApp ? normalizePhone(mobile) : null
-
-      if (isWhatsApp && !toPhone) {
-        skipped.push({
-          lead: email || JSON.stringify(row).slice(0, 60),
-          email: email || null,
-          reason: 'no_valid_phone',
-          detail: 'WhatsApp sheet-run needs a mobile column',
-        })
-        continue
-      }
-      if (!isWhatsApp && !email) {
-        skipped.push({ lead: JSON.stringify(row).slice(0, 60), email: null, reason: 'no_email_column' })
-        continue
-      }
-
-      // Dedup: one successful send per recipient per nudge, keyed on the channel's address.
-      const existing = await db.messageLog.findFirst({
-        where: isWhatsApp
-          ? { nudgeId: nudge.id, toPhone: toPhone as string, sentOk: true }
-          : { nudgeId: nudge.id, toEmail: email, sentOk: true },
-      })
-      if (existing) {
-        skipped.push({ lead: email || mobile, email: email || null, reason: 'duplicate', detail: 'already sent successfully' })
-        continue
-      }
+    for (const planned of plan.toSend) {
+      const { row, email, mobile } = planned
+      const toPhone = isWhatsApp ? planned.address : null
 
       // Build template vars from row columns + synthetic fields. Shared with the retry path
       // (src/lib/sheet-vars.ts) so a retry cannot render a subtly different message.

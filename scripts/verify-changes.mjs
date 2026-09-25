@@ -15,7 +15,7 @@ import { buildTemplatePayload, validateTemplateInput, countTemplateVars } from '
 import { pickLeadsTool, buildLeadsToolArgs, withPage, extractPagingInfo, extractRecords } from '../src/lib/zoho-mcp.ts'
 import { explainMailError, isRetryableMailError } from '../src/lib/mail-errors.ts'
 import { isRetryableWhatsAppError } from '../src/lib/whatsapp-errors.ts'
-import { buildSheetVars, normaliseMobileDigits, pickSheetEmail, pickSheetMobile } from '../src/lib/sheet-vars.ts'
+import { buildSheetVars, normaliseMobileDigits, pickSheetEmail, pickSheetMobile, planSheetSends } from '../src/lib/sheet-vars.ts'
 import { buildDailySeries, seriesIsEmpty, istDayKey } from '../src/lib/engagement-stats.ts'
 import { nudgeSourceOf, capAppliesTo, isManualSheetNudge } from '../src/lib/nudge-kind.ts'
 import { buildXlsx, buildZip, crc32, columnLetter, sanitiseSheetName } from '../src/lib/xlsx.ts'
@@ -803,6 +803,64 @@ const noName = buildSheetVars({ email: 'zed@x.com' }, { email: 'zed@x.com', mobi
 check('sheet vars: first_name falls back to the email local part', noName.first_name, 'zed')
 check('column picker accepts email_address', pickSheetEmail({ email_address: 'x@y.z' }), 'x@y.z')
 check('column picker accepts whatsapp for mobile', pickSheetMobile({ whatsapp: '999' }), '999')
+
+// --- who a sheet run sends to -------------------------------------------------
+// THE POLICY: the sheet is the source of truth. Every row is sent, history is never consulted,
+// and the only de-duplication is WITHIN the run. planSheetSends() takes no history argument at
+// all, which is what makes "it will not skip someone we messaged before" structural rather than
+// a promise.
+const fakeNormalise = (raw) => {
+  const d = String(raw).replace(/\D/g, '').replace(/^0+/, '').replace(/^91(?=\d{10}$)/, '')
+  return d.length === 10 ? d : null
+}
+
+const waRows = [
+  { mobile: '9876543210', email: 'a@x.com' },
+  { mobile: '9876543211', email: 'b@x.com' },
+  { mobile: '9876543210', email: 'a@x.com' }, // repeated in the sheet
+  { mobile: '', email: 'nonumber@x.com' }, // no usable mobile
+]
+const waPlan = planSheetSends(waRows, { isWhatsApp: true, normalisePhone: fakeNormalise })
+
+check('every distinct phone in the sheet is sent', waPlan.toSend.length, 2)
+check('the repeated phone is collapsed to one send', waPlan.toSend.filter((s) => s.address === '9876543210').length, 1)
+check('the repeat is reported, not silently dropped', waPlan.skipped.filter((s) => s.reason === 'duplicate_in_sheet').length, 1)
+check('a row with no usable phone is skipped', waPlan.skipped.filter((s) => s.reason === 'no_valid_phone').length, 1)
+check('sends carry the sheet row number', waPlan.toSend[0].rowNumber, 1)
+check('the FIRST occurrence is the one sent', waPlan.toSend[0].row.email, 'a@x.com')
+check('the repeat reports its own row number', waPlan.skipped.find((s) => s.reason === 'duplicate_in_sheet').rowNumber, 3)
+check('every row is accounted for', waPlan.toSend.length + waPlan.skipped.length, waRows.length)
+
+// The same 3 addresses in two separate runs are both sent: nothing is remembered between runs.
+const runAgain = planSheetSends(waRows, { isWhatsApp: true, normalisePhone: fakeNormalise })
+check('re-running the identical sheet sends again', runAgain.toSend.length, 2)
+
+// Phone normalisation is the dedup key, so the same number written differently is one send.
+const messy = [
+  { mobile: '+91 98765 43210' },
+  { mobile: '09876543210' },
+  { mobile: '919876543210' },
+]
+const messyPlan = planSheetSends(messy, { isWhatsApp: true, normalisePhone: fakeNormalise })
+check('the same number written three ways is one send', messyPlan.toSend.length, 1)
+check('and two collapses are reported', messyPlan.skipped.filter((s) => s.reason === 'duplicate_in_sheet').length, 2)
+
+// Email side: dedup key is the address, case-insensitively.
+const emailRows = [
+  { email: 'A@X.com' },
+  { email: 'a@x.com' }, // same address, different case
+  { email: '' }, // no address at all
+]
+const emailPlan = planSheetSends(emailRows, { isWhatsApp: false, normalisePhone: fakeNormalise })
+check('email: one send for the same address in two cases', emailPlan.toSend.length, 1)
+check('email: a row with no email column is skipped', emailPlan.skipped.filter((s) => s.reason === 'no_email_column').length, 1)
+check('email: the case-duplicate is reported', emailPlan.skipped.filter((s) => s.reason === 'duplicate_in_sheet').length, 1)
+
+// A sheet where every row is distinct sends to every row — the case the user hit, where history
+// used to make the run silently deliver nothing.
+const manyRows = Array.from({ length: 48 }, (_, i) => ({ mobile: `987654${String(3200 + i)}` }))
+check('48 distinct rows produce 48 sends', planSheetSends(manyRows, { isWhatsApp: true, normalisePhone: fakeNormalise }).toSend.length, 48)
+check('an empty sheet plans nothing', planSheetSends([], { isWhatsApp: true, normalisePhone: fakeNormalise }).toSend.length, 0)
 
 
 // --- the per-lead cap only governs lead-driven nudges -------------------------

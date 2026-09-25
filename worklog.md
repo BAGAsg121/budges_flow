@@ -680,3 +680,25 @@ Stage Summary:
 - No sheet nudge offers, stores or displays a per-lead message cap any more; the UI states the rule that actually applies.
 - Corrected a claim I made two tasks ago: the 3-message cap on those sheet nudges never took effect, and neither did the 2-day spacing.
 - Lead-driven nudges (4 Zoho + 6 MySQL) are unaffected and still honour their caps.
+
+---
+
+Task ID: 30
+Agent: Main agent (DeepSeek Harness)
+Task: The manual sheet send still would not message the user — remove the history-based dedup.
+
+Work Log:
+- ROOT CAUSE, and it was mine: the sheet-run route consulted MessageLog before sending and skipped any address with an earlier SUCCESSFUL send on the same nudge. The user re-ran a sheet for people already in the logs, so every row was reported "skipped · duplicate" and nothing was delivered. Their own test was of exactly this case.
+- POLICY CHANGED to match what they asked for: the sheet is the source of truth. Every row is sent, history is never consulted, no per-lead cap. The only de-duplication is WITHIN one run — a repeated address is collapsed to one send and reported as `duplicate_in_sheet` (a new reason, with a badge in the UI; the old `duplicate` reason is still rendered for historical rows).
+- EXTRACTED THE DECISION so it could be PROVEN rather than asserted: `planSheetSends(rows, {isWhatsApp, normalisePhone})` in src/lib/sheet-vars.ts is a pure, synchronous function that returns {toSend, skipped}. It takes NO history argument at all — "it will not skip someone we messaged before" is now structural, not a promise, and it is unit-testable without a database or an API call. `normalisePhone` is injected so sheet-vars.ts stays free of the WhatsApp/DB dependencies and remains CLI-importable.
+- Because the normalised phone is the dedup key, `+91 98765 43210` / `09876543210` / `919876543210` collapse to one send — verified. Email dedup is case-insensitive.
+- 20 new assertions encode the whole policy: 48 distinct rows produce 48 sends; a repeated row is collapsed AND reported; a sheet re-run sends again (nothing is remembered between runs); every row is accounted for as either a send or a skip; the FIRST occurrence is the one sent; a row with no usable phone/email is skipped with the right reason.
+- Deliberately NOT changed, and flagged to the user rather than decided silently: the email FALLBACK (used when Meta drops a WhatsApp send) keeps its "already emailed this person" guard. It is the one place a past send is still consulted, and it exists to stop duplicate emails accumulating across repeated WhatsApp failures. Offered to remove it for consistency if they want.
+- Also documented the consequence plainly: Send-from-Sheet is NOT idempotent — running the same sheet twice sends twice, and there is no undo.
+- verify now 431 assertions. tsc clean, eslint clean.
+- NOT VERIFIED end to end by me: proving it truly sends would mean messaging real customers, which is the user's call to make, not mine to spend. The recipient-planning logic is fully covered; the send itself is unchanged code.
+
+Stage Summary:
+- A manual sheet run now messages every row in the sheet, regardless of what is already in the logs, with no per-lead cap.
+- Duplicates WITHIN a sheet are still collapsed to one send, keyed on a normalised phone or a case-insensitive email.
+- Running the same sheet twice sends twice — intended, and documented.

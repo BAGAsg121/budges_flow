@@ -75,6 +75,11 @@ function reasonBadge(reason: string, detail?: string) {
       return <Badge variant="outline">deferred{detail ? ` · ${detail}` : ''}</Badge>
     case 'duplicate_contact':
       return <Badge variant="outline">duplicate email{detail ? ` · ${detail}` : ''}</Badge>
+    case 'duplicate_in_sheet':
+      return <Badge variant="outline">repeated in sheet{detail ? ` · ${detail}` : ''}</Badge>
+    case 'duplicate':
+      // Legacy rows written before the sheet policy changed to "send every row".
+      return <Badge variant="outline">skipped as duplicate{detail ? ` · ${detail}` : ''}</Badge>
     case 'delivery_cap_backoff':
       return <Badge className="bg-warning text-warning-foreground hover:bg-warning">capped by Meta{detail ? ` · ${detail}` : ''}</Badge>
     case 'email_fallback_missing':
@@ -572,7 +577,7 @@ export function NudgesTab({
                   <p className="text-xs font-medium">Sending rule for a sheet nudge</p>
                   <p className="field-hint mt-0.5">
                     {SHEET_DEDUP_RULE} There is no per-lead message cap to set: it applies to
-                    lead-driven nudges only.
+                    lead-driven nudges only. Running the same sheet again sends again.
                   </p>
                 </div>
                 <div className="flex items-start gap-2 pb-1 sm:pt-2">
