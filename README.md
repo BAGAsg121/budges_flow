@@ -89,6 +89,35 @@ which read as flat in light mode and harsh in dark.
 Both header sync buttons hit the same endpoint with a different window — see
 [Zoho CRM: MCP first, REST fallback](#zoho-crm-mcp-first-rest-fallback).
 
+### Sheet-driven WhatsApp nudges
+
+Three exist. All are **manual** — paste a Google Sheet URL in the UI — and all ship **disabled** until
+their template is approved.
+
+| Nudge key | Template | Button |
+| --- | --- | --- |
+| `whatsapp_onboarded_transacting` | `activation_fee_pending_transacting` | Pay Now → pay-activation-fee |
+| `whatsapp_onboarded_not_transacting` | `activation_fee_pending_not_transacting` | Pay Now → pay-activation-fee |
+| `whatsapp_ip_whitelisting` | `ip_whitelisting_mandatory` | **none** |
+
+The button belongs to the **template spec**, not to the family. `whatsapp_ip_whitelisting` is a
+security notice whose call to action is "email your static IP to eps.support@eko.in" — nothing to
+click — so it deliberately declares no button. A shared "sheet flows always get the pay button"
+default would have pointed partners at a payment page while asking them for an IP address, and the
+button's `{{1}}` would have been a parameter the template does not declare, which Meta rejects with a
+parameter-count mismatch. `whatsappParams` is therefore `{ "body": [] }` for it and
+`{ "body": [], "button": ["mobile_digits"] }` for the two pay nudges.
+
+The whitelisting notice also has **no email twin**, so it has no fallback — the send is WhatsApp or
+nothing, and a failure appears in the Failures tab for a manual retry.
+
+To add another: add an entry to `WA_SHEET_FLOW_TEMPLATES` in `src/lib/nudge-defaults.ts`, then
+
+```bash
+npm run seed:nudges                        # creates the nudge row, disabled
+npm run wa:templates -- --create-missing    # submits the template to Meta as UTILITY
+```
+
 ### Retrying failures
 
 The **Failures** tab lists every failed send on both channels and can re-send them. Each failure is

@@ -587,3 +587,25 @@ Stage Summary:
 - The charts were showing combined data for both families. That is fixed, the combined series is gone from the API, and each chart now names the nudge it counts.
 - The split is verifiable independently of the UI with `npm run engage:report`.
 - The two families do have genuinely different engagement — the graph was hiding it, not the data.
+
+---
+
+Task ID: 26
+Agent: Main agent (DeepSeek Harness)
+Task: Add a third sheet-driven WhatsApp nudge — the IP whitelisting security notice. (Marked urgent.)
+
+Work Log:
+- Added `whatsapp_ip_whitelisting` → template `ip_whitelisting_mandatory` (en_US, submitted as UTILITY) with the supplied copy verbatim: the 🔔 security-update notice asking partners to email their static IP and Eko Code to eps.support@eko.in.
+- THE NON-OBVIOUS PART, and the reason this was not a copy-paste of the other two: `templateSpecFor()` hardcoded the pay-activation-fee button URL for every sheet-flow template. This notice has nothing to click, so it would have shipped with a "Pay Now" button pointing at a payment page while asking for an IP address — and the button's {{1}} would have been a parameter the template does not declare, which Meta rejects at send time with a parameter-count mismatch (not at creation time, so it would have failed only on the first real send).
+  FIX: the button now belongs to the template spec. WA_SHEET_FLOW_TEMPLATES is typed with an optional buttonText/buttonUrl, the new entry declares neither, and templateSpecFor reads the URL from the entry instead of assuming the pay URL. whatsappParams is built to match: `{body: []}` with no button key when the template has none, `{body: [], button: [mobile_digits]}` when it does. Verified in the database that the new nudge row carries no button parameter and that the existing pay nudge still does.
+- Seeded the nudge (create-if-missing, so every existing nudge was left untouched — including the two pay nudges the user had enabled) and submitted the template. It is now PENDING on the WABA as UTILITY with no button.
+- BONUS CONFIRMATION while listing: `activation_fee_pending_transacting` and `activation_fee_pending_not_transacting` are now APPROVED as UTILITY. The Task 23 template switch has landed, so the marketing-cap cause is fixed for those two.
+- Deliberately NOT given an email twin: none exists for this notice, so there is no fallback channel. The filter JSON omits emailFallback entirely (JSON.stringify drops the undefined), and the Failures tab will surface a failure for manual retry rather than the run silently pretending it sent.
+- 20 new assertions, including that the payload contains no button parameter, that the body names the support address, carries no promotional wording, is under Meta's 1024-character limit, has no unreplaced variables, and — the regression guard — that the two pay nudges still DO send their button parameter.
+- Three existing assertions failed on the new count (10→11 WhatsApp nudges, 2→3 sheet flows) and one of my new ones was wrong: it looped over all four `*onboarded_*transacting` nudges, two of which are EMAIL nudges with no whatsappParams at all, so it could never be true. Narrowed to the WhatsApp ones, which is what it meant.
+- verify now 323 assertions. tsc clean, eslint clean.
+
+Stage Summary:
+- `whatsapp_ip_whitelisting` exists as a disabled, sheet-driven WhatsApp nudge using the new UTILITY template `ip_whitelisting_mandatory` (PENDING Meta review).
+- Sheet-flow templates can now have no button, which the pay nudges are unaffected by.
+- Once Meta approves the template: enable the nudge in the UI, run it with a Google Sheet of mobiles, and it sends. Nothing else is required.

@@ -230,21 +230,57 @@ export const WA_RETIRED_MARKETING_TEMPLATES: Record<string, string> = {
   whatsapp_onboarded_not_transacting: 'onboarded_not_transacting_pay',
 }
 
-/** The manual, sheet-driven WhatsApp nudges (pay-activation-fee CTA). */
-export const WA_SHEET_FLOW_TEMPLATES = {
+/** One manual, sheet-driven WhatsApp nudge's approved copy. */
+export interface WaSheetFlowTemplate {
+  templateName: string
+  title: string
+  body: string
+  /** Omit BOTH to create a template with no button — e.g. a notice whose CTA is "email us". */
+  buttonText?: string
+  buttonUrl?: string
+}
+
+/** The manual, sheet-driven WhatsApp nudges. */
+export const WA_SHEET_FLOW_TEMPLATES: Record<string, WaSheetFlowTemplate> = {
   whatsapp_onboarded_transacting: {
     templateName: 'activation_fee_pending_transacting',
     title: 'Onboarded and started transacting (WhatsApp)',
     body: WA_UTILITY_SAFE_COPY.activation_fee_pending_transacting.body,
     buttonText: WA_UTILITY_SAFE_COPY.activation_fee_pending_transacting.buttonText,
+    buttonUrl: `${PAY_ACTIVATION_FEE_URL}?mobile={{1}}`,
   },
   whatsapp_onboarded_not_transacting: {
     templateName: 'activation_fee_pending_not_transacting',
     title: 'Onboarded but not transacting (WhatsApp)',
     body: WA_UTILITY_SAFE_COPY.activation_fee_pending_not_transacting.body,
     buttonText: WA_UTILITY_SAFE_COPY.activation_fee_pending_not_transacting.buttonText,
+    buttonUrl: `${PAY_ACTIVATION_FEE_URL}?mobile={{1}}`,
   },
-} as const
+  /**
+   * Security notice: IP whitelisting is now mandatory for EPS API transactions.
+   *
+   * Deliberately has NO button. The call to action is "email your static IP", not a link, and
+   * the sheet-flow default would otherwise attach the pay-activation-fee button — pointing
+   * partners at a payment page when the message is asking them for an IP address.
+   *
+   * Submitted as UTILITY: it is a service/security notice about the recipient's own account,
+   * with no promotion in it, which is what keeps it out of Meta's per-user marketing cap.
+   */
+  whatsapp_ip_whitelisting: {
+    templateName: 'ip_whitelisting_mandatory',
+    title: 'IP whitelisting mandatory (WhatsApp)',
+    body:
+      '🔔 Security Update: IP Whitelisting Mandatory for EPS API Transactions\n\n' +
+      'Dear Partner,\n\n' +
+      'As part of a recent security enhancement, IP whitelisting is now mandatory for initiating ' +
+      'transactions through the Eko Platform Services (EPS) API platform.\n\n' +
+      'Whitelisting your static IP ensures that transaction requests are accepted only from your ' +
+      'authorized systems, helping protect your account against unauthorized access and misuse.\n\n' +
+      '📌 Action Required:\n' +
+      'Please email your static IP address to eps.support@eko.in along with your Eko Code so that ' +
+      'we can whitelist the IP against the correct account.',
+  },
+}
 
 /**
  * Email twin for each manual WhatsApp nudge.
@@ -489,9 +525,9 @@ export const DEFAULT_NUDGES: NudgeSeed[] = [
     key,
     name: `WhatsApp · ${t.title}`,
     description:
-      `MANUAL — paste a Google Sheet URL in the UI (Send from Sheet). WhatsApp equivalent of the ` +
-      `"${t.title.replace(' (WhatsApp)', '')}" email nudge. The sheet needs an email or mobile column; ` +
-      `the mobile drives the button to ${PAY_ACTIVATION_FEE_URL}?mobile=<mobile>. ` +
+      `MANUAL — paste a Google Sheet URL in the UI (Send from Sheet). WhatsApp nudge for this list. ` +
+      `The sheet needs an email or mobile column; the mobile drives the button when the template has one ` +
+      `(${PAY_ACTIVATION_FEE_URL}?mobile=<mobile>). ` +
       `Sends the approved Meta template "${t.templateName}" in ${WHATSAPP_TEMPLATE_LANGUAGE_DEFAULT}. ` +
       `Ships disabled until that template is approved.`,
     enabled: false,
@@ -501,7 +537,10 @@ export const DEFAULT_NUDGES: NudgeSeed[] = [
     bodyTemplate: t.body,
     whatsappTemplateName: t.templateName,
     whatsappLanguage: WHATSAPP_TEMPLATE_LANGUAGE_DEFAULT,
-    whatsappParams: json({ body: [], button: ['mobile_digits'] }),
+    // A URL button's {{1}} is a separate parameter from the body's. Only send the button
+    // parameter when the template actually declares a button, or Meta rejects the send with a
+    // parameter-count mismatch.
+    whatsappParams: json(t.buttonText && t.buttonUrl ? { body: [], button: ['mobile_digits'] } : { body: [] }),
     maxEmailsPerLead: 3,
     followUpDays: 2,
   })),

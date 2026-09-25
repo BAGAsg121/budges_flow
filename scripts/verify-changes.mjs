@@ -148,7 +148,7 @@ check('whatsapp_sample targets exactly one status', filtersOf('whatsapp_sample')
 checkTrue('whatsapp_sample asks for a phone', filtersOf('whatsapp_sample').requirePhone === true)
 check('whatsapp_sample is capped at 1 message/lead', wa.maxEmailsPerLead, 1)
 checkTrue('whatsapp_sample body renders first_name', renderTemplate(wa.bodyTemplate, { first_name: 'Asha' }).includes('Hi Asha'))
-check('whatsapp nudges: sample + legacy doc twin + 6 MySQL flows + 2 sheet', DEFAULT_NUDGES.filter((n) => n.channel === 'whatsapp').length, 10)
+check('whatsapp nudges: sample + legacy doc twin + 6 MySQL flows + 3 sheet', DEFAULT_NUDGES.filter((n) => n.channel === 'whatsapp').length, 11)
 const waDocs = byKey['documents_pending_wa']
 check('documents_pending_wa template language is en_US (not en)', waDocs.whatsappLanguage, 'en_US')
 check('documents_pending_wa supplies 3 params for its 3 variables', JSON.parse(waDocs.whatsappParams).length, countTemplateVars(waDocs.bodyTemplate))
@@ -206,7 +206,7 @@ check('empty body rejected', validateTemplateInput({ ...goodTemplate, bodyText: 
 // --- MySQL-driven WhatsApp flows (ported from n8n, Meta-only) ---------------
 check('six MySQL flows are defined', Object.keys(MYSQL_FLOW_TEMPLATES).length, 6)
 check('flow keys match the collectors', Object.keys(MYSQL_FLOW_TEMPLATES).sort().join(','), [...MYSQL_FLOW_KEYS].sort().join(','))
-check('two manual WhatsApp sheet flows are defined', Object.keys(WA_SHEET_FLOW_TEMPLATES).length, 2)
+check('three manual WhatsApp sheet flows are defined', Object.keys(WA_SHEET_FLOW_TEMPLATES).length, 3)
 checkTrue('isMysqlFlowKey accepts a real key', isMysqlFlowKey('csp_details_pending'))
 check('isMysqlFlowKey rejects anything else', isMysqlFlowKey('nope'), false)
 
@@ -336,6 +336,42 @@ checkTrue(
     /discount/i.test((n.bodyTemplate || '') + (n.subjectTemplate || ''))
   )
 )
+
+// --- the IP whitelisting notice ----------------------------------------------
+// A sheet-driven WhatsApp nudge whose CTA is "email your static IP", NOT a link. It must not
+// inherit the sheet-flow pay button, or it would point partners at a payment page while asking
+// them for an IP address — and the button's {{1}} would then be a parameter the template does
+// not declare, which Meta rejects with a parameter-count mismatch.
+const ipNudge = DEFAULT_NUDGES.find((n) => n.key === 'whatsapp_ip_whitelisting')
+const ipWa = WA_SHEET_FLOW_TEMPLATES.whatsapp_ip_whitelisting
+checkTrue('the IP whitelisting nudge exists', Boolean(ipNudge))
+check('IP nudge is a WhatsApp nudge', ipNudge?.channel, 'whatsapp')
+check('IP nudge ships disabled', ipNudge?.enabled, false)
+check('IP nudge is manual/sheet-driven', ipNudge?.zohoCriteria, null)
+check('IP nudge marks its source as a sheet', JSON.parse(ipNudge?.filters || '{}').source, 'sheet')
+check('IP nudge requires a phone', JSON.parse(ipNudge?.filters || '{}').requirePhone, true)
+check('IP nudge has no email twin (none exists)', JSON.parse(ipNudge?.filters || '{}').emailFallback, undefined)
+check('IP nudge uses the UTILITY template', ipNudge?.whatsappTemplateName, 'ip_whitelisting_mandatory')
+check('IP nudge language is en_US', ipNudge?.whatsappLanguage, 'en_US')
+check('IP template declares NO button', ipWa?.buttonText ?? null, null)
+check('IP template declares no button URL', ipWa?.buttonUrl ?? null, null)
+check('IP nudge sends no button parameter', JSON.stringify(JSON.parse(ipNudge?.whatsappParams || '{}')), JSON.stringify({ body: [] }))
+check('IP nudge sends no body parameters either', JSON.parse(ipNudge?.whatsappParams || '{}').body.length, 0)
+// The two pay nudges must KEEP their button — this is the regression guard for the change.
+check(
+  'the pay nudges keep their button parameter',
+  DEFAULT_NUDGES.filter(
+    (n) => n.channel === 'whatsapp' && /^whatsapp_onboarded_(not_)?transacting$/.test(n.key)
+  ).every((n) => JSON.parse(n.whatsappParams || '{}').button?.[0] === 'mobile_digits'),
+  true
+)
+checkTrue('IP body names the support address', ipWa?.body.includes('eps.support@eko.in'))
+checkTrue('IP body asks for the Eko Code', /Eko Code/i.test(ipWa?.body || ''))
+checkTrue('IP body carries no promotional wording', !/discount|offer|expiring/i.test(ipWa?.body || ''))
+checkTrue('IP body is within Meta\'s 1024-character limit', (ipWa?.body || '').length <= 1024)
+checkTrue('IP body has no unreplaced variables', !/\{\{\d+\}\}/.test(ipWa?.body || ''))
+check('IP nudge is capped at 3 per lead', ipNudge?.maxEmailsPerLead, 3)
+checkTrue('IP nudge spaces its follow-ups', (ipNudge?.followUpDays ?? 0) > 0)
 // Every activation-fee nudge allows 3 attempts.
 check(
   'all four activation-fee nudges cap at 3 per lead',

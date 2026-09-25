@@ -43,7 +43,9 @@ function templateSpecFor(name) {
   }
   const sheetFlow = Object.values(WA_SHEET_FLOW_TEMPLATES).find((t) => t.templateName === name)
   if (sheetFlow) {
-    return { body: sheetFlow.body, buttonText: sheetFlow.buttonText, buttonUrl: `${PAY_ACTIVATION_FEE_URL}?mobile={{1}}` }
+    // The button belongs to the spec, not to the family: some sheet templates have no button
+    // at all, and hardcoding the pay URL here would attach it to a message that does not want it.
+    return { body: sheetFlow.body, buttonText: sheetFlow.buttonText ?? null, buttonUrl: sheetFlow.buttonUrl ?? null }
   }
   return null
 }
