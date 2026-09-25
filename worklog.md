@@ -609,3 +609,27 @@ Stage Summary:
 - `whatsapp_ip_whitelisting` exists as a disabled, sheet-driven WhatsApp nudge using the new UTILITY template `ip_whitelisting_mandatory` (PENDING Meta review).
 - Sheet-flow templates can now have no button, which the pay nudges are unaffected by.
 - Once Meta approves the template: enable the nudge in the UI, run it with a Google Sheet of mobiles, and it sends. Nothing else is required.
+
+---
+
+Task ID: 27
+Agent: Main agent (DeepSeek Harness)
+Task: Add an Excel export for logs, filterable by custom date range and nudge/channel/status.
+
+Work Log:
+- Checked for an existing xlsx library first: none present, and `npm install exceljs` was blocked by the sandbox. Rather than add a large dependency to a banking-adjacent service (every package is supply-chain surface), wrote src/lib/xlsx.ts — a ~300-line OOXML writer against Node's built-in zlib, producing a ZIP of XML parts.
+- RISK MANAGEMENT, because "hand-rolled file format" is exactly where this could go quietly wrong: a corrupt workbook is indistinguishable from an empty export, so the output is VERIFIED, not trusted. scripts/lib/read-zip.mjs reads the archive back (central directory, every entry inflated against its declared size, worksheet relationships resolvable, <row> tags balanced), validateXlsx() runs in the verify suite AND as a self-check after every CLI export, and the CRC32 implementation is checked against the reference vector for "123456789" (0xCBF43926) so a bad polynomial table cannot slip through.
+  Design choices that remove the usual failure modes rather than manage them: inline strings instead of a shared-strings table (an entire part and its index bookkeeping gone), dates as ISO strings rather than serials (no epoch/number-format decision), and numeric-looking text kept as text so tracking ids, phone numbers and Eko codes keep leading zeros.
+- DATES ARE IST CALENDAR DAYS, inclusive both ends — the operator says "yesterday" and means the IST day. A UTC range would shift the boundary 5.5 hours and quietly include or exclude the wrong messages. Both edges are tested (00:00:00.000 IST inside, 23:59:59.999 IST inside, one millisecond before outside, 00:00 IST the next day outside), and impossible dates like 2026-02-31 are rejected rather than silently rolled over by Date.UTC.
+- Structure: src/lib/export-format.ts holds everything that decides what a row looks like (alias-free and DB-free, so it is unit-testable with plain objects); src/lib/log-export.ts is only the query, with buildExportWhere() shared by the export and the count-only preview so the two cannot disagree. Splitting it was forced by a real error: the verify script could not import the combined module because @/lib/db is not resolvable by Node ESM — the same reason mailer.ts and zoho-mail.ts are alias-free.
+- UI: an Export button on the Logs tab opening a dialog with date presets, custom from/to, and nudge/channel/status pickers, seeded from the filters already applied to the table so "export what I am looking at" is the default. It shows the matching row count live (debounced) before downloading, so a mistyped range reads as an obviously wrong number instead of a surprise.
+- New scripts/export-logs.mjs (npm run logs:export), sharing the exact modules the route uses. Verified end to end against live data with the user's own example — yesterday, onboarding-not-transacting, WhatsApp — which returned 59 rows with a 28 failed / 18 opened / 11 sent / 2 replied breakdown, and the written workbook passed validation.
+- DATA SAFETY: the first real export contained 59 real customer phone numbers. Deleted it rather than leave it in the working tree that an external auto-committer has been committing, added `*-export.xlsx`/`nudge-logs_*` to .gitignore, and added a `--demo` mode that writes a workbook of INVENTED rows so Excel compatibility can be confirmed without exposing customer data.
+- Four of my own new assertions were wrong and the runner caught each: a rels regex that matched "relationship/" instead of "relationships/" (0 matches), a count of the string "worksheet" that double-counted per relationship, an export-status case mislabelled as outside the range when 00:30 IST is inside it, and an "unrecognised error" case that used a WhatsApp fixture while asserting the EMAIL fallback label. All four were test bugs, not code bugs; fixed rather than relaxed.
+- verify now 386 assertions. tsc clean, eslint clean.
+- NOT VERIFIED: the dev server cannot spawn here, so the dialog has not been rendered, and no copy of Excel was available to open the generated workbook — the format is validated structurally (valid ZIP, consistent sizes, resolvable rels, balanced XML) but not by Excel itself. `npm run logs:export:demo` produces a fake-data file precisely so the user can confirm that in seconds. Also note npm could not run, so `exceljs` is NOT in package.json despite the attempt.
+
+Stage Summary:
+- Logs can be exported to .xlsx or .csv by date range, nudge, channel and status, from the UI or the CLI, with a row count shown before download.
+- The workbook has a detail sheet and a Summary sheet, and includes the customer's reply text and a plain-English failure reason.
+- No spreadsheet dependency was added; the writer is validated by reading its own output back.

@@ -69,3 +69,10 @@ dev.out.log
 server.log
 # Skills directory
 /skills/
+
+# Generated log exports. These contain real customer phone numbers and email addresses, so
+# they must never reach git — the CLI writes them into the working tree by default.
+nudge-logs_*.xlsx
+nudge-logs_*.csv
+*-export.xlsx
+*-export.csv

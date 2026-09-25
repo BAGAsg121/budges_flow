@@ -10,8 +10,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { Mail, MessageCircle, Sheet } from 'lucide-react'
+import { Mail, MessageCircle, Sheet, FileSpreadsheet } from 'lucide-react'
 import { explainWhatsAppError } from '@/lib/whatsapp-errors'
+import { ExportLogsDialog } from '@/components/app/export-logs-dialog'
 import type { LogDto, NudgeDto } from '@/lib/app-types'
 
 function ChannelBadge({ channel }: { channel: string }) {
@@ -83,6 +84,7 @@ export function LogsTab({ refreshKey }: { refreshKey: number }) {
   const [q, setQ] = useState('')
   const [loading, setLoading] = useState(true)
   const [replyLog, setReplyLog] = useState<LogDto | null>(null)
+  const [exportOpen, setExportOpen] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -122,9 +124,22 @@ export function LogsTab({ refreshKey }: { refreshKey: number }) {
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
           <div>
             <h3 className="text-sm font-medium">Message logs</h3>
-            <p className="text-xs text-muted-foreground">Every send attempt (email + WhatsApp) with open/reply tracking</p>
+            <p className="text-xs text-muted-foreground">
+              Every send attempt (email + WhatsApp) with open/reply tracking
+            </p>
           </div>
           <div className="flex flex-col sm:flex-row gap-2">
+            {/* Export is seeded from the filters already applied below, so what you see is
+                what gets exported unless you change it in the dialog. */}
+            <Button
+              variant="outline"
+              onClick={() => setExportOpen(true)}
+              className="gap-1.5"
+              title="Download these logs as a spreadsheet"
+            >
+              <FileSpreadsheet className="h-4 w-4" />
+              Export
+            </Button>
             <Select value={channel} onValueChange={setChannel}>
               <SelectTrigger className="w-full sm:w-36">
                 <SelectValue placeholder="Channel" />
@@ -283,6 +298,17 @@ export function LogsTab({ refreshKey }: { refreshKey: number }) {
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* Seeded from the filters already applied to the table, so "export what I'm looking at"
+          is the default and any change is deliberate. */}
+      <ExportLogsDialog
+        open={exportOpen}
+        onOpenChange={setExportOpen}
+        initialNudgeKey={
+          nudgeId !== 'all' ? (nudges.find((n) => n.id === nudgeId)?.key ?? undefined) : undefined
+        }
+        initialChannel={channel !== 'all' ? channel : undefined}
+      />
     </Card>
   )
 }

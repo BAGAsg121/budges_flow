@@ -27,6 +27,8 @@
     "mcp:register": "node --env-file=.env scripts/check-zoho-mcp.mjs --register",
     "diag:sends": "node --env-file=.env scripts/diagnose-sends.mjs",
     "engage:report": "node --env-file=.env scripts/report-engagement-split.mjs",
+    "logs:export": "node --env-file=.env scripts/export-logs.mjs",
+    "logs:export:demo": "node --env-file=.env scripts/export-logs.mjs --demo",
     "db:add-inbound-columns": "node --env-file=.env scripts/add-inbound-columns.mjs",
     "nudges:set-cap": "node --env-file=.env scripts/set-max-per-lead.mjs",
     "postinstall": "prisma generate",

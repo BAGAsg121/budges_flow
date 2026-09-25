@@ -54,6 +54,8 @@ npm start                   # node .next/standalone/server.js  (PORT env, defaul
 | `npm run email:check` | Email transport config, or send a real test |
 | `npm run mail:diagnose` | Raw Zoho Mail API responses, varying one field at a time |
 | `npm run engage:report` | Per-family engagement split, straight from the database (sanity-checks the charts) |
+| `npm run logs:export` | Export logs to .xlsx/.csv by date range, nudge, channel and status |
+| `npm run logs:export:demo` | Write a workbook of invented rows, to confirm Excel opens the format |
 | `npm run nudges:set-cap` | Set the per-lead message cap on the four activation-fee nudges (dry run; `--apply` to write) |
 | `npm run db:push` | Apply schema changes (safe) |
 | `npm run db:push:force` | Apply with `--accept-data-loss` (drops data) |
@@ -117,6 +119,52 @@ To add another: add an entry to `WA_SHEET_FLOW_TEMPLATES` in `src/lib/nudge-defa
 npm run seed:nudges                        # creates the nudge row, disabled
 npm run wa:templates -- --create-missing    # submits the template to Meta as UTILITY
 ```
+
+### Exporting logs
+
+The **Logs** tab has an **Export** button that downloads the logs as a spreadsheet. The dialog takes
+a **date range** (Today / Yesterday / Last 7 days / Last 30 days / Custom), a **nudge**, a
+**channel** and a **status**, and shows how many rows match *before* you download — so a mistyped
+range shows up as an obviously wrong number rather than a surprise.
+
+Dates are **IST calendar days, inclusive at both ends**, matching how the charts bucket days. A
+UTC-based range would shift the boundary by 5.5 hours and quietly include or exclude the wrong
+messages, so both edges are tested explicitly (00:00:00.000 IST through 23:59:59.999 IST).
+
+The workbook has two sheets:
+
+| Sheet | Contents |
+| --- | --- |
+| **Logs** | One row per send attempt: IST and UTC timestamps, channel, nudge name and key, recipient, subject/template, message #, status, delivered, opened (+ count and time), replied (+ time), **the customer's reply text**, failure reason in plain English, raw error, tracking id, sheet row |
+| **Summary** | The filters used, the row count, and a breakdown by nudge × channel × status |
+
+`status` is derived, not stored: replied beats opened beats sent, and a failed row is `failed`.
+
+```bash
+npm run logs:export -- --from 2026-09-23 --to 2026-09-23 \
+    --nudge whatsapp_onboarded_not_transacting --channel whatsapp
+npm run logs:export:demo    # a workbook of INVENTED rows, to check Excel opens the format
+```
+
+The CLI uses the **same modules as the route**, so the file it writes is the shape the button
+downloads. It also reads its own output back and validates it.
+
+#### Why there is no spreadsheet library
+
+An `.xlsx` is a ZIP of small XML parts. `exceljs` and friends are large, and this is a
+banking-adjacent service where every dependency is supply-chain surface — so the writer in
+`src/lib/xlsx.ts` is ~300 lines against Node's built-in `zlib`, and its output is **verified rather
+than trusted**:
+
+- `scripts/lib/read-zip.mjs` reads the archive back: central directory, every entry inflated
+  against its declared size, worksheet relationships resolved, `<row>` tags balanced.
+- `validateXlsx()` runs in the verify suite **and** as a self-check after every CLI export — a
+  workbook Excel refuses to open is indistinguishable from an empty export, so it fails loudly.
+- Inline strings instead of a shared-strings table (one fewer part to get wrong), dates as ISO
+  strings rather than serial numbers (no epoch or number-format decision), and numeric-looking text
+  stays text so tracking ids and phone numbers keep their leading zeros.
+
+Generated exports are **git-ignored**: they contain real customer phone numbers and email addresses.
 
 ### Retrying failures
 
@@ -752,6 +800,7 @@ kind of change.
 | `GET /api/stats/onboarding` | Basic | Per-family engagement totals + daily series (`?days=14`) |
 | `GET /api/logs/failures` | Basic | Failed sends, explained, with `resolved` + `retryable` per row |
 | `POST /api/logs/retry` | Basic | Re-send failures: `{ ids: […] }`, or `{ all: true, channel? }` |
+| `GET /api/logs/export` | Basic | Spreadsheet of logs (`?from&to&nudgeKey&channel&status&format=xlsx\|csv`, `&countOnly=1` to preview) |
 | `GET/POST /api/whatsapp/test` | Basic | WhatsApp config check / one real test send |
 | `GET/POST /api/email/test` | Basic | Email config check / one real test send (`{ "to": "…" }`, defaults to the from-address) |
 | `GET /api/leads`, `GET /api/logs`, `GET /api/stats` | Basic | Data for the UI |

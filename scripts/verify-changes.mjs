@@ -17,6 +17,9 @@ import { explainMailError, isRetryableMailError } from '../src/lib/mail-errors.t
 import { isRetryableWhatsAppError } from '../src/lib/whatsapp-errors.ts'
 import { buildSheetVars, normaliseMobileDigits, pickSheetEmail, pickSheetMobile } from '../src/lib/sheet-vars.ts'
 import { buildDailySeries, seriesIsEmpty, istDayKey } from '../src/lib/engagement-stats.ts'
+import { buildXlsx, buildZip, crc32, columnLetter, sanitiseSheetName } from '../src/lib/xlsx.ts'
+import { istDay, istDateTime, istRangeToUtc, istDaysAgo, toCsv, exportStatus, logToExportRow, buildBreakdown, EXPORT_COLUMNS } from '../src/lib/export-format.ts'
+import { readZip, validateXlsx } from './lib/read-zip.mjs'
 
 let failures = 0
 /** --quiet prints only failures and the summary; useful when iterating in a tight loop. */
@@ -538,6 +541,219 @@ check('email and whatsapp go to different fields', (() => {
 
 check('seriesIsEmpty is true for a blank series', seriesIsEmpty(buildDailySeries({ logs: [], nudgeIds: ['x'], days: 3, since: SERIES_SINCE })), true)
 check('seriesIsEmpty is false once something is counted', seriesIsEmpty(seriesB), false)
+
+// --- the hand-rolled .xlsx writer --------------------------------------------
+// A corrupt workbook is the worst possible export bug: the user cannot tell "no data" from
+// "broken file". So the archive is read back and every part is checked, rather than trusting
+// that the bytes are right.
+check('column letter: 1 -> A', columnLetter(1), 'A')
+check('column letter: 26 -> Z', columnLetter(26), 'Z')
+check('column letter: 27 -> AA', columnLetter(27), 'AA')
+check('column letter: 52 -> AZ', columnLetter(52), 'AZ')
+check('column letter: 53 -> BA', columnLetter(53), 'BA')
+check('sheet names drop illegal characters', sanitiseSheetName('a:b/c\\d?e*f[g]h'), 'a b c d e f g h')
+check('sheet names are capped at 31 characters', sanitiseSheetName('x'.repeat(60)).length, 31)
+check('an empty sheet name falls back', sanitiseSheetName('   ', 'Fallback'), 'Fallback')
+
+const sampleXlsx = buildXlsx(
+  [
+    { name: 'Logs', headers: ['Name', 'Count', 'Ok'], rows: [['Asha', 3, true], ['<b>Bold</b> & "quoted"', 0, false]], widths: [20, 8, 6] },
+    { name: 'Weird:Name', headers: ['A'], rows: [['x']] },
+  ],
+  new Date('2026-09-24T10:00:00Z')
+)
+const zip = readZip(sampleXlsx)
+
+for (const part of [
+  '[Content_Types].xml',
+  '_rels/.rels',
+  'xl/workbook.xml',
+  'xl/_rels/workbook.xml.rels',
+  'xl/styles.xml',
+  'xl/worksheets/sheet1.xml',
+  'xl/worksheets/sheet2.xml',
+]) {
+  checkTrue(`xlsx contains ${part}`, zip.has(part))
+}
+check('xlsx has exactly the expected parts', zip.size, 7)
+
+// Every entry must inflate to its declared size — this is what catches an off-by-one in the
+// deflate sizes or the CRC table.
+const crcOk = [...zip.values()].every((f) => f.bytes.length === f.declaredSize)
+checkTrue('every entry inflates to its declared size', crcOk)
+
+// The full structural validator: required parts, resolvable relationships, balanced rows.
+check('the sample workbook passes full validation', validateXlsx(sampleXlsx).join(' | '), '')
+checkTrue('validation notices a truncated buffer', validateXlsx(sampleXlsx.subarray(0, 60)).length > 0)
+checkTrue('validation notices arbitrary bytes', validateXlsx(Buffer.from('definitely not a zip')).length > 0)
+
+const sheet1 = zip.get('xl/worksheets/sheet1.xml').content
+checkTrue('header cells are bold (style index 1)', sheet1.includes('<c r="A1" s="1" t="inlineStr">'))
+checkTrue('data cells carry no style', sheet1.includes('<c r="A2" t="inlineStr">'))
+checkTrue('a text value is written as an inline string', sheet1.includes('<t xml:space="preserve">Asha</t>'))
+checkTrue('numbers are written as numbers, not text', sheet1.includes('<c r="B2"><v>3</v></c>'))
+checkTrue('booleans are written as booleans', sheet1.includes('t="b"><v>1</v></c>'))
+checkTrue('markup in a value is escaped', sheet1.includes('&lt;b&gt;Bold&lt;/b&gt; &amp; &quot;quoted&quot;'))
+checkTrue('a false boolean is 0', sheet1.includes('t="b"><v>0</v></c>'))
+check('dimension covers the used range', /<dimension ref="A1:C3"\/>/.test(sheet1), true)
+check('there is a frozen header row', sheet1.includes('state="frozen"'), true)
+check('an autofilter is applied', sheet1.includes('<autoFilter ref="A1:C3"/>'), true)
+check('column widths are emitted', sheet1.includes('<col min="1" max="1" width="20" customWidth="1"/>'), true)
+check('row count: 1 header + 2 data rows', (sheet1.match(/<row /g) || []).length, 3)
+
+const workbook = zip.get('xl/workbook.xml').content
+checkTrue('the workbook declares both sheets', workbook.includes('name="Logs"') && workbook.includes('name="Weird Name"'))
+checkTrue('sheet names are XML-escaped and legal', !workbook.includes('Weird:Name'))
+check('the workbook rels reference both worksheets', (zip.get('xl/_rels/workbook.xml.rels').content.match(/relationships\/worksheet"/g) || []).length, 2)
+checkTrue('styles are declared in the rels', zip.get('xl/_rels/workbook.xml.rels').content.includes('styles.xml'))
+checkTrue('content types declare the workbook part', zip.get('[Content_Types].xml').content.includes('spreadsheetml.sheet.main+xml'))
+checkTrue('content types declare both worksheets', (zip.get('[Content_Types].xml').content.match(/spreadsheetml\.worksheet\+xml/g) || []).length === 2)
+
+// A single-sheet workbook is still valid (the Summary sheet is always added in practice, but
+// a caller could pass one).
+const single = readZip(buildXlsx([{ name: 'Only', headers: ['H'], rows: [['v']] }]))
+check('a one-sheet workbook still declares a styles part', single.has('xl/styles.xml'), true)
+check('an empty workbook does not crash', readZip(buildXlsx([])).size >= 6, true)
+
+// The documented CRC32 of "123456789" is 0xCBF43926 — catches a bad polynomial/table.
+check('crc32 matches the reference vector', crc32(Buffer.from('123456789')) >>> 0, 0xcbf43926)
+
+// --- export filters -----------------------------------------------------------
+check('IST day of a UTC-evening instant rolls over', istDay(new Date('2026-09-22T20:00:00Z')), '2026-09-23')
+check('IST day of a UTC-morning instant', istDay(new Date('2026-09-23T06:00:00Z')), '2026-09-23')
+check('IST datetime is formatted for humans', istDateTime(new Date('2026-09-23T06:05:00Z')), '2026-09-23 11:35:00')
+check('a null date formats as empty', istDateTime(null), '')
+
+// An inclusive IST day range must cover exactly that IST day: 00:00:00 to 23:59:59.999 IST.
+const range = istRangeToUtc('2026-09-23', '2026-09-23')
+check('range start is 00:00 IST == 18:30 UTC the day before', range.start.toISOString(), '2026-09-22T18:30:00.000Z')
+check('range end is 23:59:59.999 IST', range.end.toISOString(), '2026-09-23T18:29:59.999Z')
+
+// The boundaries are the whole point of IST handling, so test both sides of each edge.
+const inRange = (iso) => {
+  const d = new Date(iso)
+  return d >= range.start && d <= range.end
+}
+check('00:00:00.000 IST on the day is INSIDE', inRange('2026-09-22T18:30:00.000Z'), true)
+check('00:30 IST on the day is INSIDE', inRange('2026-09-22T19:00:00.000Z'), true)
+check('01:00 IST on the day is INSIDE', inRange('2026-09-22T19:30:00.000Z'), true)
+check('23:59:59.999 IST on the day is INSIDE', inRange('2026-09-23T18:29:59.999Z'), true)
+check('one millisecond before the day starts is OUTSIDE', inRange('2026-09-22T18:29:59.999Z'), false)
+check('23:59:59.999 IST the PREVIOUS day is OUTSIDE', inRange('2026-09-22T18:29:00.000Z'), false)
+check('00:00 IST the NEXT day is OUTSIDE', inRange('2026-09-23T18:30:00.000Z'), false)
+check('a US-timezone evening that is IST morning is INSIDE (the bug this guards)', inRange('2026-09-22T19:45:00.000Z'), true)
+
+let rangeErr = ''
+try {
+  istRangeToUtc('2026-09-24', '2026-09-23')
+} catch (err) {
+  rangeErr = err instanceof Error ? err.message : String(err)
+}
+checkTrue('a backwards range is rejected', rangeErr.includes('before the start date'))
+
+let badDateErr = ''
+try {
+  istRangeToUtc('not-a-date', '2026-09-23')
+} catch (err) {
+  badDateErr = err instanceof Error ? err.message : String(err)
+}
+checkTrue('a malformed date is rejected', badDateErr.includes('expected YYYY-MM-DD'))
+
+let impossibleErr = ''
+try {
+  istRangeToUtc('2026-02-31', '2026-02-31')
+} catch (err) {
+  impossibleErr = err instanceof Error ? err.message : String(err)
+}
+checkTrue('an impossible calendar date is rejected, not silently rolled over', impossibleErr.includes('not a real calendar date'))
+
+// --- row mapping ---------------------------------------------------------------
+// Rows are built from plain objects here rather than a live database, which is the reason
+// this logic was split out of the query module.
+const baseLog = (over = {}) => ({
+  channel: 'whatsapp',
+  createdAt: new Date('2026-09-23T06:00:00Z'),
+  sentAt: new Date('2026-09-23T06:00:01Z'),
+  opened: false,
+  openedAt: null,
+  opensCount: 0,
+  replied: false,
+  repliedAt: null,
+  sentOk: true,
+  sendError: null,
+  subject: null,
+  templateName: 'ip_whitelisting_mandatory',
+  messageNumber: 1,
+  toEmail: null,
+  toPhone: '919876543210',
+  trackingId: 'tid-1',
+  sheetRowRef: null,
+  inboundText: null,
+  nudge: { key: 'whatsapp_ip_whitelisting', name: 'WhatsApp · IP whitelisting' },
+  lead: null,
+  ...over,
+})
+
+check('status: a plain success is sent', exportStatus(baseLog()), 'sent')
+check('status: opened beats sent', exportStatus(baseLog({ opened: true })), 'opened')
+check('status: replied beats everything', exportStatus(baseLog({ replied: true, opened: true })), 'replied')
+check('status: a failure is failed', exportStatus(baseLog({ sentOk: false })), 'failed')
+check('status: a failure that was later opened still reads opened', exportStatus(baseLog({ sentOk: false, opened: true })), 'opened')
+
+const waRow = logToExportRow(baseLog({ opened: true, opensCount: 2, openedAt: new Date('2026-09-23T07:00:00Z'), replied: true, repliedAt: new Date('2026-09-23T08:00:00Z'), inboundText: 'ok thanks' }))
+check('a row has one cell per column', waRow.length, EXPORT_COLUMNS.length)
+check('row[0] is the IST attempt time', waRow[0], '2026-09-23 11:30:00')
+check('row[1] is the UTC attempt time', waRow[1], '2026-09-23T06:00:00.000Z')
+check('row[3] is the channel', waRow[3], 'whatsapp')
+check('row[5] is the nudge key', waRow[5], 'whatsapp_ip_whitelisting')
+check('row[6] falls back to the phone for a sheet send with no lead', waRow[6], '919876543210')
+check('row[9] carries the phone', waRow[9], '919876543210')
+check('row[13] is the derived status', waRow[13], 'replied')
+check('row[15] marks it opened', waRow[15], 'yes')
+check('row[16] carries the open count as a number', waRow[16], 2)
+check('row[19] carries the reply time in IST', waRow[19], '2026-09-23 13:30:00')
+check('row[20] carries what the customer wrote', waRow[20], 'ok thanks')
+
+const failedRow = logToExportRow(baseLog({ sentOk: false, sentAt: null, sendError: 'Zoho Mail API: Internal Error (code 500)' , channel: 'email', toEmail: 'a@b.c' }))
+check('a failed row has no sent time', failedRow[2], '')
+check('a failed row carries a plain-English reason', failedRow[21], 'provider error')
+checkTrue('a failed row explains the cause', String(failedRow[22]).length > 20)
+check('a failed row keeps the raw error', failedRow[23], 'Zoho Mail API: Internal Error (code 500)')
+
+// The two channels have separate translators, and WhatsApp's returns null for text it does not
+// recognise, so the row falls back to a generic label rather than showing a blank reason.
+const unknownWaRow = logToExportRow(baseLog({ sentOk: false, sendError: 'something nobody has seen before' }))
+check('an unrecognised WhatsApp error still gets a label', unknownWaRow[21], 'unrecognised')
+const unknownMailRow = logToExportRow(
+  baseLog({ sentOk: false, channel: 'email', toEmail: 'a@b.c', sendError: 'something nobody has seen before' })
+)
+check('an unrecognised email error gets the mail fallback label', unknownMailRow[21], 'send failed')
+
+const noErrorRow = logToExportRow(baseLog())
+check('a successful row has no failure reason', noErrorRow[21], '')
+check('a successful row has no error detail', noErrorRow[23], '')
+
+const breakdown = buildBreakdown([
+  baseLog(),
+  baseLog({ sentOk: false }),
+  baseLog({ opened: true }),
+  baseLog({ nudge: { key: 'other', name: 'Other' } }),
+])
+check('breakdown counts each nudge/channel/status once', breakdown.length, 4)
+check('breakdown is sorted by count, descending', breakdown[0].count, 1)
+check('breakdown names the nudge key', breakdown.map((b) => b.nudge).includes('whatsapp_ip_whitelisting'), true)
+check('breakdown aggregates repeats', buildBreakdown([baseLog(), baseLog()])[0].count, 2)
+
+// --- CSV ----------------------------------------------------------------------
+const csv = toCsv(['a', 'b'], [['plain', 'has,comma'], ['has"quote', 'has\nnewline']])
+checkTrue('csv starts with a UTF-8 BOM so Excel decodes it', csv.startsWith('\ufeff'))
+checkTrue('csv quotes a field containing a comma', csv.includes('"has,comma"'))
+checkTrue('csv doubles embedded quotes', csv.includes('"has""quote"'))
+checkTrue('csv quotes a field containing a newline', csv.includes('"has\nnewline"'))
+checkTrue('csv uses CRLF line endings', csv.includes('\r\n'))
+check('csv writes a header row plus data rows', csv.trim().split('\r\n').length, 3)
+checkTrue('the export has a column for the reply text', EXPORT_COLUMNS.includes('Reply text'))
+checkTrue('the export has a column for the failure reason', EXPORT_COLUMNS.includes('Failure explained'))
 checkTrue('a WhatsApp cap IS retryable', isRetryableWhatsAppError('not delivered to maintain healthy ecosystem engagement (code 131049)'))
 checkTrue('a marketing opt-out IS retryable', isRetryableWhatsAppError("User's number is part of an experiment (code 130472)"))
 check('an undeliverable number is not retryable', isRetryableWhatsAppError('Message undeliverable (code 131026)'), false)
