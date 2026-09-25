@@ -113,6 +113,28 @@ parameter-count mismatch. `whatsappParams` is therefore `{ "body": [] }` for it 
 The whitelisting notice also has **no email twin**, so it has no fallback — the send is WhatsApp or
 nothing, and a failure appears in the Failures tab for a manual retry.
 
+#### Sheet nudges have no per-lead message cap
+
+`maxEmailsPerLead` and `followUpDays` are read **only** by `decideSend`, which runs on the
+lead-driven paths (`runNudge`, `runMysqlNudge`, `previewNudge`). The sheet-run route never calls it:
+it applies its own rule instead — **one message per recipient, skipping anyone with an earlier
+successful send on the same nudge**.
+
+So a cap on a sheet nudge is a control that does nothing. That was true even while those nudges were
+set to "3 messages, spaced 2 days": nothing read it, and the sends were not spaced. Guarded now by
+`capAppliesTo()` in `src/lib/nudge-kind.ts`:
+
+| Where | Behaviour |
+| --- | --- |
+| Nudge editor | The two fields are **not shown** for a sheet nudge; the sending rule is explained instead |
+| Nudge card | Shows "once per recipient (sheet)" rather than "max N/lead · follow-up every Nd" |
+| Dashboard engagement blocks | Show "once per recipient", driven by a `capApplies` flag from the API |
+| `npm run nudges:set-cap` | Refuses to write a cap to a sheet nudge, and names the ones it skipped |
+
+`npm run nudges:set-cap -- --normalise-sheet --apply` resets the sheet nudges to `1 / 0` — the honest
+equivalent of "once per recipient". Note that **0 is not "unlimited"**: `decideSend` treats
+`logs.length >= max` as done, so 0 would mean "never send".
+
 To add another: add an entry to `WA_SHEET_FLOW_TEMPLATES` in `src/lib/nudge-defaults.ts`, then
 
 ```bash
@@ -234,13 +256,17 @@ cycles — three messages in a few hours, which is both spam and an instant way 
 per-user marketing cap. Change it with:
 
 ```bash
-npm run nudges:set-cap                      # dry run, shows a before/after per nudge
+npm run nudges:set-cap                      # dry run, lead-driven nudges only
 npm run nudges:set-cap -- --apply --max 3 --follow-up-days 2
 ```
 
 That script exists instead of `seed:nudges --force` because `--force` rewrites *every* field,
-including templates edited in the UI. It touches two columns on four rows, prints a diff, and never
-touches `enabled` — pausing and resuming stays the operator's call.
+including templates edited in the UI. It touches two columns on the named rows, prints a diff, and
+never touches `enabled` — pausing and resuming stays the operator's call.
+
+> **Corrected:** these four are all **sheet nudges**, and a sheet nudge has no per-lead cap at all —
+> see [Sheet nudges have no per-lead message cap](#sheet-nudges-have-no-per-lead-message-cap). The
+> "3 messages, spaced 2 days" setting was applied here at one point and was inert the whole time.
 
 ---
 

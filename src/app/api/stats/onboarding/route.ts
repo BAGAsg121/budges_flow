@@ -19,6 +19,7 @@ import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { WA_EMAIL_TWIN } from '@/lib/nudge-defaults'
 import { buildDailySeries } from '@/lib/engagement-stats'
+import { capAppliesTo } from '@/lib/nudge-kind'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
@@ -89,7 +90,16 @@ export async function GET(req: Request) {
 
   const nudges = await db.nudge.findMany({
     where: { key: { in: [...new Set([...keys, ...fallbackKeys])] } },
-    select: { id: true, key: true, name: true, maxEmailsPerLead: true, followUpDays: true, enabled: true },
+    select: {
+      id: true,
+      key: true,
+      name: true,
+      maxEmailsPerLead: true,
+      followUpDays: true,
+      enabled: true,
+      zohoCriteria: true,
+      filters: true,
+    },
   })
   const byKey = new Map(nudges.map((n) => [n.key, n]))
 
@@ -194,6 +204,11 @@ export async function GET(req: Request) {
           emailFollowUpDays: byKey.get(f.emailKey)?.followUpDays ?? null,
           whatsappMax: byKey.get(f.whatsappKey)?.maxEmailsPerLead ?? null,
           whatsappFollowUpDays: byKey.get(f.whatsappKey)?.followUpDays ?? null,
+          // The cap only governs lead-driven nudges; a sheet nudge is sent by the sheet-run
+          // route, which applies "one message per recipient" instead. The UI must not show a
+          // limit that nothing enforces.
+          emailCapApplies: byKey.get(f.emailKey) ? capAppliesTo(byKey.get(f.emailKey)!) : false,
+          whatsappCapApplies: byKey.get(f.whatsappKey) ? capAppliesTo(byKey.get(f.whatsappKey)!) : false,
         },
         /** This family's own two nudges only — never the other family's. */
         nudgeKeys: [f.emailKey, f.whatsappKey],

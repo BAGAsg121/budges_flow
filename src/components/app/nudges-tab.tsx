@@ -20,6 +20,7 @@ import {
 } from '@/components/ui/alert-dialog'
 import { useToast } from '@/hooks/use-toast'
 import type { NudgeChannel, NudgeDto, PreviewDto, RunSummaryDto } from '@/lib/app-types'
+import { capAppliesTo, nudgeSourceOf, SHEET_DEDUP_RULE } from '@/lib/nudge-kind'
 
 const TEMPLATE_VARS =
   '{{first_name}}, {{full_name}}, {{email}}, {{company}}, {{lead_status}}, {{kyc_document_upload_count}}, {{owner_name}}, {{city}}, {{message_number}}, {{today}}'
@@ -56,17 +57,6 @@ function ChannelBadge({ channel }: { channel: NudgeChannel }) {
       <Mail className="h-3 w-3" /> Email
     </Badge>
   )
-}
-
-/** A nudge is driven by one of three sources, encoded in its existing fields. */
-function nudgeSourceOf(n: NudgeDto): 'zoho' | 'mysql' | 'sheet' {
-  try {
-    const f = JSON.parse(n.filters || '{}') as { source?: string }
-    if (f.source === 'mysql') return 'mysql'
-  } catch {
-    // unparseable filters -> fall through
-  }
-  return n.zohoCriteria && n.zohoCriteria.trim() ? 'zoho' : 'sheet'
 }
 
 function reasonBadge(reason: string, detail?: string) {
@@ -349,6 +339,8 @@ export function NudgesTab({
   }
 
   const isWhatsApp = form.channel === 'whatsapp'
+  // Whether the per-lead cap is meaningful for what is being edited. See nudge-kind.ts.
+  const capApplies = capAppliesTo({ zohoCriteria: form.zohoCriteria, filters: form.filters })
   const activeCount = nudges.filter((n) => n.enabled).length
 
   return (
@@ -423,8 +415,16 @@ export function NudgesTab({
 
                 <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-muted-foreground">
                   <span><Send className="inline h-3 w-3 mr-1" />{n.messagesSent} messages sent</span>
-                  <span><RefreshCcw className="inline h-3 w-3 mr-1" />max {n.maxEmailsPerLead}/lead</span>
-                  <span>follow-up every {n.followUpDays}d</span>
+                  {/* Only show a cap that actually governs this nudge. A sheet nudge reports
+                      "once per recipient" because that is the rule the send path really applies. */}
+                  {capAppliesTo(n) ? (
+                    <>
+                      <span><RefreshCcw className="inline h-3 w-3 mr-1" />max {n.maxEmailsPerLead}/lead</span>
+                      <span>follow-up every {n.followUpDays}d</span>
+                    </>
+                  ) : (
+                    <span><RefreshCcw className="inline h-3 w-3 mr-1" />once per recipient (sheet)</span>
+                  )}
                   <span>last run: {n.lastRunAt ? new Date(n.lastRunAt).toLocaleString() : 'never'}</span>
                 </div>
 
@@ -546,20 +546,41 @@ export function NudgesTab({
               </div>
             )}
 
-            <div className="grid gap-4 sm:grid-cols-3">
-              <div className="grid gap-1.5">
-                <Label htmlFor="n-max">Max messages / lead</Label>
-                <Input id="n-max" type="number" min={1} value={form.maxEmailsPerLead} onChange={(e) => setForm({ ...form, maxEmailsPerLead: Number(e.target.value) })} />
+            {/* The per-lead cap only governs lead-driven sending. A sheet nudge is sent by the
+                sheet-run route, which never consults it — offering the control there would be a
+                setting that silently does nothing. */}
+            {capApplies ? (
+              <div className="grid gap-4 sm:grid-cols-3">
+                <div className="grid gap-1.5">
+                  <Label htmlFor="n-max">Max messages / lead</Label>
+                  <Input id="n-max" type="number" min={1} value={form.maxEmailsPerLead} onChange={(e) => setForm({ ...form, maxEmailsPerLead: Number(e.target.value) })} />
+                  <p className="field-hint">How many times one lead may be messaged in total.</p>
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="n-fup">Follow-up gap (days)</Label>
+                  <Input id="n-fup" type="number" min={0} value={form.followUpDays} onChange={(e) => setForm({ ...form, followUpDays: Number(e.target.value) })} />
+                  <p className="field-hint">Days to wait before the next message to the same lead.</p>
+                </div>
+                <div className="flex items-start gap-2 pb-1">
+                  <Switch id="n-enabled" checked={form.enabled} onCheckedChange={(v) => setForm({ ...form, enabled: v })} />
+                  <Label htmlFor="n-enabled">Enabled</Label>
+                </div>
               </div>
-              <div className="grid gap-1.5">
-                <Label htmlFor="n-fup">Follow-up gap (days)</Label>
-                <Input id="n-fup" type="number" min={0} value={form.followUpDays} onChange={(e) => setForm({ ...form, followUpDays: Number(e.target.value) })} />
+            ) : (
+              <div className="grid gap-4 sm:grid-cols-3">
+                <div className="sm:col-span-2 rounded-lg border border-border bg-muted/40 px-3 py-2">
+                  <p className="text-xs font-medium">Sending rule for a sheet nudge</p>
+                  <p className="field-hint mt-0.5">
+                    {SHEET_DEDUP_RULE} There is no per-lead message cap to set: it applies to
+                    lead-driven nudges only.
+                  </p>
+                </div>
+                <div className="flex items-start gap-2 pb-1 sm:pt-2">
+                  <Switch id="n-enabled" checked={form.enabled} onCheckedChange={(v) => setForm({ ...form, enabled: v })} />
+                  <Label htmlFor="n-enabled">Enabled</Label>
+                </div>
               </div>
-              <div className="flex items-end gap-2 pb-1">
-                <Switch id="n-enabled" checked={form.enabled} onCheckedChange={(v) => setForm({ ...form, enabled: v })} />
-                <Label htmlFor="n-enabled">Enabled</Label>
-              </div>
-            </div>
+            )}
 
             {isWhatsApp ? (
               <>

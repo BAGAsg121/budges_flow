@@ -58,9 +58,13 @@ export async function GET(req: NextRequest) {
     // Preview mode: how many rows would this produce? Lets the UI show a count before the
     // operator commits to a download.
     if (sp.get('countOnly') === '1') {
-      const { rowCount, truncated } = await countLogExport({ from, to, nudgeKey, channel, status })
+      const count = await countLogExport({ from, to, nudgeKey, channel, status })
       return NextResponse.json(
-        { ok: true, rowCount, truncated, description: { from, to, nudgeKey: nudgeKey || 'all', channel: channel || 'all', status: status || 'all' } },
+        {
+          ok: true,
+          ...count,
+          description: { from, to, nudgeKey: nudgeKey || 'all', channel: channel || 'all', status: status || 'all' },
+        },
         { headers: { 'Cache-Control': 'no-store' } }
       )
     }

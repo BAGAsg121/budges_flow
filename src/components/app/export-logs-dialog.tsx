@@ -17,12 +17,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { useToast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
 
+/** yyyy-mm-dd for the IST day containing `date` — used to jump the range to a known-active day. */
+function istDayOffsetFor(date: Date): string {
+  return new Date(date.getTime() + (5 * 60 + 30) * 60 * 1000).toISOString().slice(0, 10)
+}
+
 /** yyyy-mm-dd for the IST day `daysAgo` days back, matching the server's IST day boundaries. */
 function istDayOffset(daysAgo: number): string {
-  const now = new Date()
-  const ist = new Date(now.getTime() + (5 * 60 + 30) * 60 * 1000)
-  ist.setUTCDate(ist.getUTCDate() - daysAgo)
-  return ist.toISOString().slice(0, 10)
+  return istDayOffsetFor(new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000))
 }
 
 const PRESETS = [
@@ -63,7 +65,7 @@ export function ExportLogsDialog({
   const [status, setStatus] = useState('all')
   const [format, setFormat] = useState<'xlsx' | 'csv'>('xlsx')
   const [nudges, setNudges] = useState<NudgeOption[]>([])
-  const [preview, setPreview] = useState<{ rowCount: number; truncated: boolean } | null>(null)
+  const [preview, setPreview] = useState<{ rowCount: number; truncated: boolean; latestAt: string | null } | null>(null)
   const [counting, setCounting] = useState(false)
   const [downloading, setDownloading] = useState(false)
 
@@ -114,9 +116,9 @@ export function ExportLogsDialog({
     const t = setTimeout(() => {
       fetch(`/api/logs/export?${query({ countOnly: '1' })}`)
         .then((r) => (r.ok ? r.json() : null))
-        .then((d: { rowCount?: number; truncated?: boolean } | null) => {
+        .then((d: { rowCount?: number; truncated?: boolean; latestAt?: string | null } | null) => {
           if (!cancelled && d && typeof d.rowCount === 'number') {
-            setPreview({ rowCount: d.rowCount, truncated: Boolean(d.truncated) })
+            setPreview({ rowCount: d.rowCount, truncated: Boolean(d.truncated), latestAt: d.latestAt ?? null })
           }
         })
         .catch(() => {
@@ -159,6 +161,9 @@ export function ExportLogsDialog({
 
   const nudgesForChannel = channel === 'all' ? nudges : nudges.filter((n) => n.channel === channel)
   const nothingMatched = preview?.rowCount === 0
+  // Captured as a const: narrowing a property access does not survive into the onClick closure
+  // below, but narrowing a const does.
+  const latestAt = preview?.latestAt ?? null
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -297,30 +302,58 @@ export function ExportLogsDialog({
             </div>
           </div>
 
-          {/* Live count */}
+          {/* Live count. When a range comes back empty or thin, say where the data actually is —
+              an export of a quiet day otherwise reads as "the logs have been deleted". */}
           <div
             className={cn(
-              'flex items-center gap-2 rounded-lg border px-3 py-2 text-xs',
+              'flex flex-col gap-1 rounded-lg border px-3 py-2 text-xs',
               nothingMatched ? 'border-warning/30 bg-warning/10 text-warning' : 'border-border bg-muted/40 text-muted-foreground'
             )}
           >
-            {counting ? (
-              <>
-                <Loader2 className="h-3.5 w-3.5 animate-spin" /> counting…
-              </>
-            ) : preview ? (
-              nothingMatched ? (
-                <>No logs match these filters — try widening the range or clearing the nudge.</>
-              ) : (
+            <div className="flex items-center gap-2">
+              {counting ? (
                 <>
-                  <b className="tabular">{preview.rowCount.toLocaleString()}</b> row(s) will be exported · detail sheet + a
-                  summary tab
-                  {preview.truncated ? ' · this range is very large and will be truncated' : ''}
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" /> counting…
                 </>
-              )
-            ) : (
-              <>Pick a valid date range to see how many rows match.</>
-            )}
+              ) : preview ? (
+                nothingMatched ? (
+                  <>
+                    <b>No logs</b> in this range for this selection.
+                  </>
+                ) : (
+                  <>
+                    <b className="tabular">{preview.rowCount.toLocaleString()}</b> row(s) will be exported · detail sheet + a
+                    summary tab
+                    {preview.truncated ? ' · this range is very large and will be truncated' : ''}
+                  </>
+                )
+              ) : (
+                <>Pick a valid date range to see how many rows match.</>
+              )}
+            </div>
+
+            {latestAt && !counting ? (
+              <p className={cn('flex flex-wrap items-center gap-1', nothingMatched && 'text-warning')}>
+                Most recent activity for this selection:{' '}
+                <b>{new Date(latestAt).toLocaleString()}</b>
+                {nothingMatched ? ' — widen the range to include it.' : ''}
+                {nothingMatched ? (
+                  <Button
+                    type="button"
+                    variant="link"
+                    className="h-auto p-0 text-xs font-semibold underline"
+                    onClick={() => {
+                      const d = istDayOffsetFor(new Date(latestAt))
+                      setFrom(d)
+                      setTo(d)
+                      setPreset('custom')
+                    }}
+                  >
+                    Jump to that day
+                  </Button>
+                ) : null}
+              </p>
+            ) : null}
           </div>
         </div>
 

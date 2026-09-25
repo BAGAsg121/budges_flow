@@ -633,3 +633,50 @@ Stage Summary:
 - Logs can be exported to .xlsx or .csv by date range, nudge, channel and status, from the UI or the CLI, with a row count shown before download.
 - The workbook has a detail sheet and a Summary sheet, and includes the customer's reply text and a plain-English failure reason.
 - No spreadsheet dependency was added; the writer is validated by reading its own output back.
+
+---
+
+Task ID: 28
+Agent: Main agent (DeepSeek Harness)
+Task: "Are you deleting old logs?" — the export for two nudges looked wrong.
+
+Work Log:
+- ANSWERED WITH EVIDENCE, NOT REASSURANCE. Total log rows went 1,102 -> 1,442 and WhatsApp rows 174 -> 514 between the two checks: the table is GROWING. The only code path that can remove a log is deleting a nudge (Prisma cascade), and no nudge has ever been deleted — the nudge list only grew. Nothing was deleted.
+- Found the user's rows and proved the count matches their own recollection: they said they uploaded ~58 rows for onboarding-not-transacting and ~48 for onboarding-transacting. The database holds exactly 58 rows on 2026-09-23 for the first and 49 for the second (48 + 1). Their export was for 2026-09-24, which legitimately contains only 1 and 17 rows.
+  Root of the confusion: the export dialog defaults to "Yesterday", and the big run happened TWO days earlier. Nothing was missing; the range was.
+  Also visible in the trace: for the transacting nudge, 16 phone numbers appear on BOTH days — those are the 09-23 failures retried on 09-24. The not-transacting run had zero cross-day overlap.
+- TWO REAL BUGS FOUND WHILE CHECKING (both in the hand-rolled writer):
+  1. The Summary sheet declared `<dimension ref="A1:A11"/>` and an autofilter over column A while actually holding FOUR columns — the used range was computed from the header count, and that sheet has no header row. An understated dimension can make Excel show a truncated used range. Fixed: the range now spans the widest of the header and the data rows; the frozen pane, autofilter and header row are emitted only when a header exists. A second bug surfaced immediately after: `lastRow` also assumed a header, so a header-less sheet was one row too tall. The new test caught it.
+  2. Every sheet-flow WhatsApp nudge was named "WhatsApp · Onboarded but not transacting (WhatsApp)" — the title already ends in "(WhatsApp)" and the seed prefixed it again. Visible in the UI and in every export. Suffix stripped.
+- MY OWN TOOL WAS ALSO LYING, and I nearly reported it as a data bug: dump-xlsx.mjs read cells positionally instead of by their `r` reference, so the first empty cell in a row shifted every column after it and made a correct workbook look scrambled. Fixed to place cells by column reference. Worth stating plainly: the first thing I "found" was a defect in my inspector, not in the file.
+- NEW SAFEGUARD so this specific confusion cannot repeat silently: the count-only preview now also returns `latestAt` — the most recent activity for the chosen nudge/channel/status IGNORING the date range. When a range comes back empty, the dialog says "Most recent activity for this selection: <date>" with a "Jump to that day" link that sets the range. An empty export previously looked identical to "the logs are gone", which invites exactly the wrong conclusion.
+- verify now 396 assertions. tsc clean, eslint clean.
+
+Stage Summary:
+- No logs were ever deleted. The user's 58 and 48 rows are present on 2026-09-23 and export correctly for that day.
+- Two genuine writer bugs fixed (Summary sheet used range; duplicated nudge name), plus my dump tool.
+- The export dialog now tells you where the data is instead of showing an empty result.
+
+---
+
+Task ID: 29
+Agent: Main agent (DeepSeek Harness)
+Task: Remove the max-messages-per-lead option from the manual (sheet-upload) nudges.
+
+Work Log:
+- CHECKED BEFORE CHANGING, and found that the option never did anything on these nudges. `maxEmailsPerLead` and `followUpDays` are read only by `decideSend`, whose callers are runNudge (512), runMysqlNudge (398) and previewNudge (715) — all LEAD-DRIVEN. The sheet-run route never calls it; it applies its own rule, "skip anyone with an earlier successful send on the same nudge and address".
+  So the Task 22 change that set these four nudges to max=3 / follow-up 2 days was INERT, and I told the user at the time that it would space the sends two days apart. It never did. That is on me: I set a value without checking what read it. Corrected in the README and here.
+- New src/lib/nudge-kind.ts is the single source of truth for the distinction: nudgeSourceOf() (moved out of nudges-tab, which had its own copy), isManualSheetNudge(), capAppliesTo() and SHEET_DEDUP_RULE. capAppliesTo() returns false only for sheet nudges — MySQL flows DO go through decideSend, so their cap is real.
+- UI now stops offering a control that does nothing:
+  * The nudge editor hides "Max messages / lead" and "Follow-up gap (days)" for a sheet nudge and explains the actual rule instead; it shows them, with hints, for lead-driven nudges.
+  * The nudge card shows "once per recipient (sheet)" instead of "max N/lead · follow-up every Nd".
+  * The dashboard engagement blocks take a new capApplies flag from /api/stats/onboarding (added to the payload, derived server-side with capAppliesTo) and show "once per recipient" for sheet nudges.
+- Data normalised: the five sheet nudges were reset to 1 / 0 — the honest equivalent of the one-message-per-recipient rule. Deliberately NOT 0 for the cap: decideSend treats `logs.length >= max` as done, so 0 would mean "never send", which is a trap. Verified 1/0 and enabled state preserved on all five (all were ON and stayed ON).
+- scripts/set-max-per-lead.mjs reworked so it cannot repeat my mistake: it now classifies every nudge and only writes a cap to lead-driven ones, naming the sheet nudges it skipped and telling you to use --normalise-sheet. Running it reports "Lead-driven nudges (the cap APPLIES): 10 — Zoho-criteria and MySQL flows" and "Sheet nudges (the cap does NOT apply): 5".
+- Tests: the cap classification, that all five sheet nudges carry 1/0, that lead-driven ones keep a real cap (documents_pending_wa still 3), and that a Zoho nudge with unparseable filters still classifies. Four assertions from Task 22 asserted the OLD intent ("all four cap at 3", "IP nudge is capped at 3") and had to be replaced — they were pinning behaviour we have just decided was wrong.
+- verify now 411 assertions. tsc clean, eslint clean.
+
+Stage Summary:
+- No sheet nudge offers, stores or displays a per-lead message cap any more; the UI states the rule that actually applies.
+- Corrected a claim I made two tasks ago: the 3-message cap on those sheet nudges never took effect, and neither did the 2-day spacing.
+- Lead-driven nudges (4 Zoho + 6 MySQL) are unaffected and still honour their caps.

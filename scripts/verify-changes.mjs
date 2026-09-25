@@ -17,6 +17,7 @@ import { explainMailError, isRetryableMailError } from '../src/lib/mail-errors.t
 import { isRetryableWhatsAppError } from '../src/lib/whatsapp-errors.ts'
 import { buildSheetVars, normaliseMobileDigits, pickSheetEmail, pickSheetMobile } from '../src/lib/sheet-vars.ts'
 import { buildDailySeries, seriesIsEmpty, istDayKey } from '../src/lib/engagement-stats.ts'
+import { nudgeSourceOf, capAppliesTo, isManualSheetNudge } from '../src/lib/nudge-kind.ts'
 import { buildXlsx, buildZip, crc32, columnLetter, sanitiseSheetName } from '../src/lib/xlsx.ts'
 import { istDay, istDateTime, istRangeToUtc, istDaysAgo, toCsv, exportStatus, logToExportRow, buildBreakdown, EXPORT_COLUMNS } from '../src/lib/export-format.ts'
 import { readZip, validateXlsx } from './lib/read-zip.mjs'
@@ -373,17 +374,19 @@ checkTrue('IP body asks for the Eko Code', /Eko Code/i.test(ipWa?.body || ''))
 checkTrue('IP body carries no promotional wording', !/discount|offer|expiring/i.test(ipWa?.body || ''))
 checkTrue('IP body is within Meta\'s 1024-character limit', (ipWa?.body || '').length <= 1024)
 checkTrue('IP body has no unreplaced variables', !/\{\{\d+\}\}/.test(ipWa?.body || ''))
-check('IP nudge is capped at 3 per lead', ipNudge?.maxEmailsPerLead, 3)
-checkTrue('IP nudge spaces its follow-ups', (ipNudge?.followUpDays ?? 0) > 0)
-// Every activation-fee nudge allows 3 attempts.
+// The IP nudge is sheet-driven, so it carries no meaningful cap. (It previously asserted 3/2,
+// from when a cap was set on it without checking that anything read it.)
+check('IP nudge carries no applied cap', ipNudge?.maxEmailsPerLead, 1)
+check('IP nudge carries no follow-up gap', ipNudge?.followUpDays, 0)
+check('the IP nudge is sheet-driven, so its cap is inert', capAppliesTo(ipNudge), false)
+// The four activation-fee nudges are all sheet-driven too, so none of them has an applied cap.
 check(
-  'all four activation-fee nudges cap at 3 per lead',
-  DEFAULT_NUDGES.filter((n) => /^(whatsapp_)?onboarded_(not_)?transacting$/.test(n.key)).map((n) => n.maxEmailsPerLead).join(','),
-  '3,3,3,3'
-)
-checkTrue(
-  'all four space their follow-ups',
-  DEFAULT_NUDGES.filter((n) => /^(whatsapp_)?onboarded_(not_)?transacting$/.test(n.key)).every((n) => n.followUpDays > 0)
+  'no activation-fee nudge claims a multi-message cap',
+  DEFAULT_NUDGES.filter((n) => /^(whatsapp_)?onboarded_(not_)?transacting$/.test(n.key))
+    .filter((n) => n.maxEmailsPerLead !== 1 || n.followUpDays !== 0)
+    .map((n) => n.key)
+    .join(','),
+  ''
 )
 
 // --- Zoho MCP tool selection and argument building ---------------------------
@@ -801,6 +804,47 @@ check('sheet vars: first_name falls back to the email local part', noName.first_
 check('column picker accepts email_address', pickSheetEmail({ email_address: 'x@y.z' }), 'x@y.z')
 check('column picker accepts whatsapp for mobile', pickSheetMobile({ whatsapp: '999' }), '999')
 
+
+// --- the per-lead cap only governs lead-driven nudges -------------------------
+// The cap is read ONLY by decideSend, which runs on the lead-driven paths. The sheet-run route
+// never calls it — it applies "one message per recipient" instead. So a cap on a sheet nudge is
+// a control that does nothing, and the UI must not offer it.
+check('a Zoho-criteria nudge is lead-driven', nudgeSourceOf({ zohoCriteria: '((a:b:c))', filters: '{}' }), 'zoho')
+check('a nudge with no criteria is a sheet nudge', nudgeSourceOf({ zohoCriteria: null, filters: '{}' }), 'sheet')
+check('an empty criteria string is a sheet nudge', nudgeSourceOf({ zohoCriteria: '   ', filters: '{}' }), 'sheet')
+check('filters.source=mysql wins over having no criteria', nudgeSourceOf({ zohoCriteria: null, filters: '{"source":"mysql"}' }), 'mysql')
+check('unparseable filters do not throw', nudgeSourceOf({ zohoCriteria: '((x))', filters: 'not json' }), 'zoho')
+
+check('the cap applies to a Zoho nudge', capAppliesTo({ zohoCriteria: '((a))' }), true)
+check('the cap applies to a MySQL nudge', capAppliesTo({ zohoCriteria: null, filters: '{"source":"mysql"}' }), true)
+check('the cap does NOT apply to a sheet nudge', capAppliesTo({ zohoCriteria: null, filters: '{"source":"sheet"}' }), false)
+
+// Every sheet nudge in the defaults must carry the honest 1 / 0, never a cap that misleads.
+const sheetNudges = DEFAULT_NUDGES.filter((n) => !capAppliesTo(n))
+const sheetKeys = DEFAULT_NUDGES.filter((n) => !capAppliesTo(n)).map((n) => n.key)
+checkTrue('the defaults contain sheet nudges to check', sheetNudges.length >= 5)
+check(
+  'no sheet nudge claims a multi-message cap',
+  sheetNudges.filter((n) => n.maxEmailsPerLead !== 1).map((n) => n.key).join(','),
+  ''
+)
+check(
+  'no sheet nudge claims a follow-up gap',
+  sheetNudges.filter((n) => n.followUpDays !== 0).map((n) => n.key).join(','),
+  ''
+)
+checkTrue('the IP whitelisting nudge is treated as a sheet nudge', sheetKeys.includes('whatsapp_ip_whitelisting'))
+checkTrue('the onboarding email twins are sheet nudges', sheetKeys.includes('onboarded_transacting') && sheetKeys.includes('onboarded_not_transacting'))
+// And a lead-driven nudge must NOT have been flattened to 1/0 by the same change.
+check(
+  'lead-driven nudges keep a real cap',
+  DEFAULT_NUDGES.filter((n) => capAppliesTo(n)).every((n) => n.maxEmailsPerLead >= 1),
+  true
+)
+checkTrue(
+  'documents_pending_wa (lead-driven) still allows 3',
+  DEFAULT_NUDGES.find((n) => n.key === 'documents_pending_wa')?.maxEmailsPerLead === 3
+)
 
 console.log(failures === 0 ? '\nAll checks passed.' : `\n${failures} check(s) FAILED.`)
 process.exit(failures === 0 ? 0 : 1)

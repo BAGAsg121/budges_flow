@@ -39,8 +39,9 @@ export interface ExportResult {
 }
 
 /** Shared by the export and the count-only preview, so the two can never disagree. */
-function buildExportWhere(filters: ExportFilters, start: Date, end: Date): Record<string, unknown> {
-  const where: Record<string, unknown> = { createdAt: { gte: start, lte: end } }
+function buildExportWhere(filters: ExportFilters, range?: { start: Date; end: Date }): Record<string, unknown> {
+  const where: Record<string, unknown> = {}
+  if (range) where.createdAt = { gte: range.start, lte: range.end }
   if (filters.nudgeKey) where.nudge = { key: filters.nudgeKey }
   if (filters.channel === 'email' || filters.channel === 'whatsapp') where.channel = filters.channel
   if (filters.status === 'failed') where.sentOk = false
@@ -50,21 +51,44 @@ function buildExportWhere(filters: ExportFilters, start: Date, end: Date): Recor
   return where
 }
 
+export interface ExportCount {
+  rowCount: number
+  truncated: boolean
+  /**
+   * When this nudge/channel/status was last active, IGNORING the date range.
+   *
+   * Without this, an export of a quiet day looks identical to "the logs are gone" — which is
+   * exactly the wrong conclusion to invite. The dialog uses it to say where the data actually is.
+   */
+  latestAt: string | null
+}
+
 /**
  * How many rows the same filters would produce, without building the file.
  *
  * Used by the export dialog so the operator can see "59 rows" before committing to a download —
  * and so a mistyped date range shows up as an obviously wrong number rather than a surprise.
  */
-export async function countLogExport(filters: ExportFilters): Promise<{ rowCount: number; truncated: boolean }> {
-  const { start, end } = istRangeToUtc(filters.from, filters.to)
-  const rowCount = await db.messageLog.count({ where: buildExportWhere(filters, start, end) })
-  return { rowCount, truncated: rowCount >= EXPORT_ROW_LIMIT }
+export async function countLogExport(filters: ExportFilters): Promise<ExportCount> {
+  const range = istRangeToUtc(filters.from, filters.to)
+  const [rowCount, latest] = await Promise.all([
+    db.messageLog.count({ where: buildExportWhere(filters, range) }),
+    db.messageLog.findFirst({
+      where: buildExportWhere(filters), // same filters, no date range
+      orderBy: { createdAt: 'desc' },
+      select: { createdAt: true },
+    }),
+  ])
+  return {
+    rowCount,
+    truncated: rowCount >= EXPORT_ROW_LIMIT,
+    latestAt: latest?.createdAt.toISOString() ?? null,
+  }
 }
 
 export async function buildLogExport(filters: ExportFilters): Promise<ExportResult> {
   const { start, end } = istRangeToUtc(filters.from, filters.to)
-  const where = buildExportWhere(filters, start, end)
+  const where = buildExportWhere(filters, { start, end })
 
   const logs = await db.messageLog.findMany({
     where,

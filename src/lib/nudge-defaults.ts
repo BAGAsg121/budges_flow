@@ -417,12 +417,12 @@ export const DEFAULT_NUDGES: NudgeSeed[] = [
     filters: json({ requireEmail: true }),
     subjectTemplate: '🎉 Special discounts expiring soon — pay your activation fee today',
     bodyTemplate: ONBOARDED_TRANSACTING_BODY,
-    // These four activation-fee nudges (two email, two WhatsApp) allow 3 attempts per lead,
-    // spaced 2 days apart. followUpDays is NOT optional here: with max=3 and a 0-day gap the
-    // scheduler would fire all three on consecutive cycles — three messages in a few hours,
-    // which is both spam and an instant way to hit Meta's per-user marketing cap.
-    maxEmailsPerLead: 3,
-    followUpDays: 2,
+    // NOT a cap. Sheet nudges are sent by the sheet-run route, which never reads these — it
+    // applies "one message per recipient, ever" instead. They are set to the honest equivalent
+    // of that rule and are not offered in the UI (see nudge-kind.ts: capAppliesTo).
+    // NOTE: 0 would mean "never send" in decideSend, so it must not be used here.
+    maxEmailsPerLead: 1,
+    followUpDays: 0,
   },
   {
     key: 'onboarded_not_transacting',
@@ -435,8 +435,9 @@ export const DEFAULT_NUDGES: NudgeSeed[] = [
     filters: json({ requireEmail: true }),
     subjectTemplate: 'Your Eko account is activated — complete your integration',
     bodyTemplate: ONBOARDED_NOT_TRANSACTING_BODY,
-    maxEmailsPerLead: 3,
-    followUpDays: 2,
+    // See the note on onboarded_transacting: inert for a sheet nudge.
+    maxEmailsPerLead: 1,
+    followUpDays: 0,
   },
   {
     key: 'whatsapp_sample',
@@ -544,7 +545,8 @@ export const DEFAULT_NUDGES: NudgeSeed[] = [
     // parameter when the template actually declares a button, or Meta rejects the send with a
     // parameter-count mismatch.
     whatsappParams: json(t.buttonText && t.buttonUrl ? { body: [], button: ['mobile_digits'] } : { body: [] }),
-    maxEmailsPerLead: 3,
-    followUpDays: 2,
+    // Inert for sheet nudges — the send path applies one-message-per-recipient instead.
+    maxEmailsPerLead: 1,
+    followUpDays: 0,
   })),
 ]

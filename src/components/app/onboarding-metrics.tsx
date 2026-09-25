@@ -35,6 +35,9 @@ interface Family {
     emailFollowUpDays: number | null
     whatsappMax: number | null
     whatsappFollowUpDays: number | null
+    /** False when the nudge is sheet-driven and no cap is enforced. */
+    emailCapApplies: boolean
+    whatsappCapApplies: boolean
   }
   /** The two nudge keys this family counts. Shown in the UI so the split is auditable. */
   nudgeKeys: string[]
@@ -148,11 +151,14 @@ function ChannelBlock({
   totals,
   max,
   followUpDays,
+  capApplies,
 }: {
   channel: 'email' | 'whatsapp'
   totals: Totals
   max: number | null
   followUpDays: number | null
+  /** False for sheet nudges, whose cap nothing enforces. */
+  capApplies: boolean
 }) {
   const isWa = channel === 'whatsapp'
   const attempted = totals.sent + totals.failed
@@ -174,7 +180,11 @@ function ChannelBlock({
           <span className="mono font-normal text-muted-foreground">{totals.nudgeKey}</span>
         </p>
         <div className="flex items-center gap-1.5">
-          {max !== null ? (
+          {!capApplies ? (
+            <Badge variant="outline" className="h-5 px-1.5 text-[10px] font-medium">
+              once per recipient
+            </Badge>
+          ) : max !== null ? (
             <Badge variant="outline" className="h-5 px-1.5 text-[10px] font-medium">
               max {max}/lead{followUpDays ? ` · every ${followUpDays}d` : ''}
             </Badge>
@@ -303,12 +313,19 @@ export function OnboardingMetrics({ refreshKey }: { refreshKey: number }) {
               </div>
             </div>
             <div className="grid gap-3 lg:grid-cols-2">
-              <ChannelBlock channel="email" totals={f.email} max={f.config.emailMax} followUpDays={f.config.emailFollowUpDays} />
+              <ChannelBlock
+                channel="email"
+                totals={f.email}
+                max={f.config.emailMax}
+                followUpDays={f.config.emailFollowUpDays}
+                capApplies={f.config.emailCapApplies}
+              />
               <ChannelBlock
                 channel="whatsapp"
                 totals={f.whatsapp}
                 max={f.config.whatsappMax}
                 followUpDays={f.config.whatsappFollowUpDays}
+                capApplies={f.config.whatsappCapApplies}
               />
             </div>
           </CardContent>
