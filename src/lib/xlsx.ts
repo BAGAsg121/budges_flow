@@ -88,8 +88,14 @@ function cellXml(ref: string, value: CellValue, styleIndex: number): string {
 
 function sheetXml(sheet: SheetSpec): string {
   const headers = sheet.headers
-  const lastCol = columnLetter(Math.max(headers.length, 1))
-  const lastRow = sheet.rows.length + 1
+  // The used range must cover the WIDEST of the header row and the data rows. Deriving it from
+  // the header count alone breaks tables that have no header row (the Summary sheet is a
+  // label/value layout), declaring e.g. A1:A11 over data that actually reaches column D — which
+  // understates the used range and mis-scopes the autofilter.
+  const width = Math.max(headers.length, ...sheet.rows.map((r) => r.length), 1)
+  const lastCol = columnLetter(width)
+  // +1 for the header row, but only when there is one.
+  const lastRow = sheet.rows.length + (headers.length ? 1 : 0)
 
   const cols = sheet.widths?.length
     ? `<cols>${sheet.widths
@@ -97,26 +103,34 @@ function sheetXml(sheet: SheetSpec): string {
         .join('')}</cols>`
     : ''
 
-  const headerRow = `<row r="1">${headers
-    .map((h, i) => cellXml(`${columnLetter(i + 1)}1`, h, 1))
-    .join('')}</row>`
+  // Only emit a header row when there is one — an empty <row r="1"/> would shift every data
+  // row's meaning for a reader.
+  const headerRow = headers.length
+    ? `<row r="1">${headers.map((h, i) => cellXml(`${columnLetter(i + 1)}1`, h, 1)).join('')}</row>`
+    : ''
 
   const bodyRows = sheet.rows
     .map((row, r) => {
-      const rowNum = r + 2
+      const rowNum = r + 1 + (headers.length ? 1 : 0)
       const cells = row.map((v, c) => cellXml(`${columnLetter(c + 1)}${rowNum}`, v, 0)).join('')
       return `<row r="${rowNum}">${cells}</row>`
     })
     .join('')
 
+  // Freeze the header only when there is one, and filter only a real table.
+  const views = headers.length
+    ? `<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>`
+    : `<sheetViews><sheetView workbookViewId="0"/></sheetViews>`
+  const autoFilter = headers.length ? `<autoFilter ref="A1:${lastCol}${lastRow}"/>` : ''
+
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
 <dimension ref="A1:${lastCol}${lastRow}"/>
-<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>
+${views}
 <sheetFormatPr defaultRowHeight="15"/>
 ${cols}
 <sheetData>${headerRow}${bodyRows}</sheetData>
-<autoFilter ref="A1:${lastCol}${lastRow}"/>
+${autoFilter}
 </worksheet>`
 }
 

@@ -523,7 +523,10 @@ export const DEFAULT_NUDGES: NudgeSeed[] = [
   // -------------------------------------------------------------------------
   ...Object.entries(WA_SHEET_FLOW_TEMPLATES).map(([key, t]): NudgeSeed => ({
     key,
-    name: `WhatsApp · ${t.title}`,
+    // The titles already end in "(WhatsApp)", and this used to prefix "WhatsApp · " on top of
+    // that — producing "WhatsApp · Onboarded but not transacting (WhatsApp)" in the UI and in
+    // every export. Strip the redundant suffix.
+    name: `WhatsApp · ${t.title.replace(/\s*\(WhatsApp\)\s*$/, '')}`,
     description:
       `MANUAL — paste a Google Sheet URL in the UI (Send from Sheet). WhatsApp nudge for this list. ` +
       `The sheet needs an email or mobile column; the mobile drives the button when the template has one ` +

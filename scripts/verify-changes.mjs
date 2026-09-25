@@ -615,6 +615,25 @@ const single = readZip(buildXlsx([{ name: 'Only', headers: ['H'], rows: [['v']] 
 check('a one-sheet workbook still declares a styles part', single.has('xl/styles.xml'), true)
 check('an empty workbook does not crash', readZip(buildXlsx([])).size >= 6, true)
 
+// A header-less sheet (the Summary tab) must declare a used range covering its DATA, not just
+// column A — deriving the width from the header count declared A1:A11 over a 4-column table.
+const headerless = readZip(
+  buildXlsx([{ name: 'Summary', headers: [], rows: [['Range (IST)', '2026-09-23 to 2026-09-23'], ['Rows exported', 5]] }])
+)
+const headerlessSheet = headerless.get('xl/worksheets/sheet1.xml').content
+check('a header-less sheet spans its widest data row', /<dimension ref="A1:B2"\/>/.test(headerlessSheet), true)
+check('a header-less sheet has no bogus autofilter', headerlessSheet.includes('<autoFilter'), false)
+check('a header-less sheet does not freeze a non-existent header', headerlessSheet.includes('state="frozen"'), false)
+check('a header-less sheet starts its data at row 1', headerlessSheet.includes('<row r="1">'), true)
+check('a header-less sheet has no empty header row artefact', (headerlessSheet.match(/<row /g) || []).length, 2)
+
+// A sheet with headers keeps the freeze, the filter, and one leading header row.
+const withHeader = readZip(buildXlsx([{ name: 'H', headers: ['a', 'b'], rows: [[1, 2]] }]))
+const withHeaderSheet = withHeader.get('xl/worksheets/sheet1.xml').content
+check('a header sheet still freezes the top row', withHeaderSheet.includes('state="frozen"'), true)
+check('a header sheet still filters', withHeaderSheet.includes('<autoFilter ref="A1:B2"/>'), true)
+check('a header sheet offsets data to row 2', withHeaderSheet.includes('<row r="2">'), true)
+
 // The documented CRC32 of "123456789" is 0xCBF43926 — catches a bad polynomial/table.
 check('crc32 matches the reference vector', crc32(Buffer.from('123456789')) >>> 0, 0xcbf43926)
 
