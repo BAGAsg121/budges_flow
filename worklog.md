@@ -702,3 +702,29 @@ Stage Summary:
 - A manual sheet run now messages every row in the sheet, regardless of what is already in the logs, with no per-lead cap.
 - Duplicates WITHIN a sheet are still collapsed to one send, keyed on a normalised phone or a case-insensitive email.
 - Running the same sheet twice sends twice — intended, and documented.
+
+---
+
+Task ID: 31
+Agent: Main agent (DeepSeek Harness)
+Task: Track who clicked a WhatsApp CTA button, and work out how to send conversions to Meta.
+
+Work Log:
+- ESTABLISHED THE CONSTRAINT FIRST, because it decides the whole design: Meta does NOT send a webhook when someone taps a URL button on a template. Only quick-reply and list replies arrive, as inbound messages (already stored in inboundText). Checked against Meta's own docs and vendor references rather than assuming; the BSP-level "template analytics" that exists reports aggregate counts, not per-recipient attribution. Therefore the ONLY way to know who clicked is to make the button point at this app, record the tap, and redirect.
+- That has a hard consequence I flagged rather than hid: a button's URL lives INSIDE the approved Meta template, so tracked buttons need NEW templates and fresh review. So tracking is OPT-IN behind CTA_TRACK_BASE_URL, and ctaSendParams() is a strict no-op when it is unset — verified by assertion, because changing what we send against an already-approved template would break live sends.
+- SCHEMA (additive, hand-reviewed, dry-run by default): scripts/add-cta-columns.mjs adds ctaUrl, ctaClicks, ctaClickedAt to nudge_message_log — same safety contract as add-inbound-columns.mjs (only ADD COLUMN, refuses any destructive keyword, touches one table). Applied: 25 -> 28 columns. Prisma client regenerated.
+- New src/lib/cta.ts holds the mechanics as pure functions: the destination is built from the template's own button URL with the mobile substituted, the token goes in the URL path (never the destination, which would be an open redirect), and resolveCtaDestination() always falls back to something real.
+- New public tracker GET /api/track/cta/[trackingId]: records the click, then 302s. Three deliberate rules — (1) it NEVER shows an error page: unknown token, junk token or an unreachable database still redirects to CTA_FALLBACK_URL, because a broken tracker must not cost a sale; (2) it never redirects to a URL from the request, so it cannot be turned into an open redirect; (3) the counter update and the Meta conversion are fire-and-forget, so neither can stand between the customer and the payment page. 302 not 301 — a permanent redirect would be cached and later clicks would skip the tracker.
+- Wired the destination + token into ALL FOUR WhatsApp send paths (lead-driven runNudge, runMysqlNudge, sheet-run, retry-failed), so every WhatsApp message records where its button points.
+- Surfaced it: Logs tab gains a CTA badge (×N with first-click time and the link; "no click" when tracked-but-not-tapped; a dash when not tracked — the last two are deliberately different labels), the export gains CTA clicked / clicks / clicked at / link columns, and /api/logs returns the fields.
+- META CONVERSIONS: researched and implemented src/lib/meta-capi.ts. Events go to a dataset (Pixel) id — not the WABA — with action_source business_messaging and messaging_channel whatsapp. Identifiers are SHA-256 hashed; the phone normalisation (digits, country code, no trunk zero, no plus) is the part that fails SILENTLY, so it is unit-tested across the formats sheets actually use. event_id carries the tracking id so a repeat click dedupes. New scripts/check-meta-capi.mjs (npm run capi:check) prints the exact payload, hashes included, before any send.
+  Hooked it to the click: with META_CAPI_CTA_EVENT_ENABLED=true a tracked button click is reported as a conversion, best-effort and never awaited.
+  NOT IMPLEMENTED, and said so plainly: capturing ctwa_clid from the inbound webhook's referral object, which is what Click-to-WhatsApp AD attribution needs. The payload builder accepts it; the webhook does not record it yet.
+- A test caught a real regression I introduced: adding four export columns shifted every fixed index after them, breaking six assertions that read rows positionally. Rather than renumber the literals (which would break again on the next column), those assertions now look their column up BY NAME and throw if it is missing. Also added a colSpan fix in the Logs table.
+- verify now 479 assertions. tsc clean, eslint clean.
+- NOT VERIFIED: the tracker has not been exercised end to end (that needs the tracked templates approved and a real click), and Meta CAPI has not been sent to a live dataset (needs the account's dataset id and token). Both stated in the README rather than implied to work.
+
+Stage Summary:
+- Click attribution is built and off by default; enabling it is one env var plus new templates on Meta's review queue.
+- The redirect is designed so a failure in tracking can never cost a customer a sale.
+- Conversions can be sent to Meta with correct hashing; the remaining piece for ad attribution is capturing ctwa_clid from inbound referrals.

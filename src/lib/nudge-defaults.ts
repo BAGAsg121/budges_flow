@@ -230,6 +230,35 @@ export const WA_RETIRED_MARKETING_TEMPLATES: Record<string, string> = {
   whatsapp_onboarded_not_transacting: 'onboarded_not_transacting_pay',
 }
 
+/**
+ * The URL a template's button points at, with its `{{1}}` placeholder intact.
+ *
+ * Single source of truth for "where does this nudge's button go", used both when building the
+ * template and when working out the click destination for a tracked send (src/lib/cta.ts).
+ * Returns null for a template with no button, or one this code does not know.
+ */
+export function whatsappButtonUrlFor(templateName: string | null | undefined): string | null {
+  const name = (templateName || '').trim()
+  if (!name) return null
+  const mysqlFlow = Object.values(MYSQL_FLOW_TEMPLATES).find((t) => t.templateName === name)
+  if (mysqlFlow) return `${CONSOLE_URL}?mobile={{1}}`
+  const sheetFlow = Object.values(WA_SHEET_FLOW_TEMPLATES).find((t) => t.templateName === name)
+  if (sheetFlow) return sheetFlow.buttonUrl ?? null
+  return null
+}
+
+/**
+ * The destination a tracked button should reach for one recipient.
+ *
+ * Takes the template's button URL and substitutes the normalised mobile, so the stored
+ * destination is exactly what the customer would have got from the untracked link.
+ */
+export function ctaDestinationFor(templateName: string | null | undefined, mobileDigits: string): string | null {
+  const url = whatsappButtonUrlFor(templateName)
+  if (!url) return null
+  return url.replace('{{1}}', encodeURIComponent(mobileDigits))
+}
+
 /** One manual, sheet-driven WhatsApp nudge's approved copy. */
 export interface WaSheetFlowTemplate {
   templateName: string

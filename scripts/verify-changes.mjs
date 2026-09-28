@@ -19,8 +19,24 @@ import { buildSheetVars, normaliseMobileDigits, pickSheetEmail, pickSheetMobile,
 import { buildDailySeries, seriesIsEmpty, istDayKey } from '../src/lib/engagement-stats.ts'
 import { nudgeSourceOf, capAppliesTo, isManualSheetNudge } from '../src/lib/nudge-kind.ts'
 import { buildXlsx, buildZip, crc32, columnLetter, sanitiseSheetName } from '../src/lib/xlsx.ts'
-import { istDay, istDateTime, istRangeToUtc, istDaysAgo, toCsv, exportStatus, logToExportRow, buildBreakdown, EXPORT_COLUMNS } from '../src/lib/export-format.ts'
+import { istDay, istDateTime, istRangeToUtc, istDaysAgo, toCsv, exportStatus, logToExportRow, buildBreakdown, EXPORT_COLUMNS, EXPORT_WIDTHS } from '../src/lib/export-format.ts'
 import { readZip, validateXlsx } from './lib/read-zip.mjs'
+import {
+  buildCtaUrl,
+  ctaButtonParam,
+  ctaSendParams,
+  ctaTrackBaseUrl,
+  isCtaTrackingEnabled,
+  isPlausibleCtaToken,
+  resolveCtaDestination,
+} from '../src/lib/cta.ts'
+import { ctaDestinationFor, whatsappButtonUrlFor } from '../src/lib/nudge-defaults.ts'
+import {
+  buildConversionEvent,
+  normaliseEmailForHashing,
+  normalisePhoneForHashing,
+  sha256Hex,
+} from '../src/lib/meta-capi.ts'
 
 let failures = 0
 /** --quiet prints only failures and the summary; useful when iterating in a tight loop. */
@@ -711,6 +727,9 @@ const baseLog = (over = {}) => ({
   trackingId: 'tid-1',
   sheetRowRef: null,
   inboundText: null,
+  ctaUrl: null,
+  ctaClicks: 0,
+  ctaClickedAt: null,
   nudge: { key: 'whatsapp_ip_whitelisting', name: 'WhatsApp · IP whitelisting' },
   lead: null,
   ...over,
@@ -738,22 +757,39 @@ check('row[20] carries what the customer wrote', waRow[20], 'ok thanks')
 
 const failedRow = logToExportRow(baseLog({ sentOk: false, sentAt: null, sendError: 'Zoho Mail API: Internal Error (code 500)' , channel: 'email', toEmail: 'a@b.c' }))
 check('a failed row has no sent time', failedRow[2], '')
-check('a failed row carries a plain-English reason', failedRow[21], 'provider error')
-checkTrue('a failed row explains the cause', String(failedRow[22]).length > 20)
-check('a failed row keeps the raw error', failedRow[23], 'Zoho Mail API: Internal Error (code 500)')
+// Looked up BY NAME, not by index: inserting a column (the CTA ones) silently shifted every
+// fixed index after it and broke these assertions once already.
+const col = (name) => {
+  const i = EXPORT_COLUMNS.indexOf(name)
+  if (i < 0) throw new Error(`no export column named "${name}"`)
+  return i
+}
+check('a failed row carries a plain-English reason', failedRow[col('Failure reason')], 'provider error')
+checkTrue('a failed row explains the cause', String(failedRow[col('Failure explained')]).length > 20)
+check('a failed row keeps the raw error', failedRow[col('Error detail')], 'Zoho Mail API: Internal Error (code 500)')
+check('a CTA click is recorded as a column', failedRow[col('CTA clicked')], 'no')
 
 // The two channels have separate translators, and WhatsApp's returns null for text it does not
 // recognise, so the row falls back to a generic label rather than showing a blank reason.
 const unknownWaRow = logToExportRow(baseLog({ sentOk: false, sendError: 'something nobody has seen before' }))
-check('an unrecognised WhatsApp error still gets a label', unknownWaRow[21], 'unrecognised')
+check('an unrecognised WhatsApp error still gets a label', unknownWaRow[col('Failure reason')], 'unrecognised')
 const unknownMailRow = logToExportRow(
   baseLog({ sentOk: false, channel: 'email', toEmail: 'a@b.c', sendError: 'something nobody has seen before' })
 )
-check('an unrecognised email error gets the mail fallback label', unknownMailRow[21], 'send failed')
+check('an unrecognised email error gets the mail fallback label', unknownMailRow[col('Failure reason')], 'send failed')
 
 const noErrorRow = logToExportRow(baseLog())
-check('a successful row has no failure reason', noErrorRow[21], '')
-check('a successful row has no error detail', noErrorRow[23], '')
+check('a successful row has no failure reason', noErrorRow[col('Failure reason')], '')
+check('a successful row has no error detail', noErrorRow[col('Error detail')], '')
+
+// A row that WAS clicked must say so, and carry the link the customer was given.
+const clickedRow = logToExportRow(
+  baseLog({ ctaUrl: 'https://eps.eko.in/console?mobile=9876543210', ctaClicks: 2, ctaClickedAt: new Date('2026-09-23T09:00:00Z') })
+)
+check('a clicked row says yes', clickedRow[col('CTA clicked')], 'yes')
+check('a clicked row carries the count as a number', clickedRow[col('CTA clicks')], 2)
+check('a clicked row carries the first-click time in IST', clickedRow[col('CTA clicked at (IST)')], '2026-09-23 14:30:00')
+check('a clicked row carries the destination link', clickedRow[col('CTA link')], 'https://eps.eko.in/console?mobile=9876543210')
 
 const breakdown = buildBreakdown([
   baseLog(),
@@ -776,6 +812,8 @@ checkTrue('csv uses CRLF line endings', csv.includes('\r\n'))
 check('csv writes a header row plus data rows', csv.trim().split('\r\n').length, 3)
 checkTrue('the export has a column for the reply text', EXPORT_COLUMNS.includes('Reply text'))
 checkTrue('the export has a column for the failure reason', EXPORT_COLUMNS.includes('Failure explained'))
+checkTrue('the export has a column for CTA clicks', EXPORT_COLUMNS.includes('CTA clicks'))
+check('the export has one width per column', EXPORT_WIDTHS.length, EXPORT_COLUMNS.length)
 checkTrue('a WhatsApp cap IS retryable', isRetryableWhatsAppError('not delivered to maintain healthy ecosystem engagement (code 131049)'))
 checkTrue('a marketing opt-out IS retryable', isRetryableWhatsAppError("User's number is part of an experiment (code 130472)"))
 check('an undeliverable number is not retryable', isRetryableWhatsAppError('Message undeliverable (code 131026)'), false)
@@ -903,6 +941,118 @@ checkTrue(
   'documents_pending_wa (lead-driven) still allows 3',
   DEFAULT_NUDGES.find((n) => n.key === 'documents_pending_wa')?.maxEmailsPerLead === 3
 )
+
+// --- WhatsApp CTA click tracking ----------------------------------------------
+// Meta does not webhook URL-button clicks, so the button has to route through this app. The
+// mechanics below are what make that safe: a stable destination, a token instead of a URL, and
+// a redirect that can never strand the customer.
+delete process.env.CTA_TRACK_BASE_URL
+check('tracking is off by default', isCtaTrackingEnabled(), false)
+check('with tracking off the button param is the mobile', ctaButtonParam({ token: 'abc', mobileDigits: '9876543210' }), '9876543210')
+check(
+  'with tracking off the destination is the direct link',
+  buildCtaUrl({ destination: 'https://eps.eko.in/console?mobile=9876543210', token: 'abc' }),
+  'https://eps.eko.in/console?mobile=9876543210'
+)
+
+process.env.CTA_TRACK_BASE_URL = 'https://app.test/api/track/cta/'
+check('a trailing slash is tolerated', ctaTrackBaseUrl(), 'https://app.test/api/track/cta')
+check('tracking turns on', isCtaTrackingEnabled(), true)
+check('with tracking on the button param is the token', ctaButtonParam({ token: 'abc-123', mobileDigits: '9876543210' }), 'abc-123')
+check(
+  'with tracking on the button points at the tracker',
+  buildCtaUrl({ destination: 'https://eps.eko.in/console?mobile=9876543210', token: 'abc-123' }),
+  'https://app.test/api/track/cta/abc-123'
+)
+
+// The destination is built from the template's own button URL, so a tracked link lands in
+// exactly the same place the untracked one would have.
+check(
+  'the stored destination fills in the mobile',
+  ctaDestinationFor('activation_fee_pending_transacting', '9876543210'),
+  'https://eps.eko.in/console/pay-activation-fee?mobile=9876543210'
+)
+check(
+  'a console-flow template points at the console',
+  ctaDestinationFor('csp_details_pending_reminder', '9876543210'),
+  'https://eps.eko.in/console?mobile=9876543210'
+)
+check('a template with no button has no destination', ctaDestinationFor('documents_pending_reminder', '9876543210'), null)
+check('an unknown template has no destination', ctaDestinationFor('nope', '9876543210'), null)
+check('the button URL lookup agrees with the destination', whatsappButtonUrlFor('mobile_otp_pending'), 'https://eps.eko.in/console?mobile={{1}}')
+
+// ctaSendParams must be a strict no-op when tracking is off, or it would change what we send
+// against templates Meta has already approved.
+process.env.CTA_TRACK_BASE_URL = ''
+const offParams = ctaSendParams({
+  destination: 'https://eps.eko.in/console?mobile=1',
+  trackingId: 'tok',
+  mobileDigits: '1',
+  configured: ['mobile_digits'],
+})
+check('tracking off: configured button params pass through untouched', offParams.buttonParams.join(','), 'mobile_digits')
+check('tracking off: the destination is still recorded', offParams.ctaUrl, 'https://eps.eko.in/console?mobile=1')
+
+process.env.CTA_TRACK_BASE_URL = 'https://app.test/api/track/cta'
+const onParams = ctaSendParams({
+  destination: 'https://eps.eko.in/console?mobile=1',
+  trackingId: 'tok-1',
+  mobileDigits: '1',
+  configured: ['mobile_digits'],
+})
+check('tracking on: the button carries the token', onParams.buttonParams.join(','), 'tok-1')
+check('tracking on: the destination is stored', onParams.ctaUrl, 'https://eps.eko.in/console?mobile=1')
+
+const noButton = ctaSendParams({ destination: null, trackingId: 'tok', mobileDigits: '1', configured: [] })
+check('a template with no button stores no destination', JSON.stringify(noButton), JSON.stringify({ buttonParams: [], ctaUrl: null }))
+
+// The fallback must always resolve to something real — a customer tapping Pay Now must never
+// land on an error page.
+delete process.env.CTA_FALLBACK_URL
+check('a missing destination falls back to the console', resolveCtaDestination(null), 'https://eps.eko.in/console')
+check('an empty destination falls back too', resolveCtaDestination('   '), 'https://eps.eko.in/console')
+check('a real destination is used as-is', resolveCtaDestination('https://eps.eko.in/console?mobile=9'), 'https://eps.eko.in/console?mobile=9')
+
+check('a UUID is a plausible token', isPlausibleCtaToken('ced9dbf2-b6bb-48c5-86e6-d82c96aab559'), true)
+check('junk is rejected before touching the database', isPlausibleCtaToken('../../etc/passwd'), false)
+check('an empty token is rejected', isPlausibleCtaToken(''), false)
+
+// --- Meta Conversions API ------------------------------------------------------
+// Identifiers must be hashed, and the normalisation is the part that fails silently: a wrong
+// country code produces a valid request that matches nobody.
+check('phone hashing adds the country code to a bare 10-digit number', normalisePhoneForHashing('9876543210'), '919876543210')
+check('phone hashing strips a plus', normalisePhoneForHashing('+919876543210'), '919876543210')
+check('phone hashing strips spaces and dashes', normalisePhoneForHashing('+91 98765-43210'), '919876543210')
+check('phone hashing strips a trunk zero', normalisePhoneForHashing('09876543210'), '919876543210')
+check('phone hashing keeps an existing country code', normalisePhoneForHashing('919876543210'), '919876543210')
+check('phone hashing of junk is empty', normalisePhoneForHashing('n/a'), '')
+check('email hashing lowercases', normaliseEmailForHashing('  A@B.COM '), 'a@b.com')
+check('sha256 matches the known vector', sha256Hex('abc'), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad')
+
+const capiEvent = buildConversionEvent({
+  eventName: 'CTA_Click',
+  phone: '9876543210',
+  email: 'A@B.com',
+  ctwaClid: 'clid-123',
+  eventId: 'tid-1',
+  eventTime: new Date('2026-09-24T06:00:00Z'),
+})
+check('the event name is carried', capiEvent.event_name, 'CTA_Click')
+check('event_time is unix SECONDS, not milliseconds', capiEvent.event_time, Math.floor(new Date('2026-09-24T06:00:00Z').getTime() / 1000))
+check('action_source is business_messaging', capiEvent.action_source, 'business_messaging')
+check('messaging_channel is whatsapp', capiEvent.messaging_channel, 'whatsapp')
+check('the phone is hashed, never raw', capiEvent.user_data.ph[0], sha256Hex('919876543210'))
+check('the email is hashed lowercase', capiEvent.user_data.em[0], sha256Hex('a@b.com'))
+check('ctwa_clid passes through UNhashed (Meta issues it as an opaque id)', capiEvent.user_data.ctwa_clid, 'clid-123')
+check('event_id is carried so a repeat click dedupes', capiEvent.event_id, 'tid-1')
+check('no raw phone number leaks into the payload', JSON.stringify(capiEvent).includes('9876543210'), false)
+check('the raw email does not leak either', JSON.stringify(capiEvent).includes('A@B.com'), false)
+
+const bare = buildConversionEvent({ eventName: 'Lead', phone: null, email: null })
+check('absent identifiers are omitted, not sent empty', JSON.stringify(bare.user_data), '{}')
+check('no custom_data without a value', bare.custom_data === undefined, true)
+const valued = buildConversionEvent({ eventName: 'Purchase', phone: '9876543210', value: 999, currency: 'INR' })
+check('a value produces custom_data', `${valued.custom_data.value}/${valued.custom_data.currency}`, '999/INR')
 
 console.log(failures === 0 ? '\nAll checks passed.' : `\n${failures} check(s) FAILED.`)
 process.exit(failures === 0 ? 0 : 1)

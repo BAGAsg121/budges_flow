@@ -116,6 +116,11 @@ model MessageLog {
   inboundText      String?   @db.Text // most recent inbound message body
   inboundMessages  String?   @db.Text // JSON array of recent inbound messages: [{ at, type, text }]
   inboundAt        DateTime? // when the most recent inbound message arrived
+  // WhatsApp URL-button click attribution. Meta does not webhook URL-button clicks, so the
+  // button points at /api/track/cta/<token> and the destination is stored here per send.
+  ctaUrl           String?   @db.Text // where the tracked button should send the recipient
+  ctaClicks        Int       @default(0) // how many times the tracked button URL was opened
+  ctaClickedAt     DateTime? // when the first click arrived
   engagementStatus String    @default("sent") // sent | opened | replied
   createdAt        DateTime  @default(now())
 

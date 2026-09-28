@@ -25,6 +25,8 @@ import { buildWhatsAppParams } from '@/lib/whatsapp-params'
 import { getBaseUrl } from '@/lib/base-url'
 import { parseSheetCsv, toSheetCsvUrl } from '@/lib/sheet-parser'
 import { buildSheetVars, pickSheetEmail, pickSheetMobile, type SheetRow, type TemplateVars } from '@/lib/sheet-vars'
+import { ctaSendParams } from '@/lib/cta'
+import { ctaDestinationFor } from '@/lib/nudge-defaults'
 
 export interface RetryOutcome {
   logId: string
@@ -223,13 +225,19 @@ export async function retryFailedLogs(logIds: string[]): Promise<RetryResult> {
 
         const templateName = (nudge.whatsappTemplateName || '').trim()
         const waParams = buildWhatsAppParams(nudge.whatsappParams, vars)
+        const { buttonParams, ctaUrl } = ctaSendParams({
+          destination: ctaDestinationFor(templateName, String(vars.mobile_digits ?? '')),
+          trackingId,
+          mobileDigits: String(vars.mobile_digits ?? ''),
+          configured: waParams.button,
+        })
         const send = templateName
           ? await sendWhatsAppTemplate({
               to: toPhone,
               templateName,
               language: nudge.whatsappLanguage || getDefaultTemplateLanguage(),
               params: waParams.body,
-              buttonParams: waParams.button,
+              buttonParams,
             })
           : await sendWhatsAppText({ to: toPhone, text: renderTemplate(nudge.bodyTemplate || '', vars) })
 
@@ -243,6 +251,7 @@ export async function retryFailedLogs(logIds: string[]): Promise<RetryResult> {
             templateName: nudge.whatsappTemplateName,
             messageId: send.waMessageId ?? null,
             trackingId,
+            ctaUrl,
             sentOk: send.ok,
             sendError: send.error ?? null,
             sentAt: send.ok ? new Date() : null,

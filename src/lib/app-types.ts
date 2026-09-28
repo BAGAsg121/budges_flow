@@ -62,6 +62,12 @@ export interface LogDto {
   /** JSON array of recent inbound messages: [{ at, type, text }] */
   inboundMessages: string | null
   inboundAt: string | null
+  /** Where this message's WhatsApp URL button points. */
+  ctaUrl: string | null
+  /** How many times that tracked button was tapped. */
+  ctaClicks: number
+  /** When the first tap arrived. */
+  ctaClickedAt: string | null
   engagementStatus: 'sent' | 'opened' | 'replied' | 'failed'
   trackingId: string
   sheetRowRef: string | null

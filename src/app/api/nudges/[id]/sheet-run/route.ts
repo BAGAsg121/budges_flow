@@ -31,6 +31,8 @@ import { buildWhatsAppParams } from '@/lib/whatsapp-params'
 import { getBaseUrl } from '@/lib/base-url'
 import { parseSheetCsv, toSheetCsvUrl } from '@/lib/sheet-parser'
 import { buildSheetVars, planSheetSends } from '@/lib/sheet-vars'
+import { ctaSendParams } from '@/lib/cta'
+import { ctaDestinationFor } from '@/lib/nudge-defaults'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 300
@@ -156,12 +158,18 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
       if (isWhatsApp) {
         const waParams = buildWhatsAppParams(nudge.whatsappParams, vars)
+        const { buttonParams, ctaUrl } = ctaSendParams({
+          destination: ctaDestinationFor(nudge.whatsappTemplateName, String(vars.mobile_digits ?? '')),
+          trackingId,
+          mobileDigits: String(vars.mobile_digits ?? ''),
+          configured: waParams.button,
+        })
         const result = await sendWhatsAppTemplate({
           to: toPhone as string,
           templateName: nudge.whatsappTemplateName as string,
           language: nudge.whatsappLanguage || getDefaultTemplateLanguage(),
           params: waParams.body,
-          buttonParams: waParams.button,
+          buttonParams,
         })
 
         await db.messageLog.create({
@@ -174,6 +182,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
             templateName: nudge.whatsappTemplateName,
             messageId: result.waMessageId ?? null,
             trackingId,
+            ctaUrl,
             sheetRowRef: sheetRowRef.slice(0, 512),
             sentOk: result.ok,
             sendError: result.error ?? null,

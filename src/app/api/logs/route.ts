@@ -70,6 +70,10 @@ export async function GET(req: NextRequest) {
       inboundText: l.inboundText,
       inboundMessages: l.inboundMessages,
       inboundAt: l.inboundAt,
+      // WhatsApp URL-button clicks (see src/lib/cta.ts — Meta does not webhook these).
+      ctaUrl: l.ctaUrl,
+      ctaClicks: l.ctaClicks ?? 0,
+      ctaClickedAt: l.ctaClickedAt,
       engagementStatus: l.replied ? 'replied' : l.opened ? 'opened' : l.sentOk ? 'sent' : 'failed',
       trackingId: l.trackingId,
       sheetRowRef: l.sheetRowRef ?? null,

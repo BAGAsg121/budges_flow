@@ -56,6 +56,8 @@ npm start                   # node .next/standalone/server.js  (PORT env, defaul
 | `npm run engage:report` | Per-family engagement split, straight from the database (sanity-checks the charts) |
 | `npm run logs:export` | Export logs to .xlsx/.csv by date range, nudge, channel and status |
 | `npm run logs:export:demo` | Write a workbook of invented rows, to confirm Excel opens the format |
+| `npm run db:add-cta-columns` | Add the WhatsApp CTA click columns (dry run; `--apply` to write) |
+| `npm run capi:check` | Meta Conversions API config + the exact payload it would send |
 | `npm run nudges:set-cap` | Set the per-lead message cap on the four activation-fee nudges (dry run; `--apply` to write) |
 | `npm run db:push` | Apply schema changes (safe) |
 | `npm run db:push:force` | Apply with `--accept-data-loss` (drops data) |
@@ -212,6 +214,111 @@ than trusted**:
 
 Generated exports are **git-ignored**: they contain real customer phone numbers and email addresses.
 
+### WhatsApp button clicks (who tapped the CTA)
+
+**Meta does not send a webhook when someone taps a URL button on a template.** Only quick-reply and
+list replies come back, as inbound messages — those are already stored in `inboundText`. So there is
+exactly one way to know *who* clicked: route the button through this app, record the tap, and
+redirect. That is how it works here.
+
+```
+template button URL : <CTA_TRACK_BASE_URL>/{{1}}
+{{1}}               : the message's trackingId (NOT the mobile)
+GET /api/track/cta/<trackingId>  →  records the click  →  302 to the stored destination
+```
+
+The destination is stored **per message** at send time (`MessageLog.ctaUrl`), built from the
+template's own button URL with the recipient's mobile substituted — so a tracked link lands in
+exactly the same place the untracked one would have. It is read from the row, never from the
+request, which is what stops this becoming an open redirect.
+
+| Column | Meaning |
+| --- | --- |
+| `ctaUrl` | where this message's button should reach (recorded even when tracking is off) |
+| `ctaClicks` | how many taps arrived |
+| `ctaClickedAt` | when the first tap arrived |
+
+Clicks show in the **Logs** tab as a CTA badge (`×2`), and the export has
+**CTA clicked / CTA clicks / CTA clicked at / CTA link** columns. A dash means *not tracked*, which
+is different from *tracked and not clicked* — the two are labelled separately.
+
+Two rules the tracker follows, both deliberate:
+
+1. **It never shows an error page.** An unknown token, a malformed one, or an unreachable database
+   still redirects to `CTA_FALLBACK_URL`. A broken tracker must not cost a sale.
+2. **It never redirects to a URL from the request**, so it cannot be turned into an open redirect.
+   The counter update and the Meta conversion are both fire-and-forget: neither is allowed to stand
+   between the customer and the payment page. The redirect is `302`, not `301` — a permanent
+   redirect would be cached and later clicks would skip the tracker.
+
+#### Turning it on (requires new templates)
+
+Tracking is **off by default**. Set `CTA_TRACK_BASE_URL` and the button gains the tracker; leave it
+empty and `ctaSendParams()` is a strict no-op that passes the configured button parameters through
+untouched.
+
+⚠️ **A button's URL lives inside the Meta-approved template**, so switching to tracked buttons means
+creating NEW templates and waiting for review — you cannot edit the URL of a live approved template
+without it going back through review. The existing nudges keep working on the untracked templates
+until the new ones are approved, so there is nothing to break in the meantime.
+
+```bash
+export CTA_TRACK_BASE_URL=https://nudge-engine.onrender.com/api/track/cta
+npm run wa:templates -- --create-missing    # submit the tracked templates
+# once approved: repoint the nudges and restart the sends
+```
+
+One caveat worth knowing before you rely on it: the click now passes through your host, so the
+redirect is subject to its cold starts. The handler is deliberately cheap (one indexed lookup), but
+a sleeping free-tier instance will add latency to a customer's tap.
+
+### Sending conversions back to Meta
+
+Independent of the messaging metrics, Meta wants the *business* events so its ad system can learn
+what a good WhatsApp conversation produces. That is the **Conversions API**, and for a WABA the
+events go to a **dataset (Pixel) id** — not to the WABA — with:
+
+```json
+{
+  "data": [{
+    "event_name": "CTA_Click",
+    "event_time": 1790578618,
+    "action_source": "business_messaging",
+    "messaging_channel": "whatsapp",
+    "user_data": { "ph": ["<sha256 of 919876543210>"], "em": ["<sha256 of email>"] },
+    "event_id": "<the MessageLog trackingId>"
+  }]
+}
+```
+
+`src/lib/meta-capi.ts` builds and sends these. The points that decide whether it works at all:
+
+| | |
+| --- | --- |
+| **Identifiers must be hashed** | SHA-256 hex. A raw phone number or email is rejected — and a test asserts nothing raw leaks into the payload |
+| **Phone format must match** | digits only, country code included, no `+`, no trunk zero. `9876543210` is hashed as `919876543210`. Get this wrong and the request succeeds and matches nobody |
+| **Email must be lowercased** | before hashing |
+| **`action_source`** | `business_messaging` with `messaging_channel: "whatsapp"` — this is what marks it as a WhatsApp-originated event |
+| **`event_id`** | set to the tracking id, so a repeat click dedupes inside Meta's window instead of double-counting |
+| **`ctwa_clid`** | for Click-to-WhatsApp *ads* the conversion needs the click id Meta issues, which arrives in the inbound message's `referral` object. The payload builder accepts it; capturing it from the webhook is **not implemented yet** |
+
+```bash
+npm run capi:check                          # config + the exact payload, hashes included
+npm run capi:check -- --send                # actually POST one event
+npm run capi:check -- --send --ctwa-clid X  # include a click id
+```
+
+Configure `META_CAPI_DATASET_ID` + `META_CAPI_TOKEN`, then set `META_CAPI_CTA_EVENT_ENABLED=true`
+to report every tracked button click as a conversion. Use `META_CAPI_TEST_EVENT_CODE` to route
+events to Events Manager → **Test events** rather than counting them — do that first.
+
+Prefer a **standard** event name (`Lead`, `InitiateCheckout`, `Purchase`) over a custom one like
+`CTA_Click`: standard events are what ad optimisation actually uses.
+
+> **Not verified against a live dataset.** The payload shape follows Meta's documented contract and
+> is unit-tested, but sending needs this account's own dataset id and token, which I do not have.
+> Confirm the required fields for your WABA in Events Manager before trusting a live stream.
+
 ### Retrying failures
 
 The **Failures** tab lists every failed send on both channels and can re-send them. Each failure is
@@ -311,6 +418,8 @@ never touches `enabled` — pausing and resuming stays the operator's call.
 | Reply tracking | `IMAP_ENABLED`, `IMAP_HOST`, `IMAP_PORT`, `IMAP_SECURE`, `IMAP_USER`, `IMAP_PASS`, `IMAP_MAILBOX`, `IMAP_REPLY_LOOKBACK_DAYS`, `EMAIL_WEBHOOK_SECRET` | |
 | Tracking URL | `APP_BASE_URL`, `APP_HOST` | Empty → derived from the request |
 | WhatsApp (Meta) | `WHATSAPP_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_WABA_ID`, `WHATSAPP_APP_SECRET`, `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_API_VERSION`, `WHATSAPP_TEMPLATE_LANGUAGE`, `WHATSAPP_DEFAULT_CC`, `WHATSAPP_DISPLAY_NUMBER`, `WHATSAPP_EMPTY_PARAM_FALLBACK`, `DELIVERY_CAP_BACKOFF_HOURS` | Sending, webhooks and template management all go directly to the Meta Cloud API |
+| CTA click tracking | `CTA_TRACK_BASE_URL`, `CTA_FALLBACK_URL` | Empty base URL = untracked buttons (the default) |
+| Meta Conversions API | `META_CAPI_DATASET_ID`, `META_CAPI_TOKEN`, `META_CAPI_API_VERSION`, `META_CAPI_TEST_EVENT_CODE`, `META_CAPI_CTA_EVENT_ENABLED`, `META_CAPI_CTA_EVENT_NAME` | Reporting business events back to Meta; off by default |
 
 There is **no third-party WhatsApp provider in this app** — no Infinito, no n8n. Every send,
 every delivery/read receipt and every template operation talks to `graph.facebook.com`. The old
@@ -858,6 +967,7 @@ kind of change.
 | `GET /api/db/health` | Basic | External MySQL connectivity (`?tables=1`, `?describe=<table>`) |
 | `GET /api/track/open/{trackingId}` · `GET /api/track/open?tid=` | **public** | Email open pixel (always returns a 1×1 GIF) |
 | `GET/POST /api/track/whatsapp` | **public** | Meta webhook (verify handshake + statuses + inbound) |
+| `GET /api/track/cta/{trackingId}` | **public** | WhatsApp button click tracker → records the tap, 302s to the destination |
 | `GET/POST /api/track/email` | shared secret | Inbound reply webhook |
 | `POST /api/cron/run` | shared secret | Run one full cycle now |
 | `GET/POST /api/cron/replies` | shared secret | Poll the mailbox for replies only |

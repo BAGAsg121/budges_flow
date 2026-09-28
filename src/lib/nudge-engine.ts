@@ -23,6 +23,8 @@ import { renderTemplate, injectTrackingPixel, htmlToText } from '@/lib/template'
 import { collectMysqlRecipients, isMysqlFlowKey } from '@/lib/mysql-nudges'
 import { buildWhatsAppParams } from '@/lib/whatsapp-params'
 import { isDeliveryCapError, capBackoffHours } from '@/lib/whatsapp-errors'
+import { ctaSendParams } from '@/lib/cta'
+import { ctaDestinationFor } from '@/lib/nudge-defaults'
 import type { Nudge } from '@prisma/client'
 
 export type Channel = 'email' | 'whatsapp'
@@ -460,7 +462,15 @@ async function runMysqlNudge(nudge: Nudge, summary: RunSummary, batchLimit: numb
     const bodyParams = recipient.params.length
       ? recipient.params.map((v) => (v === null || v === undefined || v === '' ? fallback : String(v)))
       : cfg.body
-    const buttonParams = cfg.button.length ? cfg.button : mobile ? [mobile] : []
+    const configuredButton = cfg.button.length ? cfg.button : mobile ? [mobile] : []
+
+    const trackingId = randomUUID()
+    const { buttonParams, ctaUrl } = ctaSendParams({
+      destination: ctaDestinationFor(templateName, mobile),
+      trackingId,
+      mobileDigits: mobile,
+      configured: configuredButton,
+    })
 
     const result = templateName
       ? await sendWhatsAppTemplate({
@@ -489,7 +499,8 @@ async function runMysqlNudge(nudge: Nudge, summary: RunSummary, batchLimit: numb
         toPhone,
         templateName: nudge.whatsappTemplateName,
         messageId: result.waMessageId ?? null,
-        trackingId: randomUUID(),
+        trackingId,
+        ctaUrl,
         sentOk: result.ok,
         sendError: result.error ?? null,
         sentAt: result.ok ? new Date() : null,
@@ -631,14 +642,22 @@ export async function runNudge(
       // allows inside the 24h customer service window or to a registered test number —
       // useful for verifying the integration before a template is approved.
       const templateName = (nudge.whatsappTemplateName || '').trim()
+      const trackingId = randomUUID()
+      const mobileDigits = buttonMobile(rawPhone)
       const waParams = buildWhatsAppParams(nudge.whatsappParams, vars)
+      const { buttonParams, ctaUrl } = ctaSendParams({
+        destination: ctaDestinationFor(templateName, mobileDigits),
+        trackingId,
+        mobileDigits,
+        configured: waParams.button,
+      })
       const result = templateName
         ? await sendWhatsAppTemplate({
             to: toPhone,
             templateName,
             language: nudge.whatsappLanguage || getDefaultTemplateLanguage(),
             params: waParams.body,
-            buttonParams: waParams.button,
+            buttonParams,
           })
         : await sendWhatsAppText({
             to: toPhone,
@@ -654,7 +673,8 @@ export async function runNudge(
           toPhone,
           templateName: nudge.whatsappTemplateName,
           messageId: result.waMessageId ?? null,
-          trackingId: randomUUID(),
+          trackingId,
+          ctaUrl,
           sentOk: result.ok,
           sendError: result.error ?? null,
           sentAt: result.ok ? new Date() : null,

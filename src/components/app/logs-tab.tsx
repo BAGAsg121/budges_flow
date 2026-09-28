@@ -10,7 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { Mail, MessageCircle, Sheet, FileSpreadsheet } from 'lucide-react'
+import { Mail, MessageCircle, Sheet, FileSpreadsheet, MousePointerClick } from 'lucide-react'
 import { explainWhatsAppError } from '@/lib/whatsapp-errors'
 import { ExportLogsDialog } from '@/components/app/export-logs-dialog'
 import type { LogDto, NudgeDto } from '@/lib/app-types'
@@ -62,6 +62,54 @@ function StatusBadge({ log }: { log: LogDto }) {
   if (log.engagementStatus === 'replied') return <Badge className="bg-success text-success-foreground hover:bg-success">replied</Badge>
   if (log.engagementStatus === 'opened') return <Badge className="bg-warning text-warning-foreground hover:bg-warning">opened ×{log.opensCount}</Badge>
   return <Badge variant="secondary">sent</Badge>
+}
+
+/**
+ * Whether the recipient tapped the WhatsApp button.
+ *
+ * Meta does not report URL-button clicks, so this only lights up for messages sent while CTA
+ * tracking was on (see src/lib/cta.ts). A dash means "not tracked", which is different from
+ * "tracked and not clicked" — hence the two distinct labels.
+ */
+function CtaBadge({ log }: { log: LogDto }) {
+  if (log.channel !== 'whatsapp') return <span className="text-xs text-muted-foreground">—</span>
+
+  if (log.ctaClicks > 0) {
+    return (
+      <TooltipProvider delayDuration={100}>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Badge className="cursor-help bg-info text-info-foreground hover:bg-info">
+              <MousePointerClick className="h-3 w-3" /> ×{log.ctaClicks}
+            </Badge>
+          </TooltipTrigger>
+          <TooltipContent side="left" className="max-w-sm space-y-1">
+            <p className="font-medium">Button clicked {log.ctaClicks} time(s)</p>
+            {log.ctaClickedAt ? <p className="opacity-90">First click {new Date(log.ctaClickedAt).toLocaleString()}</p> : null}
+            {log.ctaUrl ? <p className="mono break-all opacity-80">{log.ctaUrl}</p> : null}
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    )
+  }
+
+  if (!log.ctaUrl) return <span className="text-xs text-muted-foreground">—</span>
+
+  return (
+    <TooltipProvider delayDuration={100}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Badge variant="outline" className="cursor-help text-muted-foreground">
+            no click
+          </Badge>
+        </TooltipTrigger>
+        <TooltipContent side="left" className="max-w-sm space-y-1">
+          <p className="font-medium">Tracked, not clicked yet</p>
+          {log.ctaUrl ? <p className="mono break-all opacity-80">{log.ctaUrl}</p> : null}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
 }
 
 /** Parse the stored inbound history, tolerating a missing/invalid blob. */
@@ -192,6 +240,7 @@ export function LogsTab({ refreshKey }: { refreshKey: number }) {
                 <TableHead className="hidden lg:table-cell">Subject / template</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead className="hidden xl:table-cell">Opens</TableHead>
+                <TableHead>CTA</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -203,7 +252,7 @@ export function LogsTab({ refreshKey }: { refreshKey: number }) {
                 ))
               ) : logs.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={8} className="text-center text-muted-foreground py-10">
+                  <TableCell colSpan={9} className="text-center text-muted-foreground py-10">
                     No message logs yet.
                   </TableCell>
                 </TableRow>
@@ -245,6 +294,7 @@ export function LogsTab({ refreshKey }: { refreshKey: number }) {
                       </div>
                     </TableCell>
                     <TableCell className="hidden xl:table-cell text-xs text-muted-foreground">{l.opensCount}</TableCell>
+                    <TableCell><CtaBadge log={l} /></TableCell>
                   </TableRow>
                 ))
               )}

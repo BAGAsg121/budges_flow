@@ -87,6 +87,10 @@ export const EXPORT_COLUMNS: string[] = [
   'Replied',
   'Replied at (IST)',
   'Reply text',
+  'CTA clicked',
+  'CTA clicks',
+  'CTA clicked at (IST)',
+  'CTA link',
   'Failure reason',
   'Failure explained',
   'Error detail',
@@ -95,7 +99,7 @@ export const EXPORT_COLUMNS: string[] = [
 ]
 
 export const EXPORT_WIDTHS: number[] = [
-  20, 21, 20, 10, 34, 32, 28, 26, 30, 15, 46, 30, 10, 10, 10, 8, 7, 20, 8, 20, 50, 26, 44, 60, 38, 40,
+  20, 21, 20, 10, 34, 32, 28, 26, 30, 15, 46, 30, 10, 10, 10, 8, 7, 20, 8, 20, 50, 10, 8, 20, 44, 26, 44, 60, 38, 40,
 ]
 
 /** Rows are capped so a stray huge range cannot exhaust memory on the server. */
@@ -123,6 +127,9 @@ export interface ExportableLog {
   trackingId: string | null
   sheetRowRef: string | null
   inboundText: string | null
+  ctaUrl: string | null
+  ctaClicks: number
+  ctaClickedAt: Date | null
   nudge: { key: string; name: string }
   lead: { fullName: string | null; company: string | null } | null
 }
@@ -161,6 +168,11 @@ export function logToExportRow(l: ExportableLog): CellValue[] {
     l.replied ? 'yes' : 'no',
     istDateTime(l.repliedAt),
     l.inboundText ?? '',
+    // Which link the recipient was given, and whether they tapped it.
+    l.ctaClicks > 0 ? 'yes' : 'no',
+    l.ctaClicks ?? 0,
+    istDateTime(l.ctaClickedAt),
+    l.ctaUrl ?? '',
     help?.label ?? (l.sendError ? 'unrecognised' : ''),
     help?.detail ?? '',
     l.sendError ?? '',
