@@ -14,8 +14,9 @@
  * because the real value is "Unqualified (Junk)".
  */
 
-/** CRM status values, exactly as Zoho stores them. */
-export const LEAD_STATUS = {
+import { CTA_TEMPLATE_SUFFIX, baseTemplateName, ctaTrackBaseUrl, isTrackedTemplate } from './cta.ts'
+
+/** CRM status values, exactly as Zoho stores them. */export const LEAD_STATUS = {
   ONBOARDING_STARTED: 'Onboarding Started',
   AGREEMENT_SIGNED: 'Agreement Signed',
   DOCUMENTS_PENDING: 'Documents Pending',
@@ -231,14 +232,37 @@ export const WA_RETIRED_MARKETING_TEMPLATES: Record<string, string> = {
 }
 
 /**
+ * The name of the ANALYTICS-ONLY variant of a template: `x` -> `x_cta`.
+ *
+ * Every UTILITY template with a URL button gets one. It is identical to the original except that
+ * the button points at `/api/track/cta/{{1}}` instead of straight at the destination, which is the
+ * only way to learn WHICH recipient tapped it — Meta reports clicks per template per day, never
+ * per person (see meta-template-analytics.ts).
+ *
+ * The `_cta` suffix is what makes a tracked template identifiable at a glance in the Templates tab,
+ * in a nudge row, and in a log row.
+ */
+export function trackedTemplateName(baseName: string): string {
+  return isTrackedTemplate(baseName) ? baseName : `${baseName}${CTA_TEMPLATE_SUFFIX}`
+}
+
+/** True when a template has a URL button, i.e. there is something to track. */
+export function templateHasButton(templateName: string | null | undefined): boolean {
+  return whatsappButtonUrlFor(templateName) !== null
+}
+
+/**
  * The URL a template's button points at, with its `{{1}}` placeholder intact.
  *
  * Single source of truth for "where does this nudge's button go", used both when building the
  * template and when working out the click destination for a tracked send (src/lib/cta.ts).
+ * A tracked (`…_cta`) template resolves to its BASE template's destination — the tracker forwards
+ * there after recording the click.
+ *
  * Returns null for a template with no button, or one this code does not know.
  */
 export function whatsappButtonUrlFor(templateName: string | null | undefined): string | null {
-  const name = (templateName || '').trim()
+  const name = baseTemplateName((templateName || '').trim())
   if (!name) return null
   const mysqlFlow = Object.values(MYSQL_FLOW_TEMPLATES).find((t) => t.templateName === name)
   if (mysqlFlow) return `${CONSOLE_URL}?mobile={{1}}`
@@ -248,9 +272,26 @@ export function whatsappButtonUrlFor(templateName: string | null | undefined): s
 }
 
 /**
+ * The URL actually written into a NEW template's button.
+ *
+ * A tracked template cannot point at the destination directly — that is the whole problem — so it
+ * points at our tracker with the message token appended. Meta requires the URL to end in a single
+ * `{{1}}`, which this does.
+ */
+export function templateButtonUrlFor(templateName: string): string | null {
+  const destination = whatsappButtonUrlFor(templateName)
+  if (!destination) return null
+  if (!isTrackedTemplate(templateName)) return destination
+  const tracker = ctaTrackBaseUrl()
+  // No tracker configured: fall back to the direct link rather than creating a template whose
+  // button goes nowhere.
+  return tracker ? `${tracker}/{{1}}` : destination
+}
+
+/**
  * The destination a tracked button should reach for one recipient.
  *
- * Takes the template's button URL and substitutes the normalised mobile, so the stored
+ * Takes the BASE template's button URL and substitutes the normalised mobile, so the stored
  * destination is exactly what the customer would have got from the untracked link.
  */
 export function ctaDestinationFor(templateName: string | null | undefined, mobileDigits: string): string | null {
@@ -538,7 +579,9 @@ export const DEFAULT_NUDGES: NudgeSeed[] = [
       filters: json({ source: 'mysql', flow, ...window }),
       // reference copy of the Meta template body
       bodyTemplate: t.body,
-      whatsappTemplateName: t.templateName,
+      // These six all have a console URL button, so they are pointed at the TRACKED template
+      // (`…_cta`) — the only way to learn which recipient tapped the button.
+      whatsappTemplateName: trackedTemplateName(t.templateName),
       whatsappLanguage: WHATSAPP_TEMPLATE_LANGUAGE_DEFAULT,
       // body list is documented here; the engine supplies the real values from the query.
       // The button variable resolves to the recipient's own mobile.
@@ -561,14 +604,16 @@ export const DEFAULT_NUDGES: NudgeSeed[] = [
       `MANUAL — paste a Google Sheet URL in the UI (Send from Sheet). WhatsApp nudge for this list. ` +
       `The sheet needs an email or mobile column; the mobile drives the button when the template has one ` +
       `(${PAY_ACTIVATION_FEE_URL}?mobile=<mobile>). ` +
-      `Sends the approved Meta template "${t.templateName}" in ${WHATSAPP_TEMPLATE_LANGUAGE_DEFAULT}. ` +
+      `Sends the approved Meta template "${templateHasButton(t.templateName) ? trackedTemplateName(t.templateName) : t.templateName}" in ${WHATSAPP_TEMPLATE_LANGUAGE_DEFAULT}. ` +
       `Ships disabled until that template is approved.`,
     enabled: false,
     channel: 'whatsapp',
     zohoCriteria: null,
     filters: json({ source: 'sheet', requirePhone: true, emailFallback: WA_EMAIL_TWIN[key] }),
     bodyTemplate: t.body,
-    whatsappTemplateName: t.templateName,
+    // A tracked variant exists only where there is a button to track — the IP notice has none, so
+    // it keeps its plain template.
+    whatsappTemplateName: templateHasButton(t.templateName) ? trackedTemplateName(t.templateName) : t.templateName,
     whatsappLanguage: WHATSAPP_TEMPLATE_LANGUAGE_DEFAULT,
     // A URL button's {{1}} is a separate parameter from the body's. Only send the button
     // parameter when the template actually declares a button, or Meta rejects the send with a

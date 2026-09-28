@@ -28,15 +28,33 @@ import {
   ctaTrackBaseUrl,
   isCtaTrackingEnabled,
   isPlausibleCtaToken,
+  isTrackedTemplate,
+  baseTemplateName,
+  CTA_TEMPLATE_SUFFIX,
   resolveCtaDestination,
 } from '../src/lib/cta.ts'
-import { ctaDestinationFor, whatsappButtonUrlFor } from '../src/lib/nudge-defaults.ts'
+import {
+  ctaDestinationFor,
+  whatsappButtonUrlFor,
+  templateButtonUrlFor,
+  templateHasButton,
+  trackedTemplateName,
+} from '../src/lib/nudge-defaults.ts'
+import { isTemplateUnavailable } from '../src/lib/whatsapp-errors.ts'
 import {
   buildConversionEvent,
   normaliseEmailForHashing,
   normalisePhoneForHashing,
   sha256Hex,
 } from '../src/lib/meta-capi.ts'
+import {
+  chunkTemplateIds,
+  mergeAnalyticsResponse,
+  toSortedRows,
+  ANALYTICS_TEMPLATE_ID_LIMIT,
+  ANALYTICS_MAX_DATA_POINTS,
+  ANALYTICS_MAX_DAYS,
+} from '../src/lib/meta-template-analytics.ts'
 
 let failures = 0
 /** --quiet prints only failures and the summary; useful when iterating in a tight loop. */
@@ -241,7 +259,10 @@ for (const flow of MYSQL_FLOW_KEYS) {
   check(`${flow} filters mark source=mysql`, JSON.parse(n?.filters || '{}').source, 'mysql')
   check(`${flow} filters name the flow`, JSON.parse(n?.filters || '{}').flow, flow)
   checkTrue(`${flow} has a look-back window`, Boolean(MYSQL_FLOW_LOOKBACK[flow]))
-  check(`${flow} template name matches the flow key`, n?.whatsappTemplateName, MYSQL_FLOW_TEMPLATES[flow].templateName)
+  // The nudge uses the TRACKED variant (`…_cta`) of its flow template, so that a tap can be
+  // attributed to a person. Compare the base name, and assert the tracked variant is real.
+  check(`${flow} template is the TRACKED variant of the flow key`, baseTemplateName(n?.whatsappTemplateName || ''), MYSQL_FLOW_TEMPLATES[flow].templateName)
+  checkTrue(`${flow} points at a tracked template`, isTrackedTemplate(n?.whatsappTemplateName))
   check(`${flow} params use the mobile for the button`, JSON.parse(n?.whatsappParams || '{}').button[0], 'mobile_digits')
 }
 
@@ -261,8 +282,11 @@ const waTransacting = byKeyAll['whatsapp_onboarded_transacting']
 const waNotTransacting = byKeyAll['whatsapp_onboarded_not_transacting']
 check('whatsapp_onboarded_transacting is whatsapp + disabled', `${waTransacting.channel}|${waTransacting.enabled}`, 'whatsapp|false')
 check('whatsapp_onboarded_not_transacting is whatsapp + disabled', `${waNotTransacting.channel}|${waNotTransacting.enabled}`, 'whatsapp|false')
-check('transacting WhatsApp template name', waTransacting.whatsappTemplateName, 'activation_fee_pending_transacting')
-check('not-transacting WhatsApp template name', waNotTransacting.whatsappTemplateName, 'activation_fee_pending_not_transacting')
+check('transacting WhatsApp template name', baseTemplateName(waTransacting.whatsappTemplateName || ''), 'activation_fee_pending_transacting')
+check('not-transacting WhatsApp template name', baseTemplateName(waNotTransacting.whatsappTemplateName || ''), 'activation_fee_pending_not_transacting')
+// Both pay nudges must be on the tracked variant — that is the whole point of this change.
+checkTrue('transacting nudge uses a tracked template', isTrackedTemplate(waTransacting.whatsappTemplateName))
+checkTrue('not-transacting nudge uses a tracked template', isTrackedTemplate(waNotTransacting.whatsappTemplateName))
 checkTrue(
   'not-transacting WhatsApp copy still explains the activation',
   WA_SHEET_FLOW_TEMPLATES.whatsapp_onboarded_not_transacting.body.includes('activated')
@@ -995,13 +1019,40 @@ check('tracking off: the destination is still recorded', offParams.ctaUrl, 'http
 
 process.env.CTA_TRACK_BASE_URL = 'https://app.test/api/track/cta'
 const onParams = ctaSendParams({
+  templateName: 'activation_fee_pending_transacting_cta',
   destination: 'https://eps.eko.in/console?mobile=1',
   trackingId: 'tok-1',
   mobileDigits: '1',
   configured: ['mobile_digits'],
 })
-check('tracking on: the button carries the token', onParams.buttonParams.join(','), 'tok-1')
-check('tracking on: the destination is stored', onParams.ctaUrl, 'https://eps.eko.in/console?mobile=1')
+check('a tracked template sends the TOKEN as the button param', onParams.buttonParams.join(','), 'tok-1')
+check('a tracked template stores the destination', onParams.ctaUrl, 'https://eps.eko.in/console?mobile=1')
+// The template decides this, not the env var — the button URL lives inside the approved template,
+// so sending the mobile where a token belongs would send the customer to the fallback page.
+process.env.CTA_TRACK_BASE_URL = ''
+const onParamsNoEnv = ctaSendParams({
+  templateName: 'activation_fee_pending_transacting_cta',
+  destination: 'https://eps.eko.in/console?mobile=1',
+  trackingId: 'tok-2',
+  mobileDigits: '1',
+  configured: ['mobile_digits'],
+})
+check('a tracked template sends the token even with the env var unset', onParamsNoEnv.buttonParams.join(','), 'tok-2')
+// …and an UNtracked template keeps the configured params, even with the env var set.
+process.env.CTA_TRACK_BASE_URL = 'https://app.test/api/track/cta'
+const untrackedParams = ctaSendParams({
+  templateName: 'activation_fee_pending_transacting',
+  destination: 'https://eps.eko.in/console?mobile=1',
+  trackingId: 'tok-3',
+  mobileDigits: '9876543210',
+  configured: ['mobile_digits'],
+})
+check('an untracked template keeps the configured button param', untrackedParams.buttonParams.join(','), 'mobile_digits')
+check('an untracked template has no fallback', untrackedParams.fallback === undefined, true)
+// A tracked template must offer the untracked original as a fallback, or pointing a live nudge at
+// a template Meta has not approved yet would break its sends.
+check('a tracked template offers its base template as a fallback', onParams.fallback?.templateName, 'activation_fee_pending_transacting')
+check('the fallback carries the MOBILE, not the token', onParams.fallback?.buttonParams.join(','), 'mobile_digits')
 
 const noButton = ctaSendParams({ destination: null, trackingId: 'tok', mobileDigits: '1', configured: [] })
 check('a template with no button stores no destination', JSON.stringify(noButton), JSON.stringify({ buttonParams: [], ctaUrl: null }))
@@ -1013,9 +1064,105 @@ check('a missing destination falls back to the console', resolveCtaDestination(n
 check('an empty destination falls back too', resolveCtaDestination('   '), 'https://eps.eko.in/console')
 check('a real destination is used as-is', resolveCtaDestination('https://eps.eko.in/console?mobile=9'), 'https://eps.eko.in/console?mobile=9')
 
-check('a UUID is a plausible token', isPlausibleCtaToken('ced9dbf2-b6bb-48c5-86e6-d82c96aab559'), true)
+check('A UUID is a plausible token', isPlausibleCtaToken('ced9dbf2-b6bb-48c5-86e6-d82c96aab559'), true)
 check('junk is rejected before touching the database', isPlausibleCtaToken('../../etc/passwd'), false)
 check('an empty token is rejected', isPlausibleCtaToken(''), false)
+
+// --- tracked (_cta) template naming --------------------------------------------
+// The suffix is how a tracked template is recognised in the Templates tab, in a nudge row and in
+// a log row — and how the send path knows to put a TOKEN in the button rather than a mobile.
+check('the suffix is _cta', CTA_TEMPLATE_SUFFIX, '_cta')
+check('a tracked name is recognised', isTrackedTemplate('mobile_otp_pending_cta'), true)
+check('an untracked name is not', isTrackedTemplate('mobile_otp_pending'), false)
+check('a null name is not tracked', isTrackedTemplate(null), false)
+check('the base name strips the suffix', baseTemplateName('mobile_otp_pending_cta'), 'mobile_otp_pending')
+check('the base of a base name is itself', baseTemplateName('mobile_otp_pending'), 'mobile_otp_pending')
+check('appending is idempotent', trackedTemplateName('x_cta'), 'x_cta')
+check('appending once gives the tracked name', trackedTemplateName('x'), 'x_cta')
+
+// A tracked template resolves to its BASE template's destination — the tracker forwards there.
+check('a tracked name resolves to the console destination', ctaDestinationFor('mobile_otp_pending_cta', '9876543210'), 'https://eps.eko.in/console?mobile=9876543210')
+check('a tracked name resolves to the pay destination', ctaDestinationFor('activation_fee_pending_transacting_cta', '9876543210'), 'https://eps.eko.in/console/pay-activation-fee?mobile=9876543210')
+check('the button URL of a tracked template is the tracker', templateButtonUrlFor('mobile_otp_pending_cta'), 'https://app.test/api/track/cta/{{1}}')
+check('the button URL of an untracked template is the destination', templateButtonUrlFor('mobile_otp_pending'), 'https://eps.eko.in/console?mobile={{1}}')
+check('a template with no button has no tracked variant', templateHasButton('ip_whitelisting_mandatory'), false)
+checkTrue('a console template has a button', templateHasButton('mobile_otp_pending'))
+
+// Which nudges ended up on tracked templates: everything with a button, nothing without.
+const waNudges = DEFAULT_NUDGES.filter((n) => n.channel === 'whatsapp' && n.whatsappTemplateName)
+const shouldTrack = waNudges.filter((n) => templateHasButton(n.whatsappTemplateName))
+check('every button template is tracked', shouldTrack.every((n) => isTrackedTemplate(n.whatsappTemplateName)), true)
+check('templates without a button stay untracked', waNudges.filter((n) => !templateHasButton(n.whatsappTemplateName)).every((n) => !isTrackedTemplate(n.whatsappTemplateName)), true)
+check('8 templates are tracked', shouldTrack.length, 8)
+// The retired MARKETING templates must not be resurrected by this change.
+check(
+  'no nudge points at a retired MARKETING template',
+  waNudges.filter((n) => Object.values(WA_RETIRED_MARKETING_TEMPLATES).includes(baseTemplateName(n.whatsappTemplateName))).length,
+  0
+)
+
+// --- the send fallback ----------------------------------------------------------
+// Without this, pointing a live nudge at a template Meta has not approved yet would break its
+// sends with 132001. The fallback keeps the message going out (untracked) until approval lands.
+checkTrue('132001 is recognised as an unavailable template', isTemplateUnavailable('WhatsApp API: template does not exist (code 132001)'))
+checkTrue('the wording without a code is recognised', isTemplateUnavailable('Template name does not exist in the translation'))
+checkTrue('template does not exist is recognised', isTemplateUnavailable('template does not exist'))
+check('a parameter mismatch is NOT an unavailable template', isTemplateUnavailable('number of parameters does not match (code 132000)'), false)
+check('an auth error is NOT an unavailable template', isTemplateUnavailable('Invalid OAuth access token (code 190)'), false)
+check('null is safe', isTemplateUnavailable(null), false)
+
+// --- Meta template analytics (button clicks) -----------------------------------
+// Meta is the only place a URL-button tap is recorded, so this is how "did anyone click" is
+// answered without touching a template. Two measured traps are encoded here.
+check('ids are chunked to respect Meta\'s limit', JSON.stringify(chunkTemplateIds(Array.from({ length: 11 }, (_, i) => `t${i}`)).map((c) => c.length)), '[10,1]')
+check('chunking an exact multiple makes no empty chunk', JSON.stringify(chunkTemplateIds(['a', 'b', 'c', 'd'], 2).map((c) => c.length)), '[2,2]')
+check('chunking nothing yields nothing', chunkTemplateIds([]).length, 0)
+check('the per-request id limit is 10', ANALYTICS_TEMPLATE_ID_LIMIT, 10)
+// Meta truncates a response at ~25 points and SILENTLY drops the rest (ids=5+ returned zeros for
+// templates that report data at ids=2). So one template per request, and a window that fits.
+check('the response point cap is 25', ANALYTICS_MAX_DATA_POINTS, 25)
+check('the window is capped below the point cap', ANALYTICS_MAX_DAYS, 23)
+checkTrue('a 30-day window would be refused by the cap', 30 > ANALYTICS_MAX_DAYS)
+
+const analyticsAcc = new Map()
+mergeAnalyticsResponse(analyticsAcc, 'CLICKED', {
+  data: [
+    {
+      data_points: [
+        {
+          template_id: 'T1',
+          start: Date.parse('2026-09-28T00:00:00Z') / 1000,
+          end: Date.parse('2026-09-29T00:00:00Z') / 1000,
+          clicked: [
+            { type: 'url_button', button_content: 'Pay Now', count: 6 },
+            { type: 'unique_url_button', button_content: 'Pay Now', count: 5 },
+          ],
+        },
+      ],
+    },
+  ],
+})
+mergeAnalyticsResponse(analyticsAcc, 'SENT', {
+  data: [
+    {
+      data_points: [
+        { template_id: 'T1', start: Date.parse('2026-09-28T00:00:00Z') / 1000, end: 0, sent: 55, delivered: 52, read: 40 },
+      ],
+    },
+  ],
+})
+const analyticsRow = toSortedRows(analyticsAcc)[0]
+check('clicks are read from url_button', analyticsRow.clicks, 6)
+check('unique clicks are NOT added to total clicks', analyticsRow.uniqueClicks, 5)
+check('the button label is captured', analyticsRow.buttonLabels.join(','), 'Pay Now')
+check('sent is merged from a separate call', analyticsRow.sent, 55)
+check('the day is bucketed from start', analyticsRow.day, '2026-09-28')
+// The same template/day across metrics must merge into ONE row, not two.
+check('two metrics for one template/day produce one row', toSortedRows(analyticsAcc).length, 1)
+
+const emptyAcc = new Map()
+mergeAnalyticsResponse(emptyAcc, 'CLICKED', { data: [] })
+check('an empty response adds nothing', emptyAcc.size, 0)
 
 // --- Meta Conversions API ------------------------------------------------------
 // Identifiers must be hashed, and the normalisation is the part that fails silently: a wrong

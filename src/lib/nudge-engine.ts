@@ -465,7 +465,8 @@ async function runMysqlNudge(nudge: Nudge, summary: RunSummary, batchLimit: numb
     const configuredButton = cfg.button.length ? cfg.button : mobile ? [mobile] : []
 
     const trackingId = randomUUID()
-    const { buttonParams, ctaUrl } = ctaSendParams({
+    const { buttonParams, ctaUrl, fallback: templateFallback } = ctaSendParams({
+      templateName,
       destination: ctaDestinationFor(templateName, mobile),
       trackingId,
       mobileDigits: mobile,
@@ -479,6 +480,7 @@ async function runMysqlNudge(nudge: Nudge, summary: RunSummary, batchLimit: numb
           language: nudge.whatsappLanguage || getDefaultTemplateLanguage(),
           params: bodyParams,
           buttonParams,
+          fallback: templateFallback,
         })
       : await sendWhatsAppText({
           to: toPhone,
@@ -497,7 +499,10 @@ async function runMysqlNudge(nudge: Nudge, summary: RunSummary, batchLimit: numb
         channel: 'whatsapp',
         messageNumber,
         toPhone,
-        templateName: nudge.whatsappTemplateName,
+        // The template that ACTUALLY went out. When a tracked template is not yet approved the
+        // send falls back to the untracked one, and the log must say so — otherwise a message
+        // with no click attribution looks like a broken tracker.
+        templateName: result.usedFallbackTemplate ?? nudge.whatsappTemplateName,
         messageId: result.waMessageId ?? null,
         trackingId,
         ctaUrl,
@@ -645,7 +650,8 @@ export async function runNudge(
       const trackingId = randomUUID()
       const mobileDigits = buttonMobile(rawPhone)
       const waParams = buildWhatsAppParams(nudge.whatsappParams, vars)
-      const { buttonParams, ctaUrl } = ctaSendParams({
+      const { buttonParams, ctaUrl, fallback: templateFallback } = ctaSendParams({
+        templateName,
         destination: ctaDestinationFor(templateName, mobileDigits),
         trackingId,
         mobileDigits,
@@ -658,6 +664,7 @@ export async function runNudge(
             language: nudge.whatsappLanguage || getDefaultTemplateLanguage(),
             params: waParams.body,
             buttonParams,
+            fallback: templateFallback,
           })
         : await sendWhatsAppText({
             to: toPhone,
@@ -671,7 +678,7 @@ export async function runNudge(
           channel: 'whatsapp',
           messageNumber,
           toPhone,
-          templateName: nudge.whatsappTemplateName,
+          templateName: result.usedFallbackTemplate ?? nudge.whatsappTemplateName,
           messageId: result.waMessageId ?? null,
           trackingId,
           ctaUrl,

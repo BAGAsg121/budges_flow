@@ -152,6 +152,24 @@ export function isPermanentDeliveryFailure(input: ErrorInput): boolean {
 }
 
 /**
+ * True when Meta rejected the send because the template is not available on this WABA yet —
+ * typically a freshly created one still in review, or a name/language that does not match.
+ *
+ * This lives here, not in whatsapp.ts, because whatsapp.ts imports the database through a path
+ * alias and so cannot be loaded by the CLI verification script. It is an error classifier like
+ * everything else in this module.
+ */
+export function isTemplateUnavailable(error: string | null | undefined): boolean {
+  const e = (error || '').toLowerCase()
+  return (
+    e.includes('132001') ||
+    e.includes('does not exist in the translation') ||
+    e.includes('template name does not exist') ||
+    e.includes('template does not exist')
+  )
+}
+
+/**
  * How long to wait before retrying a recipient Meta capped.
  * The cap is a rolling window, so a day is a reasonable default.
  */

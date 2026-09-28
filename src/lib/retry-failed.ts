@@ -225,7 +225,8 @@ export async function retryFailedLogs(logIds: string[]): Promise<RetryResult> {
 
         const templateName = (nudge.whatsappTemplateName || '').trim()
         const waParams = buildWhatsAppParams(nudge.whatsappParams, vars)
-        const { buttonParams, ctaUrl } = ctaSendParams({
+        const { buttonParams, ctaUrl, fallback } = ctaSendParams({
+          templateName,
           destination: ctaDestinationFor(templateName, String(vars.mobile_digits ?? '')),
           trackingId,
           mobileDigits: String(vars.mobile_digits ?? ''),
@@ -238,6 +239,7 @@ export async function retryFailedLogs(logIds: string[]): Promise<RetryResult> {
               language: nudge.whatsappLanguage || getDefaultTemplateLanguage(),
               params: waParams.body,
               buttonParams,
+              fallback,
             })
           : await sendWhatsAppText({ to: toPhone, text: renderTemplate(nudge.bodyTemplate || '', vars) })
 
@@ -248,7 +250,7 @@ export async function retryFailedLogs(logIds: string[]): Promise<RetryResult> {
             channel: 'whatsapp',
             messageNumber: log.messageNumber,
             toPhone,
-            templateName: nudge.whatsappTemplateName,
+            templateName: send.usedFallbackTemplate ?? nudge.whatsappTemplateName,
             messageId: send.waMessageId ?? null,
             trackingId,
             ctaUrl,

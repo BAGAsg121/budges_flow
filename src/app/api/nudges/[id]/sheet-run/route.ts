@@ -158,7 +158,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
       if (isWhatsApp) {
         const waParams = buildWhatsAppParams(nudge.whatsappParams, vars)
-        const { buttonParams, ctaUrl } = ctaSendParams({
+        const { buttonParams, ctaUrl, fallback } = ctaSendParams({
+          templateName: nudge.whatsappTemplateName,
           destination: ctaDestinationFor(nudge.whatsappTemplateName, String(vars.mobile_digits ?? '')),
           trackingId,
           mobileDigits: String(vars.mobile_digits ?? ''),
@@ -170,6 +171,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
           language: nudge.whatsappLanguage || getDefaultTemplateLanguage(),
           params: waParams.body,
           buttonParams,
+          fallback,
         })
 
         await db.messageLog.create({
@@ -179,7 +181,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
             channel: 'whatsapp',
             messageNumber: 1,
             toPhone,
-            templateName: nudge.whatsappTemplateName,
+            templateName: result.usedFallbackTemplate ?? nudge.whatsappTemplateName,
             messageId: result.waMessageId ?? null,
             trackingId,
             ctaUrl,

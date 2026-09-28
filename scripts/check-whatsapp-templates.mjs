@@ -25,9 +25,12 @@ import {
 import {
   MYSQL_FLOW_TEMPLATES,
   WA_SHEET_FLOW_TEMPLATES,
+  DEFAULT_NUDGES,
   CONSOLE_URL,
   PAY_ACTIVATION_FEE_URL,
+  templateButtonUrlFor,
 } from '../src/lib/nudge-defaults.ts'
+import { baseTemplateName, isTrackedTemplate } from '../src/lib/cta.ts'
 
 const db = new PrismaClient()
 
@@ -37,15 +40,26 @@ const db = new PrismaClient()
  * does not carry.
  */
 function templateSpecFor(name) {
-  const mysqlFlow = Object.values(MYSQL_FLOW_TEMPLATES).find((t) => t.templateName === name)
+  // A tracked template (`x_cta`) carries the same copy and button TEXT as its base; only the URL
+  // differs — it points at our click tracker instead of straight at the destination.
+  const base = baseTemplateName(name)
+  const tracked = isTrackedTemplate(name)
+
+  const mysqlFlow = Object.values(MYSQL_FLOW_TEMPLATES).find((t) => t.templateName === base)
   if (mysqlFlow) {
-    return { body: mysqlFlow.body, buttonText: mysqlFlow.buttonText, buttonUrl: `${CONSOLE_URL}?mobile={{1}}` }
+    return {
+      body: mysqlFlow.body,
+      buttonText: mysqlFlow.buttonText,
+      buttonUrl: templateButtonUrlFor(name) ?? `${CONSOLE_URL}?mobile={{1}}`,
+    }
   }
-  const sheetFlow = Object.values(WA_SHEET_FLOW_TEMPLATES).find((t) => t.templateName === name)
+  const sheetFlow = Object.values(WA_SHEET_FLOW_TEMPLATES).find((t) => t.templateName === base)
   if (sheetFlow) {
-    // The button belongs to the spec, not to the family: some sheet templates have no button
-    // at all, and hardcoding the pay URL here would attach it to a message that does not want it.
-    return { body: sheetFlow.body, buttonText: sheetFlow.buttonText ?? null, buttonUrl: sheetFlow.buttonUrl ?? null }
+    return {
+      body: sheetFlow.body,
+      buttonText: sheetFlow.buttonText ?? null,
+      buttonUrl: tracked ? (templateButtonUrlFor(name) ?? null) : (sheetFlow.buttonUrl ?? null),
+    }
   }
   return null
 }
@@ -130,16 +144,32 @@ async function main() {
   if (createMissing) {
     console.log('\n--- create templates referenced by WhatsApp nudges ---')
     const existing = new Set((await listTemplates()).templates.map((t) => `${t.name}|${t.language}`))
-    const nudges = await db.nudge.findMany({ where: { channel: 'whatsapp' }, orderBy: { createdAt: 'asc' } })
+    const dbNudges = await db.nudge.findMany({ where: { channel: 'whatsapp' }, orderBy: { createdAt: 'asc' } })
     let created = 0
 
-    for (const n of nudges) {
-      const name = (n.whatsappTemplateName || '').trim()
-      const language = (n.whatsappLanguage || process.env.WHATSAPP_TEMPLATE_LANGUAGE || 'en_US').trim()
+    // The database's template names AND the code's defaults. The union matters for ordering:
+    // a tracked (`_cta`) template must EXIST before a nudge is repointed at it, so it has to be
+    // creatable from the defaults alone, while the DB still points at the old names.
+    const targets = [
+      ...dbNudges.map((n) => ({ key: n.key, templateName: n.whatsappTemplateName, language: n.whatsappLanguage })),
+      ...DEFAULT_NUDGES.filter((n) => n.channel === 'whatsapp' && n.whatsappTemplateName).map((n) => ({
+        key: n.key,
+        templateName: n.whatsappTemplateName,
+        language: n.whatsappLanguage,
+      })),
+    ]
+
+    const seenTargets = new Set()
+
+    for (const n of targets) {
+      const name = (n.templateName || '').trim()
+      const language = (n.language || process.env.WHATSAPP_TEMPLATE_LANGUAGE || 'en_US').trim()
       if (!name) {
         console.log(`  ${n.key}: free-form text mode, no template needed`)
         continue
       }
+      if (seenTargets.has(`${name}|${language}`)) continue
+      seenTargets.add(`${name}|${language}`)
       if (existing.has(`${name}|${language}`)) {
         console.log(`  ${n.key}: template "${name}" (${language}) already exists — skipped`)
         continue

@@ -15,13 +15,34 @@
  * fresh review. Nothing breaks in the meantime.
  */
 
-/** Where the app's tracker lives. Empty means "do not track, send the direct link". */
+/** Where the app's tracker lives. Used when BUILDING templates; empty means untracked. */
 export function ctaTrackBaseUrl(): string {
   return (process.env.CTA_TRACK_BASE_URL || '').trim().replace(/\/+$/, '')
 }
 
 export function isCtaTrackingEnabled(): boolean {
   return ctaTrackBaseUrl().length > 0
+}
+
+/**
+ * Suffix that marks a template's button as tracked.
+ *
+ * The template is what decides this, NOT an env var: the button's URL lives inside the approved
+ * template, so a `_cta` template expects a token in `{{1}}` whether or not this process has
+ * CTA_TRACK_BASE_URL set. Getting that wrong sends the MOBILE where a token belongs, the tracker
+ * finds no log, and the customer lands on the fallback page instead of the payment page.
+ */
+export const CTA_TEMPLATE_SUFFIX = '_cta'
+
+/** True when a template's button routes through the tracker. */
+export function isTrackedTemplate(templateName: string | null | undefined): boolean {
+  return (templateName || '').trim().endsWith(CTA_TEMPLATE_SUFFIX)
+}
+
+/** The approved template a tracked one is derived from: `x_cta` -> `x`. */
+export function baseTemplateName(templateName: string): string {
+  const name = templateName.trim()
+  return isTrackedTemplate(name) ? name.slice(0, -CTA_TEMPLATE_SUFFIX.length) : name
 }
 
 /**
@@ -81,23 +102,45 @@ export function isPlausibleCtaToken(token: string): boolean {
 /**
  * The button parameters and stored destination for one WhatsApp send.
  *
- * With tracking OFF the configured button parameters are passed through untouched — this must be
- * a strict no-op, because the button URL lives in an already-approved Meta template and changing
- * what we send would break live sends. With tracking ON the button carries the message token and
- * the real destination is stored on the log row for the tracker to read.
+ * The decision is driven by the TEMPLATE, not by an env var. A `_cta` template's button URL is
+ * `<tracker>/{{1}}`, so `{{1}}` must be the message token; an ordinary template's URL is the real
+ * destination, so `{{1}}` stays whatever the nudge configured (normally the mobile).
  *
- * `ctaUrl` is stored even when tracking is off, so the export can show which link a recipient was
- * given — it is free metadata.
+ * Sending the wrong one is not a cosmetic bug: the tracker would look up `<mobile>` as a token,
+ * find nothing, and redirect to the fallback URL — the customer would never reach the payment page.
+ *
+ * `ctaUrl` is recorded either way, so the export can show which link a recipient was given.
  */
+export interface CtaSendParams {
+  buttonParams: string[]
+  ctaUrl: string | null
+  /**
+   * Set for a tracked template: the untracked original to retry with if Meta has not approved the
+   * tracked one yet. Without it, pointing a live nudge at a freshly created `_cta` template would
+   * break its sends until review completes.
+   */
+  fallback?: { templateName: string; buttonParams: string[] }
+}
+
 export function ctaSendParams(opts: {
+  /** The template being sent, so the suffix can be detected. */
+  templateName: string | null
   /** Where the button would go, from the template spec. Null means the template has no button. */
   destination: string | null
   trackingId: string
   mobileDigits: string
-  /** Whatever `whatsappParams.button` resolved to, used verbatim when tracking is off. */
+  /** Whatever `whatsappParams.button` resolved to, used verbatim for an untracked template. */
   configured: string[]
-}): { buttonParams: string[]; ctaUrl: string | null } {
+}): CtaSendParams {
   if (!opts.destination) return { buttonParams: opts.configured, ctaUrl: null }
-  if (!isCtaTrackingEnabled()) return { buttonParams: opts.configured, ctaUrl: opts.destination }
-  return { buttonParams: [opts.trackingId], ctaUrl: opts.destination }
+
+  if (isTrackedTemplate(opts.templateName)) {
+    return {
+      buttonParams: [opts.trackingId],
+      ctaUrl: opts.destination,
+      fallback: { templateName: baseTemplateName(opts.templateName as string), buttonParams: opts.configured },
+    }
+  }
+
+  return { buttonParams: opts.configured, ctaUrl: opts.destination }
 }

@@ -57,6 +57,8 @@ npm start                   # node .next/standalone/server.js  (PORT env, defaul
 | `npm run logs:export` | Export logs to .xlsx/.csv by date range, nudge, channel and status |
 | `npm run logs:export:demo` | Write a workbook of invented rows, to confirm Excel opens the format |
 | `npm run db:add-cta-columns` | Add the WhatsApp CTA click columns (dry run; `--apply` to write) |
+| `npm run wa:repoint` | Repoint the sheet WhatsApp nudges at their UTILITY templates (dry run) |
+| `npm run wa:analytics` | **Button clicks from Meta** — per template, per day (no template change needed) |
 | `npm run capi:check` | Meta Conversions API config + the exact payload it would send |
 | `npm run nudges:set-cap` | Set the per-lead message cap on the four activation-fee nudges (dry run; `--apply` to write) |
 | `npm run db:push` | Apply schema changes (safe) |
@@ -216,61 +218,130 @@ Generated exports are **git-ignored**: they contain real customer phone numbers 
 
 ### WhatsApp button clicks (who tapped the CTA)
 
-**Meta does not send a webhook when someone taps a URL button on a template.** Only quick-reply and
-list replies come back, as inbound messages — those are already stored in `inboundText`. So there is
-exactly one way to know *who* clicked: route the button through this app, record the tap, and
-redirect. That is how it works here.
+**Meta records button clicks itself — start here, not with the redirect tracker.** `GET
+/{WABA_ID}/template_analytics` returns per-template, per-day metrics including:
+
+```json
+"clicked": [
+  { "type": "url_button",        "button_content": "Pay Now", "count": 6 },
+  { "type": "unique_url_button", "button_content": "Pay Now", "count": 5 } ]
+```
+
+That needs **no template change, no redirect and no review**, and works on this WABA today:
+
+```bash
+npm run wa:analytics          # last 7 days
+npm run wa:analytics 21
+```
 
 ```
-template button URL : <CTA_TRACK_BASE_URL>/{{1}}
-{{1}}               : the message's trackingId (NOT the mobile)
+template                                status    sent*  clicks  unique  button
+activation_fee_pending_transacting     APPROVED    100      16      15  Pay Now
+activation_fee_pending_not_transacting APPROVED    116      12      11  Pay Now
+* sent = from our own log table; clicks = from Meta
+```
+
+#### Two traps in that endpoint, both measured
+
+| Trap | Detail |
+| --- | --- |
+| `template_ids` is capped at **10** | 11 ids → `400 (#100) template_ids`, which names the parameter but not the problem |
+| **A response is capped at ~25 data points and Meta silently truncates the rest** | A sweep with two known-active control templates: `ids=2` → both reported ✅ · `ids=4` → one already lost ⚠️ · `ids=5+` → **zeros for templates that report data at `ids=2`** ❌. There is no pagination cursor |
+
+The second is why this asks for **one template per request** and caps the window at
+**`ANALYTICS_MAX_DAYS` (23)**. `fetchTemplateClickAnalytics()` also refuses a response that arrives
+at the cap rather than reporting a partial number as if it were complete.
+
+Because of the cap, only **CLICKED** is fetched from Meta — sent/delivered/read are already recorded
+accurately by the webhook, and asking Meta for them too would multiply the requests for data we
+already have.
+
+**What it cannot do: say WHO clicked.** The data is per template per day. Per-person attribution
+needs the redirect tracker below.
+
+#### Per-person attribution — the `_cta` templates
+
+Meta's analytics can say **how many** clicked; it can never say **who**. For that the button has to
+route through this app, and because a button's URL lives *inside* the approved template, that means
+a separate tracked template per button.
+
+**Every UTILITY template with a URL button has a tracked twin whose name ends in `_cta`:**
+
+| Base (untracked) | Tracked |
+| --- | --- |
+| `activation_fee_pending_transacting` | `activation_fee_pending_transacting_cta` |
+| `activation_fee_pending_not_transacting` | `activation_fee_pending_not_transacting_cta` |
+| `csp_details_pending_reminder` | `csp_details_pending_reminder_cta` |
+| `mobile_otp_pending` | `mobile_otp_pending_cta` |
+| `pan_verification_pending` | `pan_verification_pending_cta` |
+| `agreement_signature_pending` | `agreement_signature_pending_cta` |
+| `documents_pending_upload` | `documents_pending_upload_cta` |
+| `documents_reupload_required` | `documents_reupload_required_cta` |
+
+Templates with **no button** (`ip_whitelisting_mandatory`, `documents_pending_reminder`) have no
+tracked twin — there is nothing to track. The retired **MARKETING** templates are left alone.
+
+The suffix is the whole mechanism:
+
+```
+template button URL : https://<host>/api/track/cta/{{1}}
+{{1}}               : the message's trackingId  (NOT the mobile)
 GET /api/track/cta/<trackingId>  →  records the click  →  302 to the stored destination
 ```
 
-The destination is stored **per message** at send time (`MessageLog.ctaUrl`), built from the
-template's own button URL with the recipient's mobile substituted — so a tracked link lands in
-exactly the same place the untracked one would have. It is read from the row, never from the
-request, which is what stops this becoming an open redirect.
+**What decides the button parameter is the TEMPLATE, not an env var.** A `_cta` template expects a
+token in `{{1}}`; an ordinary one expects the mobile. Sending the wrong one is not cosmetic: the
+tracker would look up a phone number as a token, find nothing, and drop the customer on the fallback
+page instead of the payment page. `ctaSendParams()` reads the suffix to decide.
+
+The destination is stored **per message** at send time (`MessageLog.ctaUrl`), built from the *base*
+template's button URL with the mobile substituted, so a tracked link lands exactly where the
+untracked one would have. It is read from the row, never from the request, which is what stops this
+becoming an open redirect.
+
+```bash
+npm run wa:repoint                          # dry run: which nudges move to which template
+npm run wa:repoint -- --apply               # point them at the tracked templates
+npm run wa:templates -- --create-missing    # create any tracked template that does not exist yet
+```
+
+Order matters: a tracked template must **exist on Meta** before a nudge points at it. These commands
+are safe in any order because of the fallback below, but that is the intended sequence.
+
+##### Sends cannot break while Meta reviews a tracked template
+
+A `_cta` template starts **PENDING**. Pointing a live nudge at a pending template would make its
+sends fail with `132001`. So `sendWhatsAppTemplate()` accepts an optional fallback and retries the
+**base** template when Meta reports the tracked one as unavailable — with the *mobile* as the button
+parameter, since that is what the untracked template expects.
+
+The customer still gets their message; it simply has no click attribution until the tracked template
+is approved. The log records the template that **actually** went out
+(`usedFallbackTemplate`), so a message with no clicks is never mistaken for a broken tracker.
 
 | Column | Meaning |
 | --- | --- |
-| `ctaUrl` | where this message's button should reach (recorded even when tracking is off) |
+| `ctaUrl` | where this message's button should reach (recorded even when untracked) |
 | `ctaClicks` | how many taps arrived |
 | `ctaClickedAt` | when the first tap arrived |
 
 Clicks show in the **Logs** tab as a CTA badge (`×2`), and the export has
-**CTA clicked / CTA clicks / CTA clicked at / CTA link** columns. A dash means *not tracked*, which
-is different from *tracked and not clicked* — the two are labelled separately.
+**CTA clicked / CTA clicks / CTA clicked at / CTA link** columns. A dash means *not tracked*;
+"no click" means *tracked but not tapped* — deliberately different labels.
 
-Two rules the tracker follows, both deliberate:
+Three rules the tracker follows, all deliberate:
 
 1. **It never shows an error page.** An unknown token, a malformed one, or an unreachable database
    still redirects to `CTA_FALLBACK_URL`. A broken tracker must not cost a sale.
-2. **It never redirects to a URL from the request**, so it cannot be turned into an open redirect.
-   The counter update and the Meta conversion are both fire-and-forget: neither is allowed to stand
-   between the customer and the payment page. The redirect is `302`, not `301` — a permanent
-   redirect would be cached and later clicks would skip the tracker.
+2. **It never redirects to a URL from the request**, so it cannot become an open redirect.
+3. Counting and any Meta conversion are **fire-and-forget** — neither may stand between the customer
+   and the payment page. The redirect is `302`, not `301`: a permanent redirect would be cached and
+   later clicks would skip the tracker.
 
-#### Turning it on (requires new templates)
-
-Tracking is **off by default**. Set `CTA_TRACK_BASE_URL` and the button gains the tracker; leave it
-empty and `ctaSendParams()` is a strict no-op that passes the configured button parameters through
-untouched.
-
-⚠️ **A button's URL lives inside the Meta-approved template**, so switching to tracked buttons means
-creating NEW templates and waiting for review — you cannot edit the URL of a live approved template
-without it going back through review. The existing nudges keep working on the untracked templates
-until the new ones are approved, so there is nothing to break in the meantime.
-
-```bash
-export CTA_TRACK_BASE_URL=https://nudge-engine.onrender.com/api/track/cta
-npm run wa:templates -- --create-missing    # submit the tracked templates
-# once approved: repoint the nudges and restart the sends
-```
-
-One caveat worth knowing before you rely on it: the click now passes through your host, so the
-redirect is subject to its cold starts. The handler is deliberately cheap (one indexed lookup), but
-a sleeping free-tier instance will add latency to a customer's tap.
+One caveat: the click now passes through your host, so it is subject to its cold starts. The handler
+is deliberately cheap (one indexed lookup), but a sleeping free-tier instance adds latency to a
+customer's tap. **The aggregate analytics above has no such downside** — which is why the two sit
+side by side rather than one replacing the other.
 
 ### Sending conversions back to Meta
 
@@ -967,6 +1038,7 @@ kind of change.
 | `GET /api/db/health` | Basic | External MySQL connectivity (`?tables=1`, `?describe=<table>`) |
 | `GET /api/track/open/{trackingId}` · `GET /api/track/open?tid=` | **public** | Email open pixel (always returns a 1×1 GIF) |
 | `GET/POST /api/track/whatsapp` | **public** | Meta webhook (verify handshake + statuses + inbound) |
+| `GET /api/whatsapp/analytics` | Basic | **Button clicks + sent from Meta**, per template (`?days=7`) |
 | `GET /api/track/cta/{trackingId}` | **public** | WhatsApp button click tracker → records the tap, 302s to the destination |
 | `GET/POST /api/track/email` | shared secret | Inbound reply webhook |
 | `POST /api/cron/run` | shared secret | Run one full cycle now |

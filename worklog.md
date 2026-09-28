@@ -728,3 +728,55 @@ Stage Summary:
 - Click attribution is built and off by default; enabling it is one env var plus new templates on Meta's review queue.
 - The redirect is designed so a failure in tracking can never cost a customer a sale.
 - Conversions can be sent to Meta with correct hashing; the remaining piece for ad attribution is capturing ctwa_clid from inbound referrals.
+
+---
+
+Task ID: 32
+Agent: Main agent (DeepSeek Harness)
+Task: "I clicked the CTA on a test message to 9643520034 — did we track it?"
+
+Work Log:
+- ANSWERED FROM THE DATA. The log row for 919643520034 (2026-09-28 13:35:04 IST, whatsapp_onboarded_not_transacting, template activation_fee_pending_not_transacting) shows the send succeeded and the destination WAS recorded — `ctaUrl = https://eps.eko.in/console/pay-activation-fee?mobile=9643520034` — which also proves the Task 31 code is deployed. But `ctaClicks = 0`, because the redirect tracker is off (CTA_TRACK_BASE_URL empty).
+- THAT IS NOT THE WHOLE ANSWER, and I nearly stopped there. I checked whether Meta exposes clicks itself, and IT DOES: GET /{WABA_ID}/template_analytics returns per-template per-day `clicked` with both `url_button` and `unique_url_button` counts. On the live WABA:
+    2026-09-28  activation_fee_pending_not_transacting  clicks 6  unique 5   ← the user's tap is in here
+    2026-09-28  activation_fee_pending_transacting      clicks 5  unique 5
+    2026-09-25  both templates                          6/6 and 11/10
+  So the click WAS tracked — by Meta, not by us. This needs NO template change, NO redirect and NO review: strictly better than the Task 31 redirect design for the question "did anyone click", which I had wrongly framed as the only option.
+- TWO MEASURED TRAPS IN THAT ENDPOINT, both found by testing rather than reading docs:
+  1. `template_ids` is capped at 10 (11 -> HTTP 400 "(#100) template_ids" — names the parameter, not the problem). 1..10 all succeed.
+  2. A response is capped at ~25 data points and Meta SILENTLY TRUNCATES the rest. Sweep with two known-active control templates: ids=2 -> both reported (control total 211 sent); ids=3 -> all three (211); ids=4 -> 25 points and ONE CONTROL ALREADY LOST (111); ids=5..10 -> 25 points, 4 templates, CONTROL TOTAL 0 — real data replaced by zeros at HTTP 200, with no pagination cursor to follow.
+  My first implementation batched 10 ids, and the CLI therefore reported 0 clicks for the two templates that had 28 between them. That is exactly the kind of silent-zero bug worth chasing down rather than shipping.
+- REBUILT AROUND THE CAP: fetchTemplateClickAnalytics() asks for ONE template per request and only for CLICKED (sent/delivered/read already come from our own webhook log, are more accurate, and cost nothing), caps the window at ANALYTICS_MAX_DAYS=23, and REFUSES a response that arrives at the point cap instead of reporting a partial number as complete.
+- Verified end to end against the live WABA: 28 clicks / 26 unique across the two activation-fee templates, broken down by day. New npm run wa:analytics and GET /api/whatsapp/analytics.
+- 14 new assertions encode the two traps (chunk sizes, the 10-id limit, the 25-point cap, the 23-day window, and that unique_url_button is not double-counted into the click total).
+- CORRECTED THE DOCS: the Task 31 README framed the redirect tracker as the ONLY way to know about clicks. That was wrong. Aggregate analytics is now presented first as the recommended route, with the redirect positioned as the per-person option — and its two real costs (new templates + review, and the customer's tap depending on our host not being cold) stated plainly.
+- verify now 493 assertions. tsc clean, eslint clean.
+
+Stage Summary:
+- Yes: the click was tracked. Meta recorded 6 clicks / 5 unique on that template on 2026-09-28, and the user's is one of them.
+- Click numbers are now available in-app and from the CLI with no template change.
+- Per-person attribution still needs the redirect tracker, which is off and needs new templates.
+
+---
+
+Task ID: 33
+Agent: Main agent (DeepSeek Harness)
+Task: "We never get WHO clicked — I want to know who clicked, like open and replied." Create tracked templates and attach them.
+
+Work Log:
+- CONFIRMED THE LIMIT PLAINLY FIRST: Meta's analytics are per template per day. There is no per-recipient data in them, and no way to derive it. Per-person attribution requires the click to pass through something we control.
+- Created the tracked templates. Naming: every UTILITY template with a URL button gets a twin suffixed `_cta` — 8 in total (2 pay + 6 console flows). Created via `wa:templates --create-missing`; all 8 are PENDING on Meta, all UTILITY, all with button URL `https://<host>/api/track/cta/{{1}}`. The retired MARKETING templates were left untouched, as instructed. Templates with no button (ip_whitelisting_mandatory, documents_pending_reminder) got no twin — there is nothing to track.
+- ATTACHED them: `wa:repoint --apply` moved all 8 nudges onto their tracked templates, touching only whatsappTemplateName + whatsappLanguage, and leaving `enabled` alone (both pay nudges stayed ON).
+- THE SUBTLE BUG THIS CHANGE COULD HAVE INTRODUCED, caught while wiring it: the button parameter must be decided by the TEMPLATE, not by an env var. A `_cta` template's URL is `<tracker>/{{1}}` so `{{1}}` must be the token; an ordinary template's URL is the destination so `{{1}}` must be the mobile. Sending the mobile to a tracked template would make the tracker look up a phone number as a token, find nothing, and drop the customer on the FALLBACK page instead of the payment page — a silent loss of a paying customer. ctaSendParams() now branches on the `_cta` suffix, and two assertions pin both directions, including that the answer does not change when CTA_TRACK_BASE_URL is unset in the process.
+- SAFETY WHILE PENDING: pointing a live nudge at a template Meta has not approved yet would fail every send with 132001. sendWhatsAppTemplate() now takes an optional `fallback` and retries the base (untracked) template when Meta reports the tracked one unavailable, with the MOBILE as the button parameter because that is what the untracked URL expects. The message still goes out; only the attribution is missing until approval. The log records the template that ACTUALLY went out (`usedFallbackTemplate`), so "no clicks on this message" is never mistaken for a broken tracker.
+- isTemplateUnavailable() lives in whatsapp-errors.ts, NOT whatsapp.ts: whatsapp.ts imports the database through a path alias and therefore cannot be loaded by the verify script. That convention has bitten this project before; this time the test failure surfaced it immediately.
+- Ordering fix in the template tooling: `--create-missing` read names from the DATABASE, so a tracked template could not be created until a nudge already pointed at it — a chicken-and-egg that would have forced an outage between repointing and creating. It now considers the union of the database's names and the code's defaults.
+- FOUND AND FIXED A REAL REGRESSION IN MY OWN VERIFY RUN: 9 assertions encoded the old untracked template names. Six compared the nudge's template name to the flow key, two named the pay templates explicitly, and one asserted the env var drove the button parameter — that last one was pinning exactly the behaviour that had to change. All replaced with assertions about the new intent (base name + isTrackedTemplate, and template-driven parameter selection).
+- Verified against the deployment that the tracker route is live and behaves: an unknown token returns 302 to the fallback rather than an error, which is the design working.
+- verify now 525 assertions. tsc clean, eslint clean.
+- NOT YET VERIFIED END TO END: the 8 tracked templates are PENDING, so no tracked click has actually been recorded. The redirect, the destination lookup and the counter are covered by assertions, but a real end-to-end click needs one of the templates approved and a message sent on it.
+
+Stage Summary:
+- 8 `_cta` templates created (UTILITY only) and attached to their nudges; they go live as Meta approves them.
+- Sends cannot break in the meantime: an unapproved tracked template falls back to its approved base, and the log says which one went out.
+- Per-recipient clicks will appear in the Logs tab's CTA column and in the export as soon as a tracked template is approved.

@@ -12,6 +12,7 @@
 import { db } from '@/lib/db'
 import { createHmac, timingSafeEqual } from 'crypto'
 import { appendInbound, type InboundMessage } from '@/lib/whatsapp-inbound'
+import { isTemplateUnavailable } from '@/lib/whatsapp-errors'
 
 const GRAPH_BASE = () => `https://graph.facebook.com/${process.env.WHATSAPP_API_VERSION || 'v21.0'}`
 
@@ -80,6 +81,11 @@ export interface WhatsAppSendResult {
   ok: boolean
   waMessageId?: string
   error?: string
+  /**
+   * Set when the requested template was unavailable and an approved fallback was used instead.
+   * The message still went out; it just went out on the untracked template.
+   */
+  usedFallbackTemplate?: string
 }
 
 const NOT_CONFIGURED =
@@ -124,37 +130,67 @@ export async function sendWhatsAppTemplate(opts: {
    * `button` component, so the button's {{1}} is INDEPENDENT of the body's {{1}}.
    */
   buttonParams?: string[]
+  /**
+   * Optional retry with a different template if `templateName` is not available on the WABA.
+   *
+   * This is what stops a tracked (`_cta`) template from breaking live sending while Meta reviews
+   * it: the send falls back to the long-approved untracked template, so the customer still gets
+   * their message — just without click attribution — until the tracked one is approved.
+   *
+   * `buttonParams` must be supplied for the fallback, because the two templates expect DIFFERENT
+   * values there: the tracked one takes a message token, the untracked one takes the mobile.
+   */
+  fallback?: { templateName: string; buttonParams?: string[] }
 }): Promise<WhatsAppSendResult> {
-  const payload: Record<string, unknown> = {
-    messaging_product: 'whatsapp',
-    recipient_type: 'individual',
-    to: opts.to,
-    type: 'template',
-    template: {
-      name: opts.templateName,
-      language: { code: opts.language || 'en' },
-    },
+  const build = (templateName: string, buttonParams: string[] | undefined): Record<string, unknown> => {
+    const payload: Record<string, unknown> = {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: opts.to,
+      type: 'template',
+      template: {
+        name: templateName,
+        language: { code: opts.language || 'en' },
+      },
+    }
+
+    const components: Record<string, unknown>[] = []
+    if (opts.params.length > 0) {
+      components.push({
+        type: 'body',
+        parameters: opts.params.map((text) => ({ type: 'text', text: String(text) })),
+      })
+    }
+    if (buttonParams?.length) {
+      components.push({
+        type: 'button',
+        sub_type: 'url',
+        index: '0',
+        parameters: buttonParams.map((text) => ({ type: 'text', text: String(text) })),
+      })
+    }
+    if (components.length) {
+      ;(payload.template as Record<string, unknown>).components = components
+    }
+    return payload
   }
 
-  const components: Record<string, unknown>[] = []
-  if (opts.params.length > 0) {
-    components.push({
-      type: 'body',
-      parameters: opts.params.map((text) => ({ type: 'text', text: String(text) })),
-    })
+  const result = await postMessage(build(opts.templateName, opts.buttonParams))
+
+  if (!result.ok && opts.fallback && isTemplateUnavailable(result.error)) {
+    const retry = await postMessage(build(opts.fallback.templateName, opts.fallback.buttonParams))
+    if (retry.ok) {
+      // Succeeded, but say which template actually went out — a silent substitution would make
+      // "why are there no clicks for this message" a mystery later.
+      return { ...retry, error: undefined, usedFallbackTemplate: opts.fallback.templateName }
+    }
+    return {
+      ...retry,
+      error: `${result.error} (the fallback template "${opts.fallback.templateName}" also failed: ${retry.error})`,
+    }
   }
-  if (opts.buttonParams?.length) {
-    components.push({
-      type: 'button',
-      sub_type: 'url',
-      index: '0',
-      parameters: opts.buttonParams.map((text) => ({ type: 'text', text: String(text) })),
-    })
-  }
-  if (components.length) {
-    ;(payload.template as Record<string, unknown>).components = components
-  }
-  return postMessage(payload)
+
+  return result
 }
 
 /**
