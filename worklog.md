@@ -780,3 +780,28 @@ Stage Summary:
 - 8 `_cta` templates created (UTILITY only) and attached to their nudges; they go live as Meta approves them.
 - Sends cannot break in the meantime: an unapproved tracked template falls back to its approved base, and the log says which one went out.
 - Per-recipient clicks will appear in the Logs tab's CTA column and in the export as soon as a tracked template is approved.
+
+---
+
+Task ID: 34
+Agent: Main agent (DeepSeek Harness)
+Task: Make "Sync today" run from the last sync time to now; audit every run-based WhatsApp nudge for production.
+
+Work Log:
+- SYNC WINDOW REWRITTEN. "Sync today" (fixed 01:00 today) is now "Sync new leads": from the LAST SYNC time to now, closed at both ends.
+  * Verified the CRM accepts it BEFORE building on it: two conditions on Created_Time are accepted, but ONLY with an explicit +05:30 offset — an ISO "…Z" suffix is rejected with INVALID_QUERY / expected_data_type datetime / invalid value for search. I hit that failure myself on the first probe, which is exactly why it is now an assertion.
+  * "Last sync" is read from the data, not stored: MAX(nudge_lead.lastSyncedAt), which is stamped on every upsert. No new table, column or config value.
+  * THE RACE I HAD TO GUARD: a sync queries the CRM and THEN stamps lastSyncedAt per upsert. A lead created between the query and the final stamp would fall outside a strict `greater_than lastSync` window and be missed forever. The from-bound is therefore pulled back by ZOHO_SYNC_OVERLAP_MINUTES (default 10), which is safe because the upsert is idempotent. Missing a lead is not.
+  * PROVEN against the live CRM, not just constructed: last sync 2026-09-24T09:28Z, window to now returned 58 leads, of which 0 were already in the DB — i.e. exactly what was created since, nothing re-scanned.
+  * window 'incremental' is now the default and what the button sends; 'all' and 'today' are kept, and the response reports from/to/overlap so the toast can say precisely what was asked for.
+- PRODUCTION AUDIT of every run-based nudge. Two passes, both against live systems:
+  1. wa:flows — all 21 templates are APPROVED (including all 8 tracked `_cta` ones, so per-person click attribution is now live everywhere), every nudge's template exists in the right language, has the right button, and supplies the right parameter count.
+  2. New npm run readiness — a DRY RUN of the real selection logic that reports who each nudge would message right now. Result: 11 WhatsApp nudges, 0 blocked, 7 with recipients available immediately. The scheduler is off and no enabled nudge is run-based, so nothing fires on its own.
+- CHECKED A SUSPICIOUS ZERO rather than reporting it as fine: four MySQL flows returned 0 recipients. Queried the business DB for the one that should plausibly have matches — documents_reupload_required looks for doc_status = 3 on applications from the last 30 days, and the most recent rejected document in the entire table is 2026-07-28, so 0 is correct. The other three have 2–3 hour windows and are simply quiet. Also confirmed documents_pending_upload's 2 recipients make sense: recent applications have NO csp_docs rows at all, which is precisely "never uploaded".
+- FIXED A RECURRING CONSTRAINT PROPERLY instead of working around it again. CLI scripts could not import any module with a `@/…` import in its dependency graph, which had forced logic to be split or duplicated five times in this project (mailer, zoho-mail, log-export, whatsapp, nudge-engine). scripts/lib/alias-loader.mjs is a Node module-resolution hook that maps `@/x` to `src/x.ts`, registered via --import. The readiness check now exercises the REAL preview and collector functions rather than a reimplementation of them.
+- verify now 545 assertions (the sync window's both-ends shape, the +05:30-only rule including that the output never ends in Z, IST day alignment, and the overlap's configurability including the nonsense and 0 cases). tsc clean, eslint clean.
+
+Stage Summary:
+- "Sync new leads" fetches exactly what was created since the last sync, with a 10-minute overlap so nothing can slip through the gap.
+- All WhatsApp flows are production-ready: 21/21 templates approved, 0 blocked, and the dry run shows who each one would reach.
+- Nothing sends automatically: the scheduler is off and every enabled nudge is sheet-driven.

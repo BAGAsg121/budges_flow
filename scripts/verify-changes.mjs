@@ -5,7 +5,7 @@
  */
 import { renderTemplate, escapeHtml, injectTrackingPixel, htmlToText } from '../src/lib/template.ts'
 import { isCronAuthorized, isWebhookAuthorized } from '../src/lib/cron-auth.ts'
-import { DEFAULT_NUDGES, ZOHO_CRITERIA, LEAD_STATUS, PAY_ACTIVATION_FEE_URL, WHATSAPP_TEST_STATUS, MYSQL_FLOW_TEMPLATES, WA_SHEET_FLOW_TEMPLATES, MYSQL_FLOW_LOOKBACK, CONSOLE_URL, zohoTodayIso, zohoTodayCriteria, zohoCriteriaSince, ZOHO_LEADS_CREATED_AFTER, ZOHO_TZ_OFFSET } from '../src/lib/nudge-defaults.ts'
+import { DEFAULT_NUDGES, ZOHO_CRITERIA, LEAD_STATUS, PAY_ACTIVATION_FEE_URL, WHATSAPP_TEST_STATUS, MYSQL_FLOW_TEMPLATES, WA_SHEET_FLOW_TEMPLATES, MYSQL_FLOW_LOOKBACK, CONSOLE_URL, zohoTodayIso, zohoTodayCriteria, zohoCriteriaSince, ZOHO_LEADS_CREATED_AFTER, ZOHO_TZ_OFFSET, zohoCriteriaBetween, zohoIstIso, zohoSyncOverlapMinutes } from '../src/lib/nudge-defaults.ts'
 import { MYSQL_FLOW_KEYS, isMysqlFlowKey } from '../src/lib/mysql-nudges.ts'
 import { buildWhatsAppParams as buildWhatsAppParamsRaw } from '../src/lib/whatsapp-params.ts'
 import { extractInboundText, appendInbound, INBOUND_KEEP } from '../src/lib/whatsapp-inbound.ts'
@@ -138,6 +138,27 @@ checkTrue('today criteria keeps the EPS filter', zohoTodayCriteria(new Date('202
 checkTrue('today criteria has no upper bound', !zohoTodayCriteria(new Date('2026-09-23T02:00:00Z')).includes('less_than'))
 check('today criteria differs from the full window', zohoTodayCriteria(new Date('2026-09-23T02:00:00Z')) === ZOHO_CRITERIA, false)
 check('zohoCriteriaSince builds the same shape as the default', zohoCriteriaSince(ZOHO_LEADS_CREATED_AFTER), ZOHO_CRITERIA)
+
+// --- the incremental sync window ------------------------------------------------
+// "Sync new leads" asks for everything created since the last sync, closed at both ends. Verified
+// against the live CRM: two conditions on Created_Time are accepted, but ONLY with an explicit
+// +05:30 offset — an ISO "…Z" suffix is rejected as an invalid datetime.
+check('the window bounds both ends', zohoCriteriaBetween('2026-09-24T14:48:58+05:30', '2026-09-28T14:58:13+05:30'), '((Business_vertical:equals:EPS)and(Created_Time:greater_than:2026-09-24T14:48:58+05:30)and(Created_Time:less_than:2026-09-28T14:58:13+05:30))')
+checkTrue('the window keeps the EPS filter', zohoCriteriaBetween('a', 'b').includes('Business_vertical:equals:EPS'))
+check('a Date is formatted with the CRM offset, never a Z', zohoIstIso(new Date('2026-09-28T09:28:13Z')), '2026-09-28T14:58:13+05:30')
+checkTrue('the formatted datetime never ends in Z', !zohoIstIso(new Date('2026-09-28T09:28:13Z')).endsWith('Z'))
+check('a midnight-UTC instant is the same IST day', zohoIstIso(new Date('2026-09-27T18:30:00Z')), '2026-09-28T00:00:00+05:30')
+// The overlap guards a real race: the CRM is queried, then lastSyncedAt is stamped per upsert, so a
+// lead created in between would fall outside a strict window and be lost.
+checkTrue('there is a non-zero overlap by default', zohoSyncOverlapMinutes() > 0)
+check('the default overlap is 10 minutes', zohoSyncOverlapMinutes(), 10)
+process.env.ZOHO_SYNC_OVERLAP_MINUTES = '30'
+check('the overlap is configurable', zohoSyncOverlapMinutes(), 30)
+process.env.ZOHO_SYNC_OVERLAP_MINUTES = 'nonsense'
+check('a nonsense overlap falls back to the default', zohoSyncOverlapMinutes(), 10)
+process.env.ZOHO_SYNC_OVERLAP_MINUTES = '0'
+check('an overlap of 0 is allowed (explicitly opting out)', zohoSyncOverlapMinutes(), 0)
+delete process.env.ZOHO_SYNC_OVERLAP_MINUTES
 
 checkTrue('onboarding_started_agreement exists (email)', byKey['onboarding_started_agreement']?.channel === 'email')
 checkTrue('documents_pending exists (email)', byKey['documents_pending']?.channel === 'email')

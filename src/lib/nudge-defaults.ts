@@ -45,6 +45,40 @@ export function zohoCriteriaSince(createdAfter: string): string {
 }
 
 /**
+ * A closed date window — `greater_than from` AND `less_than to`.
+ *
+ * Verified against the live CRM: two conditions on the SAME field are accepted, but the datetime
+ * MUST carry an explicit offset (`2026-09-20T14:56:36+05:30`). An ISO `…Z` suffix is rejected with
+ * `INVALID_QUERY / expected_data_type: datetime / invalid value for search`.
+ */
+export function zohoCriteriaBetween(fromIso: string, toIso: string): string {
+  return (
+    `((Business_vertical:equals:EPS)` +
+    `and(Created_Time:greater_than:${fromIso})` +
+    `and(Created_Time:less_than:${toIso}))`
+  )
+}
+
+/** A Date as Zoho wants it: `2026-09-20T14:56:36+05:30`. */
+export function zohoIstIso(d: Date): string {
+  const shifted = new Date(d.getTime() + (5 * 60 + 30) * 60 * 1000)
+  return `${shifted.toISOString().slice(0, 19)}${ZOHO_TZ_OFFSET}`
+}
+
+/**
+ * How far back to reach before the last sync time, in minutes.
+ *
+ * A sync is not instantaneous: it queries the CRM, then stamps `lastSyncedAt` on each lead as it
+ * upserts. A lead created *after* the query but *before* the final stamp would fall outside a
+ * strict `greater_than lastSync` window and be missed forever. Overlapping by a few minutes closes
+ * that gap, and re-fetching a lead is harmless because the upsert is idempotent.
+ */
+export function zohoSyncOverlapMinutes(): number {
+  const raw = Number(process.env.ZOHO_SYNC_OVERLAP_MINUTES || 10)
+  return Number.isFinite(raw) && raw >= 0 ? raw : 10
+}
+
+/**
  * "Today so far" — 01:00 in the CRM's timezone on the current day, up to whenever the
  * sync runs. Built at call time rather than as a constant so it does not go stale at
  * midnight, and computed from the timezone-of-record rather than the server's local

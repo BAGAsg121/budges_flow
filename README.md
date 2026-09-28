@@ -54,6 +54,7 @@ npm start                   # node .next/standalone/server.js  (PORT env, defaul
 | `npm run email:check` | Email transport config, or send a real test |
 | `npm run mail:diagnose` | Raw Zoho Mail API responses, varying one field at a time |
 | `npm run engage:report` | Per-family engagement split, straight from the database (sanity-checks the charts) |
+| `npm run readiness` | **Dry run every nudge** — who it would message now, and any blockers |
 | `npm run logs:export` | Export logs to .xlsx/.csv by date range, nudge, channel and status |
 | `npm run logs:export:demo` | Write a workbook of invented rows, to confirm Excel opens the format |
 | `npm run db:add-cta-columns` | Add the WhatsApp CTA click columns (dry run; `--apply` to write) |
@@ -342,6 +343,28 @@ One caveat: the click now passes through your host, so it is subject to its cold
 is deliberately cheap (one indexed lookup), but a sleeping free-tier instance adds latency to a
 customer's tap. **The aggregate analytics above has no such downside** — which is why the two sit
 side by side rather than one replacing the other.
+
+### Is everything ready to send?
+
+```bash
+npm run readiness              # every nudge
+npm run readiness -- --only whatsapp
+```
+
+A **dry run of the real selection logic** — nothing is sent. For each nudge it reports how it gets
+recipients, whether the channel is configured, the template's approval state, and **who it would
+message right now** and who it would skip, with reasons. Because it calls the same preview/collect
+functions the Run path uses, it cannot promise a send the run would not make.
+
+The last run: **11 WhatsApp nudges, 0 blocked**, every template approved. Four MySQL flows returned
+0 recipients, which was checked rather than assumed — e.g. `documents_reupload_required` looks for
+rejected documents (`doc_status = 3`) on applications from the last 30 days, and the most recent
+rejection in the whole table is **2026-07-28**, so 0 is correct, not a broken query.
+
+> **Resolved:** CLI scripts used to be unable to import any module with a `@/…` import in its
+> dependency graph, which forced logic to be split or duplicated to be testable. `scripts/lib/alias-loader.mjs`
+> teaches Node the same path mapping Next uses, so `npm run readiness` exercises the real code path
+> instead of a copy of it.
 
 ### Sending conversions back to Meta
 
@@ -638,13 +661,31 @@ ZOHO_MCP_LEADS_ARGS={"criteria":"{{criteria}}"}   # full override; {{criteria}} 
 
 | Body | Window |
 | --- | --- |
+| `{"window":"incremental"}` | **the default, and what the button uses** — from the last sync up to now |
 | `{"window":"all"}` | every EPS lead created since **1 Aug 2026** |
-| `{"window":"today"}` | same filter, created time moved to **01:00 today** (IST) |
+| `{"window":"today"}` | the same filter, created time at **01:00 today** (IST) |
 | `{"criteria":"((…))"}` | explicit override; wins over `window` |
 
-Both buttons in the header call this — **Sync today** and **Sync all leads**. The date is built in
-the CRM's timezone (`+05:30`), not the server's: Render runs in UTC, where "today" would otherwise
-start 5.5 hours late.
+**`incremental` is a closed window:** `Created_Time > from AND Created_Time < now`. The live CRM
+accepts two conditions on the same field, but **only with an explicit `+05:30` offset** — an ISO
+`…Z` suffix is rejected with `INVALID_QUERY / expected_data_type: datetime`. That is asserted, so it
+cannot regress.
+
+"From" is the **last sync time**, read from the data itself: `MAX(nudge_lead.lastSyncedAt)`, which is
+stamped on every upsert. No extra table, column or config value.
+
+#### Why it reaches back a few minutes
+
+A sync is not instantaneous: it queries the CRM, *then* stamps `lastSyncedAt` per upsert. A lead
+created after the query but before the final stamp would sit outside a strict window and be missed
+forever. So the from-bound is pulled back by `ZOHO_SYNC_OVERLAP_MINUTES` (default **10**). Re-fetching
+a lead is harmless — the upsert is idempotent — whereas missing one is not.
+
+Verified against the live CRM: with the last sync at `2026-09-24T09:28Z`, the incremental window
+returned **58 leads, all of them new** — exactly what was created since, with nothing re-scanned.
+
+Both buttons in the header call this — **Sync new leads** (incremental) and **Sync all leads**. The
+toast reports the window it actually used, including the from/to and the overlap.
 
 `via` controls the data path (`auto` by default). `auto` prefers MCP and falls back to the REST API
 if the MCP call fails, reporting `via` and `fellBack` in the response — a silent fallback would hide

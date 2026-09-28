@@ -29,6 +29,12 @@ interface SyncResponse {
   synced?: number
   via?: 'mcp' | 'api'
   window?: string
+  criteria?: string
+  /** Present for the incremental window: the exact bounds that were used. */
+  from?: string | null
+  to?: string | null
+  lastSyncAt?: string | null
+  overlapMinutes?: number | null
   tool?: string | null
   fellBack?: string | null
   error?: string
@@ -39,8 +45,8 @@ export default function Home() {
   const [refreshKey, setRefreshKey] = useState(0)
   const [tab, setTab] = useState<TabId>('dashboard')
   const [navOpen, setNavOpen] = useState(false)
-  // 'all' = every EPS lead since 1 Aug; 'today' = same filter, created since 01:00 IST today.
-  const [syncing, setSyncing] = useState<null | 'all' | 'today'>(null)
+  // 'all' = every EPS lead since 1 Aug; 'incremental' = created since the last sync, up to now.
+  const [syncing, setSyncing] = useState<null | 'all' | 'incremental'>(null)
   const [lastSync, setLastSync] = useState<{ at: string; window: string; count: number; via: string } | null>(null)
   const [nudgeSummary, setNudgeSummary] = useState<NudgeSummary | undefined>(undefined)
   // Set when the Templates tab asks to edit an email template: switch to Nudges and open it.
@@ -86,7 +92,7 @@ export default function Home() {
   }, [])
 
   const runSync = useCallback(
-    async (window: 'all' | 'today') => {
+    async (window: 'all' | 'incremental') => {
       setSyncing(window)
       try {
         const res = await fetch('/api/zoho/sync', {
@@ -105,16 +111,21 @@ export default function Home() {
         toast({
           title: `${data.synced} lead${data.synced === 1 ? '' : 's'} synced`,
           description:
-            `${window === 'today' ? 'Created since 01:00 today' : 'All EPS leads since 1 Aug'} · via ${via}` +
+            (window === 'incremental'
+              ? `Created since ${data.lastSyncAt ? new Date(data.lastSyncAt).toLocaleString() : 'the start of the window'} (minus ${data.overlapMinutes}m overlap)`
+              : 'All EPS leads since 1 Aug') +
+            ` · via ${via}` +
+            (data.criteria ? ` · ${data.criteria}` : '') +
             // A silent fallback would hide a broken MCP setup, so say it out loud.
             (data.fellBack ? ` · MCP unavailable, fell back to the API: ${data.fellBack}` : ''),
         })
 
         const entry = {
           at: new Date().toLocaleTimeString(),
-          window: window === 'today' ? 'today' : 'all',
+          window: window === 'incremental' ? 'new' : 'all',
           count: data.synced ?? 0,
           via: data.via ?? 'api',
+          from: data.from ?? null,
         }
         setLastSync(entry)
         localStorage.setItem('nudgeLastSync', JSON.stringify(entry))
@@ -133,7 +144,7 @@ export default function Home() {
   )
 
   const syncLabel = lastSync
-    ? `last sync ${lastSync.at} · ${lastSync.count} ${lastSync.window === 'today' ? 'today' : 'leads'} · ${lastSync.via}`
+    ? `last sync ${lastSync.at} · ${lastSync.count} ${lastSync.window === 'new' ? 'new' : 'leads'} · ${lastSync.via}`
     : 'not synced this session'
 
   return (
@@ -174,21 +185,21 @@ export default function Home() {
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => runSync('today')}
+                    onClick={() => runSync('incremental')}
                     disabled={syncing !== null}
                     className="gap-1.5"
                   >
-                    {syncing === 'today' ? (
+                    {syncing === 'incremental' ? (
                       <Loader2 className="h-3.5 w-3.5 animate-spin" />
                     ) : (
                       <CalendarDays className="h-3.5 w-3.5" />
                     )}
-                    <span className="hidden sm:inline">Sync today</span>
+                    <span className="hidden sm:inline">Sync new leads</span>
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent side="bottom" className="max-w-xs">
-                  Same EPS filter as the full sync, with the created time moved to <b>01:00 today</b> (IST) — so it
-                  picks up only today&apos;s leads.
+                  Only leads created since your <b>last sync</b>, up to now. Each run picks up exactly
+                  what is new — no gaps, no re-scanning the whole window.
                 </TooltipContent>
               </Tooltip>
 

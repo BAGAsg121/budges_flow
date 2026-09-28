@@ -21,6 +21,7 @@
     "wa:flows": "node --env-file=.env scripts/check-whatsapp-flows.mjs",
     "wa:repoint": "node --env-file=.env scripts/repoint-whatsapp-templates.mjs",
     "wa:analytics": "node --env-file=.env scripts/check-whatsapp-analytics.mjs",
+    "readiness": "node --import ./scripts/lib/register-alias.mjs --env-file=.env scripts/check-nudge-readiness.mjs",
     "email:check": "node --env-file=.env scripts/check-email.mjs",
     "mail:diagnose": "node --env-file=.env scripts/diagnose-zoho-mail.mjs",
     "mcp:check": "node --env-file=.env scripts/check-zoho-mcp.mjs",
