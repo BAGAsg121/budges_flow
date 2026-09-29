@@ -66,6 +66,7 @@ npm start                   # node .next/standalone/server.js  (PORT env, defaul
 | `npm run db:push:force` | Apply with `--accept-data-loss` (drops data) |
 | `npm run db:studio` | Prisma Studio |
 | `npm run seed:whatsapp` | Idempotently add the WhatsApp twin nudge |
+| `node scripts/inspect-n8n-flow.mjs <export.json>` | Read an n8n export structurally — node summary, **connection graph**, exact SQL/code text |
 
 ---
 
@@ -170,6 +171,27 @@ To add another: add an entry to `WA_SHEET_FLOW_TEMPLATES` in `src/lib/nudge-defa
 npm run seed:nudges                        # creates the nudge row, disabled
 npm run wa:templates -- --create-missing    # submits the template to Meta as UTILITY
 ```
+
+#### Any nudge can be sent from a sheet
+
+**Send from Sheet** is offered on **every** nudge card, including the six database-driven WhatsApp
+flows and the Zoho-driven ones. The sheet then replaces that nudge's usual recipient selection: the
+route never asks Zoho or the business database who to message, it messages the rows you pasted. The
+rule above applies unchanged — every row is sent, and only a repeat *within* the run is collapsed.
+
+This was previously offered only for sheet nudges and Zoho **email** nudges, which is why the MySQL
+WhatsApp flows could not be driven from an uploaded sheet at all. The route itself never cared which
+kind of nudge it was given; only the button was hidden.
+
+The one thing that can make a WhatsApp sheet run fail up front is a **missing column**. A template
+whose body reads a variable — `documents_pending_upload` reads `{{1}}` = `pending_documents`,
+`documents_reupload_required` reads `reupload_documents` — needs a column of that name, because the
+sheet is the only source of it on this path. Without the check, `buildWhatsAppParams()` would
+substitute its fallback and Meta would happily deliver a message reading *"documents still pending:
+**-**"*. The route therefore refuses with a 400 naming the missing columns and the columns the sheet
+does have, and the dialog lists the required columns before you press send. `first_name`, `email`,
+`mobile`, `mobile_digits`, `today` and `message_number` are derived from the sheet itself and never
+need a column of their own.
 
 ### Exporting logs
 
@@ -446,17 +468,22 @@ same nudge and address. That needed no new column on a production table.
 ### Activation-fee engagement
 
 The Dashboard carries a section for the two onboarding nudge families — **onboarded but not
-transacting** and **onboarded and transacting** — each of which exists twice, as an email nudge and
-as its WhatsApp twin. For every channel it shows **sent, failed, opened and replied**, the accepted
-percentage, the last-sent time, and (for WhatsApp) how many were dropped by Meta's cap.
+transacting** and **onboarded and transacting**. It is **WhatsApp only**: the email twins' numbers are
+still collected and exported (the Logs tab and the export are unchanged), but the dashboard shows
+nothing about email at the moment, so the channel toggle and the email chart series are gone rather
+than hidden behind a control nobody asked to use.
 
-**"Opened" means a different thing per channel**, and the UI labels it that way: for email it is the
-tracking pixel, for WhatsApp it is Meta's `read` receipt. Both are stored on the same `opened`
-column, which is why one endpoint can report both.
+Per family it shows **sent, failed, read and replied** plus the accepted percentage, the last-sent
+time, and (for WhatsApp) how many were dropped by Meta's cap. **Clicked** is the count of messages
+with at least one tap on the template's tracked button — the per-person click, which is different from
+the per-template-per-day number in Meta's analytics (see
+[WhatsApp button clicks](#whatsapp-button-clicks-who-tapped-the-cta)).
 
-Below that, one history chart per family with a **Email / WhatsApp** toggle, plotting sent, opened
-and failed per day over a 7/14/30-day window. They are a toggle rather than six series on one axis
-because at 14 days the bars overlap into noise. Each chart names the nudge key it is counting.
+**"Read"** is Meta's `read` receipt; it is stored on the same `opened` column as the email pixel, which
+is why one endpoint can report both.
+
+Below that, one history chart per family plotting sent, read and failed per day over a 7/14/30-day
+window. Each chart names the nudge key it is counting.
 
 > **A bug worth knowing about, because the screen could not show it.** The two charts were once fed a
 > single daily series built across all four nudges, so both families plotted *identical* graphs — and
@@ -788,9 +815,21 @@ Notes:
 - Reads go through `src/lib/sb-db.ts` — `SELECT` only, session read-only. **The app never writes to
   the business database.**
 - A/B/C keep the n8n trigger intervals, because they are event-driven. D/E/F previously took their
-  candidate list from a Google Sheet; with direct DB access the cohort is *recent CSP applications*,
-  so the window is in days. Widen any window freely — de-duplication is per phone number, so a wider
-  window means better coverage, not repeat messages.
+  candidate list from a Google Sheet — the n8n appended "sign agreement done" rows to a sheet, then
+  **deleted the row** once the agreement was signed, so the sheet *was* the signed-agreement cohort.
+  With direct DB access `docCohort: 'signed'` (the default) reproduces exactly that cohort from
+  `customer_agreement_history.status = 1`; `'recent'` widens it to any application in the window and
+  is kept as an option. Widen any window freely — de-duplication is per phone number, so a wider
+  window means better coverage, not repeat messages. Measured on the real data, the signed cohort is
+  the *narrower* one (30d: 5 signed customers vs 13 recent applications) and therefore the more
+  precise; do not "fix" a small recipient count by switching it back without checking.
+- `verify_csp` is filtered as `verifyAt IS NULL OR TRIM(verifyAt) = '' OR panNumber IS NULL OR
+  TRIM(panNumber) = ''`, not plain `IS NULL`. The n8n If-nodes tested
+  `x == null || String(x).trim() === ''`, so a blank string counts as missing there — matching only
+  `IS NULL` in the fetch would have dropped those rows and quietly changed who gets nudged.
+  `pan_verification_pending` additionally requires the mobile to be verified first, which is the n8n
+  branch order (`Check Mobile Verification` → false → `Check PAN`), so a lead missing both is nudged
+  for the mobile now and for PAN on a later pass — not twice at once.
 - `csp_docs` has no `CREATED_AT` column, so the original n8n docs query could not have worked; the
   port queries the columns that actually exist and resolves the phone via `csp_application`
   (falling back to `verify_csp`).
@@ -799,6 +838,9 @@ Notes:
 - Recipients are de-duplicated by **phone**, and the shared sequence rules still apply (stop on reply,
   max sends per contact).
 - Every button links to `https://eps.eko.in/console?mobile=<recipient mobile>`.
+- Any of the six can also be sent from an uploaded sheet instead of the query — see
+  [Any nudge can be sent from a sheet](#any-nudge-can-be-sent-from-a-sheet). `documents_pending_upload`
+  and `documents_reupload_required` then need a `pending_documents` / `reupload_documents` column.
 
 ### Manual WhatsApp sheet nudges
 
@@ -808,13 +850,34 @@ column (any of `mobile`, `mobile_number`, `phone`, `phone_number`, `contact`, `c
 `whatsapp`). Their button links to `https://eps.eko.in/console/pay-activation-fee?mobile=<mobile>`.
 
 > Only these two use the pay-activation-fee link. The six DB flows use the console link.
+>
+> The **Send from Sheet** dialog says which columns the selected template reads, and the run is
+> refused with a 400 rather than sending if one is missing. It does **not** skip rows that this nudge
+> has already messaged — that claim used to be in the dialog text and was untrue.
 
 ### Verifying the flows
 
 ```bash
 npm run wa:flows        # live audit: template status, button, params, and recipient counts
 npm run seed:nudges     # create-if-missing + a live per-flow recipient preview
+npm run readiness       # dry run everything: who each nudge would message right now, and blockers
 ```
+
+### Auditing a port against its n8n original
+
+`scripts/inspect-n8n-flow.mjs` reads an n8n workflow export structurally instead of by eye:
+
+```bash
+node scripts/inspect-n8n-flow.mjs flow.json                 # every node, then the connection graph
+node scripts/inspect-n8n-flow.mjs flow.json --connections   # the graph alone
+node scripts/inspect-n8n-flow.mjs flow.json --node "MySQL2" query
+node scripts/inspect-n8n-flow.mjs flow.json --grep "SELECT"
+```
+
+The **connection graph** is the part that matters and the part a summary hides. `--connections`
+prints the branch index on multi-output nodes (`main:0` / `main:1`), which is how you see that the
+n8n mobile-verification check feeds the PAN check on its *false* branch — i.e. PAN is only reached
+once the mobile is verified — rather than both firing in parallel as the layout suggests.
 
 ### Editing templates
 
@@ -1105,6 +1168,19 @@ Two options; both call the same code path:
 
 Each nudge sends at most `NUDGE_MAX_PER_RUN` messages per cycle, so a cycle can never run past a
 request timeout; leftover leads are deferred to the next cycle (shown as `deferred` in the UI).
+
+**Which nudges a cycle runs.** Lead-driven (Zoho) and MySQL-driven nudges, and only those. Sheet
+nudges are excluded — they are triggered by pasting a sheet URL, and running one on a timer would
+message a list nobody supplied. The selection goes through `nudgeSourceOf()` in `src/lib/nudge-kind.ts`
+rather than testing `zohoCriteria`, because a null criteria used to mean "sheet nudge" and the MySQL
+flows share that null: filtering on it silently swallowed all six of them.
+
+**The Zoho refresh happens once per cycle, not once per nudge.** `runNudge` syncs its own criteria, so
+running N Zoho nudges used to pull the same CRM window N times every cycle — the network and the lead
+upserts multiplied for no new data. `runAllEnabledNudges()` now syncs each *distinct* criteria once and
+runs every nudge with `sync: false`, reporting the shared count back on each run summary. A failed sync
+is not silently downgraded to "ran on stale data": the nudges that would have used that criteria are
+reported as errored and skipped, exactly as they were before.
 
 ## Tracking setup
 

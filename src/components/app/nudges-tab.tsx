@@ -91,6 +91,30 @@ function reasonBadge(reason: string, detail?: string) {
   }
 }
 
+/**
+ * The sheet columns a WhatsApp nudge's template reads, mirroring whatsapp-params.ts
+ * missingSheetColumns(). Duplicated in one line rather than imported because that module pulls in
+ * no React but lives under lib/ for the send path; keeping the dialog's hint in sync is cheap and
+ * the authoritative check is the server-side 400 anyway.
+ */
+const SHEET_DERIVED_VARS = new Set([
+  'email', 'mobile', 'mobile_digits', 'phone', 'first_name', 'full_name', 'today', 'message_number',
+])
+
+function requiredSheetColumns(whatsappParams: string | null | undefined): string[] {
+  try {
+    const parsed = JSON.parse(whatsappParams || '[]')
+    const body = Array.isArray(parsed)
+      ? parsed.map(String)
+      : Array.isArray((parsed as { body?: unknown[] })?.body)
+        ? ((parsed as { body: unknown[] }).body.map(String))
+        : []
+    return body.filter((s, i) => !SHEET_DERIVED_VARS.has(s) && body.indexOf(s) === i)
+  } catch {
+    return []
+  }
+}
+
 export function NudgesTab({
   refreshKey,
   onChanged,
@@ -478,16 +502,19 @@ export function NudgesTab({
                       )}
                     </>
                   )}
-                  {(source === 'sheet' || (source === 'zoho' && n.channel === 'email')) && (
-                    <Button
-                      size="sm"
-                      variant={source === 'sheet' ? 'default' : 'outline'}
-                      onClick={() => openSheetRun(n)}
-                      disabled={!n.enabled}
-                    >
-                      <Sheet className="h-4 w-4 mr-1" /> Send from Sheet
-                    </Button>
-                  )}
+                  {/* Every nudge can be sent from a sheet, including the database-driven WhatsApp
+                      flows: the sheet is then the recipient list, and any column becomes a
+                      template variable. It used to be offered only for sheet nudges and Zoho
+                      EMAIL nudges, which is why the MySQL WhatsApp flows could not be driven from
+                      an uploaded sheet at all. The route itself never cared which kind it was. */}
+                  <Button
+                    size="sm"
+                    variant={source === 'sheet' ? 'default' : 'outline'}
+                    onClick={() => openSheetRun(n)}
+                    disabled={!n.enabled}
+                  >
+                    <Sheet className="h-4 w-4 mr-1" /> Send from Sheet
+                  </Button>
                   <Button size="sm" variant="outline" onClick={() => openEdit(n)}>
                     <Pencil className="h-4 w-4 mr-1" /> Edit
                   </Button>
@@ -802,13 +829,36 @@ export function NudgesTab({
               Send from Google Sheet — {sheetTarget?.name}
             </DialogTitle>
             <DialogDescription>
-              Paste a publicly-shared Google Sheet URL. Each row must have an <code>email</code> column.
-              Any column header (e.g. <code>first_name</code>, <code>company</code>) becomes a{' '}
-              <code>{'{{variable}}'}</code> in the email template. Already-sent rows are automatically skipped.
+              {sheetTarget?.channel === 'whatsapp' ? (
+                <>
+                  Paste a publicly-shared Google Sheet URL. Each row needs a <code>mobile</code>{' '}
+                  column (or <code>phone</code>/<code>contact</code>); an <code>email</code> column is
+                  optional and is only used if WhatsApp cannot deliver and an email twin is configured.
+                  The template <code>{sheetTarget.whatsappTemplateName || '(none)'}</code> is sent to
+                  every row.
+                </>
+              ) : (
+                <>
+                  Paste a publicly-shared Google Sheet URL. Each row must have an <code>email</code>{' '}
+                  column. Any column header (e.g. <code>first_name</code>, <code>company</code>) becomes
+                  a <code>{'{{variable}}'}</code> in the email template.
+                </>
+              )}{' '}
+              {SHEET_DEDUP_RULE}
             </DialogDescription>
           </DialogHeader>
 
           <div className="grid gap-3 py-1">
+            {sheetTarget?.channel === 'whatsapp' && requiredSheetColumns(sheetTarget.whatsappParams).length > 0 && (
+              <p className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
+                This template also reads{' '}
+                {requiredSheetColumns(sheetTarget.whatsappParams).map((c) => (
+                  <code key={c} className="mono mr-1">{c}</code>
+                ))}
+                from the sheet, so those columns must be present too — otherwise the run is refused with
+                a 400 rather than sending a message with a blank in it.
+              </p>
+            )}
             <div className="grid gap-1.5">
               <Label htmlFor="sheet-url">Google Sheet URL</Label>
               <Input
@@ -860,7 +910,11 @@ export function NudgesTab({
           <DialogFooter>
             <Button variant="outline" onClick={() => { setSheetTarget(null); setSheetResult(null) }}>Close</Button>
             <Button onClick={runSheetNudge} disabled={sheetRunning || !sheetUrl.trim()}>
-              {sheetRunning ? <><Loader2 className="h-4 w-4 mr-1.5 animate-spin" />Sending…</> : <><Sheet className="h-4 w-4 mr-1.5" />Send emails</>}
+              {sheetRunning ? (
+                <><Loader2 className="h-4 w-4 mr-1.5 animate-spin" />Sending…</>
+              ) : (
+                <><Sheet className="h-4 w-4 mr-1.5" />{sheetTarget?.channel === 'whatsapp' ? 'Send WhatsApp messages' : 'Send emails'}</>
+              )}
             </Button>
           </DialogFooter>
         </DialogContent>

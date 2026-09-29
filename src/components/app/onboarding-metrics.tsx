@@ -22,6 +22,10 @@ interface Totals {
   opensTotal: number
   replied: number
   capped: number
+  /** Messages with at least one CTA button tap. */
+  clicked: number
+  /** Total taps, including repeats. */
+  clicks: number
   lastSentAt: string | null
 }
 
@@ -71,24 +75,22 @@ const chartConfig = {
  * answered better by flipping between them.
  */
 function HistoryChart({ family, series }: { family: Family; series: DayBucket[] }) {
-  const [channel, setChannel] = useState<'email' | 'whatsapp'>('email')
-
+  // WhatsApp only. The email series still exists in the API, but the dashboard deliberately does
+  // not show email at the moment, so there is no channel toggle here any more.
   const data = useMemo(
     () =>
       series.map((d) => {
         const label = new Date(`${d.date}T12:00:00Z`).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
-        return channel === 'email'
-          ? { day: label, sent: d.emailSent, opened: d.emailOpened, failed: d.emailFailed }
-          : { day: label, sent: d.waSent, opened: d.waOpened, failed: d.waFailed }
+        return { day: label, sent: d.waSent, opened: d.waOpened, failed: d.waFailed }
       }),
-    [series, channel]
+    [series]
   )
 
   const hasAny = !seriesIsEmpty(series)
 
   // Which nudge key this chart is counting, so the split between the two families is visible
   // rather than taken on trust.
-  const sourceKey = channel === 'email' ? family.nudgeKeys[0] : family.nudgeKeys[1]
+  const sourceKey = family.nudgeKeys[1]
 
   return (
     <Card>
@@ -96,35 +98,19 @@ function HistoryChart({ family, series }: { family: Family; series: DayBucket[] 
         <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
           <div>
             <h4 className="panel-title">
-              {channel === 'email' ? <Mail className="h-4 w-4 text-muted-foreground" /> : <MessageCircle className="h-4 w-4 text-success" />}
+              <MessageCircle className="h-4 w-4 text-success" />
               {family.label}
             </h4>
             <p className="field-hint mt-0.5">
-              {channel === 'email' ? 'Email' : 'WhatsApp'} · last {series.length} day(s)
-              {channel === 'whatsapp' ? ' · opened = read receipt' : ''}
+              WhatsApp · last {series.length} day(s) · opened = read receipt
             </p>
             <p className="mono mt-0.5 text-[11px] text-muted-foreground">{sourceKey}</p>
-          </div>
-          <div className="flex rounded-lg border border-border p-0.5">
-            {(['email', 'whatsapp'] as const).map((c) => (
-              <button
-                key={c}
-                type="button"
-                onClick={() => setChannel(c)}
-                className={cn(
-                  'rounded-md px-3 py-1 text-xs font-medium capitalize transition-colors',
-                  channel === c ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'
-                )}
-              >
-                {c}
-              </button>
-            ))}
           </div>
         </div>
 
         {!hasAny ? (
           <p className="py-10 text-center text-sm text-muted-foreground">
-            Nothing sent on {channel} yet for this nudge.
+            Nothing sent on WhatsApp yet for this nudge.
           </p>
         ) : (
           <ChartContainer config={chartConfig} className="h-[220px] w-full">
@@ -169,6 +155,10 @@ function ChannelBlock({
     { label: 'Failed', value: totals.failed, tone: totals.failed ? 'text-destructive' : 'text-muted-foreground' },
     { label: isWa ? 'Read' : 'Opened', value: totals.opened, tone: totals.opened ? 'text-info' : 'text-muted-foreground' },
     { label: 'Replied', value: totals.replied, tone: totals.replied ? 'text-success' : 'text-muted-foreground' },
+    // Clicked is only meaningful for WhatsApp: the tracked button is the only click we can see.
+    ...(isWa
+      ? [{ label: 'Clicked', value: totals.clicked, tone: totals.clicked ? 'text-info' : 'text-muted-foreground' }]
+      : []),
   ]
 
   return (
@@ -255,22 +245,22 @@ export function OnboardingMetrics({ refreshKey }: { refreshKey: number }) {
         acc.failed += t.failed
         acc.opened += t.opened
         acc.replied += t.replied
+        acc.clicked += t.clicked
         return acc
       },
-      { sent: 0, failed: 0, opened: 0, replied: 0 }
+      { sent: 0, failed: 0, opened: 0, replied: 0, clicked: 0 }
     )
 
   const wa = totalsOf((f) => f.whatsapp)
-  const em = totalsOf((f) => f.email)
 
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h3 className="text-sm font-semibold">Activation-fee nudges</h3>
+          <h3 className="text-sm font-semibold">Activation-fee nudges (WhatsApp)</h3>
           <p className="field-hint">
-            The two onboarding nudges and their WhatsApp twins. <b>Opened</b> is the email tracking pixel;
-            for WhatsApp it is Meta&apos;s read receipt.
+            The two activation-fee nudges, WhatsApp side only. <b>Read</b> is Meta&apos;s read receipt and{' '}
+            <b>Clicked</b> is a tap on the template&apos;s tracked button.
           </p>
         </div>
         <div className="flex items-center gap-1.5">
@@ -308,18 +298,13 @@ export function OnboardingMetrics({ refreshKey }: { refreshKey: number }) {
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h4 className="text-sm font-semibold">{f.label}</h4>
               <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-                {em.sent + wa.sent > 0 ? <TrendingUp className="h-3.5 w-3.5 text-success" /> : null}
+                {wa.sent > 0 ? <TrendingUp className="h-3.5 w-3.5 text-success" /> : null}
                 {data.days}d window below
               </div>
             </div>
-            <div className="grid gap-3 lg:grid-cols-2">
-              <ChannelBlock
-                channel="email"
-                totals={f.email}
-                max={f.config.emailMax}
-                followUpDays={f.config.emailFollowUpDays}
-                capApplies={f.config.emailCapApplies}
-              />
+            <div className="grid gap-3">
+              {/* WhatsApp only: the dashboard shows nothing about email at the moment, and the
+                  email twin's numbers live in the Logs tab and the export. */}
               <ChannelBlock
                 channel="whatsapp"
                 totals={f.whatsapp}
@@ -338,11 +323,11 @@ export function OnboardingMetrics({ refreshKey }: { refreshKey: number }) {
         ))}
       </div>
 
-      {em.sent + wa.sent === 0 && em.failed + wa.failed === 0 ? (
+      {wa.sent === 0 && wa.failed === 0 ? (
         <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
           <TrendingDown className="h-3.5 w-3.5" />
-          Nothing has been sent by these four nudges yet. Run one from the Nudges tab — the two WhatsApp ones
-          send from a Google Sheet, the two email ones too.
+          Nothing has been sent on WhatsApp by these nudges yet. Run one from the Nudges tab — both activation-fee
+          nudges send from a Google Sheet.
         </p>
       ) : null}
     </div>

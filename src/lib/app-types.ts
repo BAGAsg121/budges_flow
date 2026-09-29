@@ -76,22 +76,36 @@ export interface LogDto {
 export interface StatsDto {
   leads: number
   nudges: number
-  messagesSent: number
-  messagesFailed: number
-  opened: number
-  replied: number
-  openRate: number
+  /**
+   * WhatsApp-only figures. The dashboard shows nothing about email at the moment, so there is no
+   * email equivalent here — email data lives in the Logs tab and the export.
+   */
+  whatsapp: {
+    sent: number
+    failed: number
+    /** Meta read receipts. */
+    read: number
+    replied: number
+    /** Messages with at least one CTA button tap. */
+    clicked: number
+    /** Total taps, including repeats. */
+    clicks: number
+    readRate: number
+    clickRate: number
+  }
   recentLogs: {
     id: string
     channel: NudgeChannel
     lead: string
     nudge: string
     messageNumber: number
-    subject: string | null
+    /** WhatsApp: the template used. */
+    templateName: string | null
     sentOk: boolean
     sendError: string | null
     engagementStatus: string
     opensCount: number
+    ctaClicks: number
     sentAt: string | null
     createdAt: string
   }[]

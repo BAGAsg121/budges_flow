@@ -64,7 +64,23 @@ export interface MysqlFlowOptions {
   lookbackDays?: number
   /** Hard cap on rows considered, so a query can never run away. */
   limit?: number
+  /**
+   * E/F only: which customers to check documents for.
+   *
+   *   'signed' — latest agreement is SIGNED (the n8n cohort: its "Sign agreement done" sheet).
+   *   'recent' — any application from the window.
+   *
+   * The n8n fed the document check from its "Sign agreement done" sheet, so 'signed' is the
+   * faithful port. It is also the more sensible rule: uploading documents comes AFTER signing, so
+   * nudging a pre-signature applicant about missing paperwork is premature.
+   */
+  docCohort?: DocCohort
 }
+
+export type DocCohort = 'signed' | 'recent'
+
+/** Matches the n8n, whose document check consumed the "Sign agreement done" sheet. */
+export const DEFAULT_DOC_COHORT: DocCohort = 'signed'
 
 const str = (v: unknown): string => (v === null || v === undefined ? '' : String(v).trim())
 
@@ -141,11 +157,18 @@ interface VerifyRow {
 async function fetchVerifyRows(opts: MysqlFlowOptions): Promise<VerifyRow[]> {
   const hours = Math.max(1, opts.lookbackHours ?? 2)
   const limit = Math.min(opts.limit ?? 500, 1000)
+  // The n8n query carried `AND (verifyAt IS NULL OR panNumber IS NULL)` and the SQL is kept here
+  // too: rows that can never qualify for B or C are fetched and thrown away otherwise.
+  //
+  // Written as NULL-or-empty rather than plain `IS NULL` because the n8n If-nodes tested
+  // `x == null || String(x).trim() === ''`, so a blank string counts as missing. A plain
+  // `IS NULL` here would drop those rows and silently change who gets nudged.
   return queryRead<VerifyRow>(
     `SELECT Id, csp_number, customer_id, requestAt, verifyAt, panNumber
        FROM verify_csp
       WHERE requestAt >= DATE_SUB(NOW(), INTERVAL ? HOUR)
         AND requestAt < NOW()
+        AND (verifyAt IS NULL OR TRIM(verifyAt) = '' OR panNumber IS NULL OR TRIM(panNumber) = '')
       ORDER BY requestAt DESC
       LIMIT ?`,
     [hours, limit]
@@ -345,23 +368,47 @@ function classifyDocuments(rows: DocRow[]): Map<string, DocState> {
 }
 
 /**
- * Candidate cohort + their documents. The n8n flows took the candidate list from a Google
- * Sheet; with direct DB access we derive it from recent CSP applications instead, so the
- * check covers the whole onboarding cohort rather than a hand-maintained sheet.
+ * Candidate cohort + their documents.
+ *
+ * The n8n took the document-check candidate list from its "Sign agreement done" Google Sheet —
+ * i.e. customers whose agreement is signed — and that is what `docCohort: 'signed'` reproduces
+ * directly from the database. `'recent'` widens it to any application in the window, which is what
+ * this used to do before the cohort was checked against the n8n.
  */
 async function collectDocStates(opts: MysqlFlowOptions): Promise<{ states: Map<string, DocState>; phoneByCustomer: Map<string, string> }> {
   const days = Math.max(1, opts.lookbackDays ?? 30)
   const limit = Math.min(opts.limit ?? 400, 2000)
+  const cohort = opts.docCohort ?? DEFAULT_DOC_COHORT
 
-  const candidates = await queryRead<{ customer_id: string; csp_number: string }>(
-    `SELECT customer_id, csp_number
-       FROM csp_application
-      WHERE submittedAt >= DATE_SUB(NOW(), INTERVAL ? DAY)
-        AND customer_id IS NOT NULL
-      ORDER BY submittedAt DESC
-      LIMIT ?`,
-    [days, limit]
-  )
+  const candidates =
+    cohort === 'signed'
+      ? await queryRead<{ customer_id: string; csp_number: string }>(
+          // Latest agreement per customer (MAX(id), the same "newest row" convention the n8n
+          // query used via ORDER BY created_at DESC, id DESC) and only where it is SIGNED (1).
+          `SELECT a.customer_id, MAX(a.csp_number) AS csp_number
+             FROM csp_application a
+             JOIN customer_agreement_history h ON h.customer_identifier = a.csp_number
+             JOIN (
+               SELECT customer_identifier, MAX(id) AS max_id
+                 FROM customer_agreement_history
+                WHERE created_at >= DATE_SUB(NOW(), INTERVAL ? DAY)
+                GROUP BY customer_identifier
+             ) m ON m.max_id = h.id
+            WHERE h.status = 1
+              AND a.customer_id IS NOT NULL
+            GROUP BY a.customer_id
+            LIMIT ?`,
+          [days, limit]
+        )
+      : await queryRead<{ customer_id: string; csp_number: string }>(
+          `SELECT customer_id, csp_number
+             FROM csp_application
+            WHERE submittedAt >= DATE_SUB(NOW(), INTERVAL ? DAY)
+              AND customer_id IS NOT NULL
+            ORDER BY submittedAt DESC
+            LIMIT ?`,
+          [days, limit]
+        )
 
   const phoneByCustomer = new Map<string, string>()
   const ids: string[] = []

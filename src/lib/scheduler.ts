@@ -10,9 +10,10 @@
  * run past a request timeout; the remainder is picked up on the next cycle.
  */
 import { db } from '@/lib/db'
-import { runNudge, type RunSummary } from '@/lib/nudge-engine'
+import { runNudge, syncLeadsFromCriteria, type RunSummary } from '@/lib/nudge-engine'
 import { getStaticBaseUrl } from '@/lib/base-url'
 import { isImapConfigured, syncRepliesFromImap, type ImapSyncResult } from '@/lib/reply-tracker'
+import { nudgeSourceOf } from '@/lib/nudge-kind'
 
 export interface NudgeRunResult {
   nudgeKey: string
@@ -85,26 +86,83 @@ export function schedulerStatus(): SchedulerStatus {
 }
 
 /**
- * Run every enabled, LEAD-DRIVEN nudge once. Never throws; per-nudge errors are captured.
+ * Run every enabled, RUN-BASED nudge once. Never throws; per-nudge errors are captured.
  *
- * Manual / sheet nudges (zohoCriteria === null) are deliberately excluded: they are meant to
- * be triggered by pasting a Google Sheet URL, and running one on a timer would send its
- * template to every synced lead with an address.
+ * "Run-based" means lead-driven (a Zoho criteria) OR MySQL-driven (reads the business database).
+ * Only SHEET nudges are excluded: they are meant to be triggered by pasting a Google Sheet URL,
+ * and running one on a timer would message a list nobody supplied.
+ *
+ * THE BUG THIS FIXES: the filter used to be `zohoCriteria: { not: null }`, written when a null
+ * criteria meant "sheet nudge". The MySQL flows were later given a null criteria too — they are
+ * told apart by `filters.source = "mysql"` — so the sheet exclusion silently swallowed all six of
+ * them. Enabling a MySQL flow did nothing; the scheduler never handed it to runNudge, even though
+ * runNudge dispatches it correctly. Hence filtering on the shared source helper rather than on a
+ * field that two different kinds of nudge happen to share.
+ *
+ * The Zoho refresh is now hoisted out of the per-nudge loop: with N enabled Zoho nudges the old
+ * code pulled the same CRM window N times per cycle. One sync per distinct criteria, then every
+ * nudge runs with `sync:false`.
  */
 export async function runAllEnabledNudges(opts?: { sync?: boolean; limit?: number | null }): Promise<NudgeRunResult[]> {
   const sync = opts?.sync ?? (process.env.SCHEDULE_SYNC_FROM_ZOHO ?? 'true') === 'true'
   const limit = opts?.limit === undefined ? getBatchLimit() : opts.limit
   const baseUrl = getStaticBaseUrl()
 
-  const nudges = await db.nudge.findMany({
-    where: { enabled: true, zohoCriteria: { not: null } },
+  // Select then filter in JS: `filters` is a text column, so "is this MySQL-driven?" cannot be
+  // expressed as a Prisma where-clause without matching on raw JSON. There are only a handful of
+  // nudges, so one small query plus the shared helper is both correct and cheap.
+  const enabled = await db.nudge.findMany({
+    where: { enabled: true },
     orderBy: { createdAt: 'asc' },
   })
+  const nudges = enabled.filter((n) => nudgeSourceOf(n) !== 'sheet')
   const results: NudgeRunResult[] = []
 
+  // 1. Sync ONCE per distinct Zoho criteria — not once per nudge.
+  //
+  // The sync lives inside runNudge, which syncs THIS nudge's criteria. With several enabled
+  // Zoho nudges that is the same CRM window pulled N times every cycle: the expensive part
+  // (network + lead upserts) multiplied for no new data, and the reason a cycle could time out
+  // as nudges were added. Hoisting it here means each distinct criteria is fetched exactly once
+  // and the nudges then read the local Lead table.
+  //
+  // A failed sync is NOT swallowed into "ran on stale data": the nudges that would have used that
+  // criteria are reported as errored and skipped, exactly as they were when the sync was per-nudge.
+  const syncOutcome = new Map<string, { count: number } | { error: string }>()
+  if (sync) {
+    const criterias = new Set(
+      nudges.map((n) => (n.zohoCriteria || '').trim()).filter((c) => c.length > 0)
+    )
+    for (const criteria of criterias) {
+      try {
+        syncOutcome.set(criteria, { count: await syncLeadsFromCriteria(criteria) })
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        syncOutcome.set(criteria, { error: message })
+        console.error('[scheduler] Zoho sync failed:', message)
+      }
+    }
+  }
+
   for (const nudge of nudges) {
+    const criteria = (nudge.zohoCriteria || '').trim()
+    const synced = criteria ? syncOutcome.get(criteria) : undefined
+
+    if (synced && 'error' in synced) {
+      results.push({
+        nudgeKey: nudge.key,
+        name: nudge.name,
+        channel: nudge.channel,
+        error: `Zoho sync failed: ${synced.error}`,
+      })
+      continue
+    }
+
     try {
-      const summary = await runNudge(nudge.id, baseUrl, { sync, limit: limit ?? undefined })
+      // sync:false — the refresh already happened above, once for this criteria.
+      const summary = await runNudge(nudge.id, baseUrl, { sync: false, limit: limit ?? undefined })
+      // Report the shared sync's count so the run summary still says what was pulled.
+      if (synced && 'count' in synced) summary.syncedFromZoho = synced.count
       results.push({ nudgeKey: nudge.key, name: nudge.name, channel: nudge.channel, summary })
     } catch (err) {
       results.push({

@@ -17,6 +17,65 @@ export interface WhatsAppParamValues {
   button: string[]
 }
 
+/**
+ * The variable NAMES the config reads, without resolving any values.
+ *
+ * Needed by the sheet-run pre-flight: when a nudge is sent from an uploaded sheet, every body
+ * source has to be a column IN that sheet. Without this check `buildWhatsAppParams` silently
+ * substitutes its fallback ("-") for the missing value and Meta accepts the send — so a
+ * documents-pending template would go out with a literal "-" where the list of pending documents
+ * should be. Failing the request with the column names is the loud, fixable outcome.
+ *
+ * Tolerates the same three config shapes as buildWhatsAppParams: a bare array (legacy body-only),
+ * an object with `body`/`button`, and unparseable text (no sources).
+ */
+export function whatsappParamSources(config: string | null): WhatsAppParamValues {
+  try {
+    const parsed = JSON.parse(config || '[]')
+    if (Array.isArray(parsed)) return { body: parsed.map(String), button: [] }
+    if (parsed && typeof parsed === 'object') {
+      const body = Array.isArray((parsed as { body?: unknown }).body)
+        ? (parsed as { body: unknown[] }).body.map(String)
+        : []
+      const button = Array.isArray((parsed as { button?: unknown }).button)
+        ? (parsed as { button: unknown[] }).button.map(String)
+        : []
+      return { body, button }
+    }
+  } catch {
+    // Same reasoning as buildWhatsAppParams: a bad config yields no sources, not a crash.
+  }
+  return { body: [], button: [] }
+}
+
+/**
+ * Variables a sheet run always supplies, so a sheet does not need a column for them.
+ * Mirrors the derived values in sheet-vars.ts buildSheetVars().
+ */
+export const SHEET_DERIVED_VARS = new Set([
+  'email',
+  'mobile',
+  'mobile_digits',
+  'phone',
+  'first_name',
+  'full_name',
+  'today',
+  'message_number',
+])
+
+/** Body sources the sheet must carry a column for. `[]` means the template is self-contained. */
+export function missingSheetColumns(
+  config: string | null,
+  sheetColumns: Iterable<string>
+): string[] {
+  const have = new Set<string>()
+  for (const c of sheetColumns) have.add(String(c))
+  return whatsappParamSources(config)
+    .body.filter((src) => !SHEET_DERIVED_VARS.has(src) && !have.has(src))
+    // Preserve declaration order but never report the same column twice.
+    .filter((src, i, all) => all.indexOf(src) === i)
+}
+
 export function buildWhatsAppParams(
   config: string | null,
   vars: Record<string, unknown> = {},

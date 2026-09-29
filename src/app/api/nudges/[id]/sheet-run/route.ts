@@ -5,6 +5,12 @@
  * row, and sends it (email, or a WhatsApp template). Lead rows are NOT upserted into the Lead
  * table — MessageLog rows are created with leadId=null and sheetRowRef="<csvUrl>|<address>".
  *
+ * ANY nudge can be sent this way — sheet-driven, Zoho-driven or MySQL-driven. The sheet simply
+ * replaces the nudge's usual recipient selection. For a WhatsApp nudge whose template body reads
+ * variables (e.g. the documents-pending flow's {{1}}), the sheet MUST carry a column per variable;
+ * see the missingSheetColumns() pre-flight below, which refuses the run instead of letting the
+ * parameter fall back to "-".
+ *
  * SENDING POLICY — the sheet decides who gets messaged:
  *   • Every row is sent. History is NEVER consulted, so re-uploading a sheet really does re-send,
  *     including to people this nudge has contacted before.
@@ -27,7 +33,7 @@ import { sendEmail, isMailerConfigured } from '@/lib/mailer'
 import { renderTemplate, injectTrackingPixel, htmlToText } from '@/lib/template'
 import { isWhatsAppConfigured, sendWhatsAppTemplate, normalizePhone, getDefaultTemplateLanguage } from '@/lib/whatsapp'
 import { isDeliveryCapError, isPermanentDeliveryFailure } from '@/lib/whatsapp-errors'
-import { buildWhatsAppParams } from '@/lib/whatsapp-params'
+import { buildWhatsAppParams, missingSheetColumns } from '@/lib/whatsapp-params'
 import { getBaseUrl } from '@/lib/base-url'
 import { parseSheetCsv, toSheetCsvUrl } from '@/lib/sheet-parser'
 import { buildSheetVars, planSheetSends } from '@/lib/sheet-vars'
@@ -102,6 +108,30 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     const rows = parseSheetCsv(csvText)
     if (rows.length === 0) {
       return NextResponse.json({ ok: false, error: 'Sheet has no data rows (or only a header row)' }, { status: 400 })
+    }
+
+    // 3b. WhatsApp only: the sheet must carry every column the template's body reads.
+    //
+    // The engine substitutes a fallback ("-") for a value it cannot find rather than shifting the
+    // parameters, which is right for a partially-filled CRM lead but wrong here: a WHOLE COLUMN
+    // being absent means every recipient gets a message with a literal "-" in the hole — e.g.
+    // "mandatory documents for your account are still pending: -". Meta accepts it, so nothing
+    // surfaces it later. Refuse the run instead and name the columns.
+    if (isWhatsApp) {
+      const missingColumns = missingSheetColumns(nudge.whatsappParams, Object.keys(rows[0] ?? {}))
+      if (missingColumns.length) {
+        return NextResponse.json(
+          {
+            ok: false,
+            error:
+              `This WhatsApp nudge's template reads ${missingColumns.map((c) => `{{${c}}}`).join(', ')} ` +
+              `from the sheet, but the sheet has no such column. Present columns: ` +
+              `${Object.keys(rows[0] ?? {}).join(', ') || '(none)'}.`,
+            missingColumns,
+          },
+          { status: 400 }
+        )
+      }
     }
 
     const baseUrl = await getBaseUrl()

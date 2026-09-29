@@ -53,6 +53,10 @@ interface Totals {
   replied: number
   /** Delivery-cap drops (131049/131050), which are retryable rather than real failures. */
   capped: number
+  /** WhatsApp messages whose button was tapped at least once (from the CTA tracker). */
+  clicked: number
+  /** Total taps, including repeats by the same person. */
+  clicks: number
   lastSentAt: string | null
 }
 
@@ -67,7 +71,19 @@ interface DayBucket {
 }
 
 function emptyTotals(nudgeKey: string): Totals {
-  return { nudgeKey, nudgeName: null, sent: 0, failed: 0, opened: 0, opensTotal: 0, replied: 0, capped: 0, lastSentAt: null }
+  return {
+    nudgeKey,
+    nudgeName: null,
+    sent: 0,
+    failed: 0,
+    opened: 0,
+    opensTotal: 0,
+    replied: 0,
+    capped: 0,
+    clicked: 0,
+    clicks: 0,
+    lastSentAt: null,
+  }
 }
 
 /** yyyy-mm-dd in the CRM's timezone, so a "day" matches the day the operator works in. */
@@ -119,6 +135,7 @@ export async function GET(req: Request) {
             opensCount: true,
             replied: true,
             sendError: true,
+            ctaClicks: true,
             sentAt: true,
             createdAt: true,
           },
@@ -174,6 +191,10 @@ export async function GET(req: Request) {
       t.opensTotal += log.opensCount || 0
     }
     if (log.replied) t.replied++
+    // CTA taps only exist for WhatsApp — the tracked template's button is the only click we see.
+    const taps = log.ctaClicks ?? 0
+    if (taps > 0) t.clicked++
+    t.clicks += taps
   }
 
   // --- daily series, PER FAMILY ----------------------------------------------

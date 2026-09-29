@@ -7,7 +7,7 @@ import { renderTemplate, escapeHtml, injectTrackingPixel, htmlToText } from '../
 import { isCronAuthorized, isWebhookAuthorized } from '../src/lib/cron-auth.ts'
 import { DEFAULT_NUDGES, ZOHO_CRITERIA, LEAD_STATUS, PAY_ACTIVATION_FEE_URL, WHATSAPP_TEST_STATUS, MYSQL_FLOW_TEMPLATES, WA_SHEET_FLOW_TEMPLATES, MYSQL_FLOW_LOOKBACK, CONSOLE_URL, zohoTodayIso, zohoTodayCriteria, zohoCriteriaSince, ZOHO_LEADS_CREATED_AFTER, ZOHO_TZ_OFFSET, zohoCriteriaBetween, zohoIstIso, zohoSyncOverlapMinutes } from '../src/lib/nudge-defaults.ts'
 import { MYSQL_FLOW_KEYS, isMysqlFlowKey } from '../src/lib/mysql-nudges.ts'
-import { buildWhatsAppParams as buildWhatsAppParamsRaw } from '../src/lib/whatsapp-params.ts'
+import { buildWhatsAppParams as buildWhatsAppParamsRaw, missingSheetColumns as missingSheetColumnsRaw } from '../src/lib/whatsapp-params.ts'
 import { extractInboundText, appendInbound, INBOUND_KEEP } from '../src/lib/whatsapp-inbound.ts'
 import { explainWhatsAppError, isDeliveryCapError, isPermanentDeliveryFailure } from '../src/lib/whatsapp-errors.ts'
 import { WA_EMAIL_TWIN, WA_UTILITY_SAFE_COPY, WA_RETIRED_MARKETING_TEMPLATES } from '../src/lib/nudge-defaults.ts'
@@ -57,9 +57,12 @@ import {
 } from '../src/lib/meta-template-analytics.ts'
 
 let failures = 0
+/** Total assertions run. Printed in the summary so the count is never transcribed by hand. */
+let total = 0
 /** --quiet prints only failures and the summary; useful when iterating in a tight loop. */
 const QUIET = process.argv.includes('--quiet')
 function check(name, actual, expected) {
+  total++
   const ok = actual === expected
   if (!ok) failures++
   if (!ok || !QUIET) {
@@ -327,6 +330,50 @@ check(
   JSON.stringify({ body: ['1'], button: ['9876543210'] })
 )
 check('missing values fall back, preserving position', JSON.stringify(buildWhatsAppParamsRaw('["a","b"]', { b: '2' }).body), JSON.stringify(['-', '2']))
+
+// --- sheet-run pre-flight: a WhatsApp template's body columns must exist -----
+// A WHOLE missing column used to be invisible: buildWhatsAppParams substitutes "-" and Meta
+// accepts the send, so the customer got "documents still pending: -".
+check(
+  'a body source absent from the sheet is reported',
+  JSON.stringify(missingSheetColumnsRaw('{"body":["pending_documents"]}', ['mobile', 'email'])),
+  JSON.stringify(['pending_documents'])
+)
+check(
+  'a body source present in the sheet passes',
+  JSON.stringify(missingSheetColumnsRaw('{"body":["pending_documents"]}', ['mobile', 'pending_documents'])),
+  JSON.stringify([])
+)
+check(
+  'derived vars never require a column',
+  JSON.stringify(missingSheetColumnsRaw('{"body":["first_name","mobile_digits","today"]}', ['mobile'])),
+  JSON.stringify([])
+)
+check(
+  'legacy array config is checked too',
+  JSON.stringify(missingSheetColumnsRaw('["company"]', ['mobile'])),
+  JSON.stringify(['company'])
+)
+check(
+  'repeats are reported once',
+  JSON.stringify(missingSheetColumnsRaw('{"body":["a","a"]}', ['mobile'])),
+  JSON.stringify(['a'])
+)
+check('no params means nothing to check', JSON.stringify(missingSheetColumnsRaw('[]', [])), JSON.stringify([]))
+check('corrupt params do not crash the pre-flight', JSON.stringify(missingSheetColumnsRaw('{oops', ['mobile'])), JSON.stringify([]))
+
+// The tracked template the send path actually uses must be the one the template knows about,
+// otherwise a sheet run would silently fall back to "-" for the body variable.
+check(
+  'the docs-pending MySQL flow declares its body variable',
+  JSON.stringify(
+    missingSheetColumnsRaw(
+      DEFAULT_NUDGES.find((n) => n.key === 'documents_pending_upload')?.whatsappParams ?? null,
+      ['mobile']
+    )
+  ),
+  JSON.stringify(['pending_documents'])
+)
 
 // --- inbound WhatsApp replies ----------------------------------------------
 check('text reply is captured verbatim', extractInboundText({ type: 'text', text: { body: 'Yes please call me' } }), 'Yes please call me')
@@ -1222,5 +1269,8 @@ check('no custom_data without a value', bare.custom_data === undefined, true)
 const valued = buildConversionEvent({ eventName: 'Purchase', phone: '9876543210', value: 999, currency: 'INR' })
 check('a value produces custom_data', `${valued.custom_data.value}/${valued.custom_data.currency}`, '999/INR')
 
-console.log(failures === 0 ? '\nAll checks passed.' : `\n${failures} check(s) FAILED.`)
+console.log(
+  `\n${total - failures}/${total} assertions passed` +
+    (failures === 0 ? ' — all checks passed.' : ` — ${failures} check(s) FAILED.`)
+)
 process.exit(failures === 0 ? 0 : 1)

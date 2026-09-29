@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { Users, Send, MailOpen, Reply, TrendingUp, RefreshCw, Mail, MessageCircle, Clock, TriangleAlert } from 'lucide-react'
+import { Users, MailOpen, Reply, TrendingUp, RefreshCw, MessageCircle, Clock, TriangleAlert, MousePointerClick } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -100,17 +100,33 @@ export function DashboardTab({ refreshKey }: { refreshKey: number }) {
 
   return (
     <div className="space-y-6">
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+      {/* WHATSAPP ONLY. Email figures are deliberately absent from the dashboard — they live in
+          the Logs tab and the export. "Read" is Meta's read receipt; "Clicked" is a tap on the
+          tracked template's button. */}
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
         <StatCard icon={Users} label="Leads synced" value={stats.leads} sub="EPS, from Zoho CRM" accent="primary" />
         <StatCard
-          icon={Send}
-          label="Messages sent"
-          value={stats.messagesSent}
-          sub={stats.messagesFailed ? `${stats.messagesFailed} failed` : 'email + WhatsApp'}
-          accent={stats.messagesFailed ? 'warning' : 'info'}
+          icon={MessageCircle}
+          label="WhatsApp sent"
+          value={stats.whatsapp.sent}
+          sub={stats.whatsapp.failed ? `${stats.whatsapp.failed} failed` : 'accepted by Meta'}
+          accent={stats.whatsapp.failed ? 'warning' : 'info'}
         />
-        <StatCard icon={MailOpen} label="Opened" value={stats.opened} sub={`open rate ${stats.openRate}%`} accent="info" />
-        <StatCard icon={Reply} label="Replied" value={stats.replied} sub="replies detected" accent="success" />
+        <StatCard
+          icon={MailOpen}
+          label="WhatsApp read"
+          value={stats.whatsapp.read}
+          sub={`read rate ${stats.whatsapp.readRate}%`}
+          accent="info"
+        />
+        <StatCard
+          icon={MousePointerClick}
+          label="CTA clicked"
+          value={stats.whatsapp.clicked}
+          sub={`${stats.whatsapp.clicks} tap(s) · ${stats.whatsapp.clickRate}% of sends`}
+          accent="success"
+        />
+        <StatCard icon={Reply} label="Replied" value={stats.whatsapp.replied} sub="replies detected" accent="success" />
         <StatCard icon={TrendingUp} label="Nudges" value={stats.nudges} sub="configured flows" accent="primary" />
       </div>
 
@@ -182,24 +198,26 @@ export function DashboardTab({ refreshKey }: { refreshKey: number }) {
           </div>
           {stats.recentLogs.length === 0 ? (
             <p className="text-sm text-muted-foreground py-8 text-center">
-              No messages sent yet. Go to <b>Nudges</b> and run one, or <b>Sync leads</b> first.
+              No WhatsApp messages sent yet. Go to <b>Nudges</b> and run one, or <b>Sync leads</b> first.
             </p>
           ) : (
             <div className="max-h-96 overflow-y-auto">
               <div className="space-y-1">
                 {stats.recentLogs.map((l) => (
                   <div key={l.id} className="flex items-center gap-3 rounded-md px-3 py-2 text-sm hover:bg-muted/60">
-                    {l.channel === 'whatsapp' ? (
-                      <MessageCircle className="h-4 w-4 shrink-0 text-success" />
-                    ) : (
-                      <Mail className="h-4 w-4 shrink-0 text-muted-foreground" />
-                    )}
+                    <MessageCircle className="h-4 w-4 shrink-0 text-success" />
                     <div className="min-w-0 flex-1">
                       <p className="truncate font-medium">
                         {l.lead} <span className="text-muted-foreground font-normal">· #{l.messageNumber} · {l.nudge}</span>
                       </p>
-                      <p className="truncate text-xs text-muted-foreground">{l.subject || (l.channel === 'whatsapp' ? 'WhatsApp template' : '')}</p>
+                      <p className="truncate text-xs text-muted-foreground">{l.templateName || 'WhatsApp template'}</p>
                     </div>
+                    {/* A tap on the button, which is the strongest signal this screen shows. */}
+                    {l.ctaClicks > 0 ? (
+                      <Badge className="bg-info text-info-foreground hover:bg-info gap-1" title="Tapped the button">
+                        <MousePointerClick className="h-3 w-3" />×{l.ctaClicks}
+                      </Badge>
+                    ) : null}
                     <span className="hidden sm:block text-xs text-muted-foreground whitespace-nowrap">
                       {new Date(l.sentAt || l.createdAt).toLocaleString()}
                     </span>
