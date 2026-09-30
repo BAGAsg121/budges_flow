@@ -77,6 +77,10 @@ export interface ZohoLead {
   Created_Time?: string
   Eko_Code?: string
   KYC_Document_Upload_Count?: number | string
+  /** "KYC Documents Expected Count" — how many documents this lead is expected to upload. */
+  KYC_Documents_Expected_Count?: number | string
+  /** Mentioned for completeness: drives the re-upload nudge, not the submitted one. */
+  KYC_Document_Reject_Count?: number | string
   Owner?: { name?: string; id?: string; email?: string } | string
   City?: string
   States?: string
@@ -106,6 +110,8 @@ export const LEAD_FIELDS = [
   'Created_Time',
   'Eko_Code',
   'KYC_Document_Upload_Count',
+  'KYC_Documents_Expected_Count',
+  'KYC_Document_Reject_Count',
   'Owner',
   'City',
   'States',
@@ -235,6 +241,9 @@ export function mapZohoLead(z: ZohoLead) {
     leadStatus: z.Lead_Status?.trim() || null,
     createdTime: parseDate(z.Created_Time),
     kycDocumentUploadCount: parseCount(z.KYC_Document_Upload_Count),
+    // The other half of the "all documents submitted" rule. Both are needed: a match is only
+    // meaningful when the expectation is known (see src/lib/kyc-match.ts).
+    kycDocumentsExpectedCount: parseCount(z.KYC_Documents_Expected_Count),
     ekoCode: z.Eko_Code?.trim() || null,
     ownerName,
     city: z.City?.trim() || null,

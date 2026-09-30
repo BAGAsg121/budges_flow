@@ -33,6 +33,7 @@
     "logs:export:demo": "node --env-file=.env scripts/export-logs.mjs --demo",
     "db:add-inbound-columns": "node --env-file=.env scripts/add-inbound-columns.mjs",
     "db:add-cta-columns": "node --env-file=.env scripts/add-cta-columns.mjs",
+    "db:add-kyc-expected-column": "node --env-file=.env scripts/add-kyc-expected-column.mjs",
     "capi:check": "node --env-file=.env scripts/check-meta-capi.mjs",
     "nudges:set-cap": "node --env-file=.env scripts/set-max-per-lead.mjs",
     "postinstall": "prisma generate",

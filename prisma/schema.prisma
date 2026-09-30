@@ -38,6 +38,10 @@ model Lead {
   leadStatus             String?
   createdTime            DateTime?
   kycDocumentUploadCount Int?
+  // Zoho's KYC_Documents_Expected_Count. Added with scripts/add-kyc-expected-column.mjs
+  // (additive ALTER only). Needed by the "all documents submitted" rule, which compares this
+  // with kycDocumentUploadCount; NULL means "expectation unknown" and never counts as a match.
+  kycDocumentsExpectedCount Int?
   ekoCode                String?
   ownerName              String?
   city                   String?

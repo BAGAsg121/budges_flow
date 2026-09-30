@@ -58,6 +58,7 @@ npm start                   # node .next/standalone/server.js  (PORT env, defaul
 | `npm run logs:export` | Export logs to .xlsx/.csv by date range, nudge, channel and status |
 | `npm run logs:export:demo` | Write a workbook of invented rows, to confirm Excel opens the format |
 | `npm run db:add-cta-columns` | Add the WhatsApp CTA click columns (dry run; `--apply` to write) |
+| `npm run db:add-kyc-expected-column` | Add `kycDocumentsExpectedCount` to `nudge_lead` (dry run; `--apply` to write) |
 | `npm run wa:repoint` | Repoint the sheet WhatsApp nudges at their UTILITY templates (dry run) |
 | `npm run wa:analytics` | **Button clicks from Meta** — per template, per day (no template change needed) |
 | `npm run capi:check` | Meta Conversions API config + the exact payload it would send |
@@ -738,6 +739,43 @@ npm run seed:nudges -- --force   # also refresh templates/filters on existing ro
 | `onboarded_transacting` | **Manual — Google Sheet** | expiring-discount activation-fee reminder with a pay CTA |
 | `onboarded_not_transacting` | **Manual — Google Sheet** | account-activated + integration next steps, then the discount reminder with a pay CTA |
 | `documents_pending_wa` | Zoho sync | WhatsApp twin of `documents_pending` (disabled until Meta approves the template) |
+| `documents_submitted_review` | Zoho sync **or** CRM webhook | EPS leads whose `KYC_Document_Upload_Count` **equals** `KYC_Documents_Expected_Count` → "we've received everything, it's under review", with a console CTA |
+
+### "All documents submitted" — the KYC count match
+
+`documents_submitted_review` fires on a **count comparison**, not a status change: Zoho's
+`Documents Pending` status stays put while documents trickle in, so status alone cannot tell "still
+uploading" from "finished uploading". The two counts can.
+
+The rule lives in `src/lib/kyc-match.ts` and the guards are the whole point. Measured on the live
+CRM — 39 EPS leads with status `Documents Pending`:
+
+| Situation | Count | Decision |
+| --- | --- | --- |
+| `expected` is **NULL** | 25 of 39 (64%) | **refused** — `kyc_expected_unknown` |
+| counts present and equal | 1 | **sent** |
+| counts present and different | 13 | refused — `kyc_counts_differ` |
+| `expected` is 0 | 0 | refused — `kyc_expected_zero` |
+
+An unknown expectation means *we do not know what complete looks like*, which must never be treated
+as complete. `null === null` and `0 === 0` are both `true` in JavaScript, so a naive equality test
+would have nudged 25 of those 39 leads with the false claim that their documents are all in. A lead
+that has uploaded **more** than expected is also refused: that is a data anomaly for a human, not a
+"you're done".
+
+The comparison is between two columns of the same row, which Prisma cannot express in a `where`, so
+it runs in memory — through one function (`splitByKycMatch`) that `runNudge`, `previewNudge` and the
+CRM webhook all call. Rejections are reported with their reason, so a run that sends nothing explains
+itself instead of looking broken.
+
+`KYC_Documents_Expected_Count` is synced into `nudge_lead.kycDocumentsExpectedCount`:
+
+```bash
+npm run db:add-kyc-expected-column            # dry run
+npm run db:add-kyc-expected-column -- --apply  # additive ALTER TABLE only
+```
+
+Nothing is backfilled — existing rows stay NULL until their next sync, and NULL never matches.
 
 ### Two things that will bite you
 
@@ -823,13 +861,23 @@ Notes:
   window means better coverage, not repeat messages. Measured on the real data, the signed cohort is
   the *narrower* one (30d: 5 signed customers vs 13 recent applications) and therefore the more
   precise; do not "fix" a small recipient count by switching it back without checking.
-- `verify_csp` is filtered as `verifyAt IS NULL OR TRIM(verifyAt) = '' OR panNumber IS NULL OR
-  TRIM(panNumber) = ''`, not plain `IS NULL`. The n8n If-nodes tested
-  `x == null || String(x).trim() === ''`, so a blank string counts as missing there — matching only
-  `IS NULL` in the fetch would have dropped those rows and quietly changed who gets nudged.
-  `pan_verification_pending` additionally requires the mobile to be verified first, which is the n8n
-  branch order (`Check Mobile Verification` → false → `Check PAN`), so a lead missing both is nudged
-  for the mobile now and for PAN on a later pass — not twice at once.
+- `verify_csp` uses exactly the n8n predicate — `requestAt` in the last N hours **and**
+  `(verifyAt IS NULL OR panNumber IS NULL)` — on the exact n8n column set.
+  > An earlier version also tested `TRIM(verifyAt) = ''` / `TRIM(panNumber) = ''`, reasoning that the
+  > n8n If-nodes treated a blank string as missing. That was measured and reverted: on the live table
+  > both blank-string predicates match **zero** rows (both columns hold real datetimes and PAN
+  > strings), so they could never select anyone `IS NULL` missed — and wrapping a column in `TRIM()`
+  > forfeits any chance of an index being used on it.
+- **`requestAt` is not indexed** on `verify_csp` (the table's only index is `PRIMARY(Id)`). `EXPLAIN`
+  reports `type=ALL`, `key=NULL`, `rows≈4692`, `Using filesort` for *every* variant of this query,
+  including the 2-hour one. So the narrow window limits how many rows are **returned**, not how many
+  are **read** — it is not a performance lever, and widening it costs nothing extra on a table this
+  size. On a much larger table the fix would be an index on `requestAt`, which is a DDL write and
+  therefore out of bounds for this app (the business database is read-only). Do not try to buy
+  performance back by shrinking the window; measure with `EXPLAIN` instead.
+- `pan_verification_pending` requires the mobile to be **already verified**, which is the n8n branch
+  order (`Check Mobile Verification` false-branch → `Check PAN`). A lead missing both is nudged for
+  the mobile now and for PAN on a later pass — never twice at once.
 - `csp_docs` has no `CREATED_AT` column, so the original n8n docs query could not have worked; the
   port queries the columns that actually exist and resolves the phone via `csp_application`
   (falling back to `verify_csp`).
@@ -1099,6 +1147,70 @@ npm run wa:repoint -- --apply
 npm run wa:templates -- --create-missing   # submits the UTILITY templates for review
 ```
 
+## CRM lead webhook (push a lead the moment it qualifies)
+
+The scheduled sweep and the **Run** button pull from the CRM on a timer. A CRM workflow webhook does
+the opposite: Zoho tells this app about a lead the instant it meets the criteria.
+
+```
+POST https://<your-app-host>/api/hooks/nudge/documents_submitted_review?token=<LEAD_WEBHOOK_SECRET>
+```
+
+**Auth.** `LEAD_WEBHOOK_SECRET`, accepted three ways — `?token=` (query string), the
+`x-webhook-secret` header, or `Authorization: Bearer`. The query string is the recommended one
+because a URL is the only field every CRM webhook editor exposes; it is named `token` so nobody
+mistakes it for something shareable. The route **fails closed**: with the secret unset, every call is
+refused with 401 rather than silently doing nothing.
+
+`/api/hooks/` is in the middleware allowlist (`src/middleware.ts`) because a CRM cannot answer an
+HTTP Basic prompt — without that exemption the request never reaches the handler and Zoho records a
+401 that looks like a wrong URL.
+
+**What it accepts.** A flat record, `{ "Leads": { … } }`, a `{ "data": [ … ] }` envelope, or plain
+form-encoded fields. Zoho's webhook UI offers several shapes and a mismatch shows up only as silence,
+so all of them are parsed.
+
+**What it does with the record.** It upserts the lead, then applies **the same filter chain a run
+uses** — status, business vertical, phone, the KYC row predicate — followed by the same
+`decideSend` sequence check, and sends through the same `deliverToLead`. So a webhook cannot message
+someone a manual run would refuse, a repeat delivery cannot message them twice, and the template,
+parameters, `trackingId` and CTA destination are identical to a run-triggered send.
+
+**It answers with a verdict**, so the CRM log says what happened:
+
+| `action` | Meaning |
+| --- | --- |
+| `sent` | delivered to the provider; includes `templateName` and `trackingId` |
+| `failed` | the provider rejected it; includes the error and a plain-English `help` |
+| `skipped` | with a `reason`: `status_not_included`, `wrong_business_vertical`, `no_valid_phone`, `kyc_expected_unknown`, `kyc_expected_differ`, `max_reached`, `replied`, `delivery_cap_backoff` |
+
+A delivery failure is reported as `failed` rather than a 500, because the CRM only needs to know
+whether to retry the record.
+
+> **Send the record id.** It is the key sends are de-duplicated on. Without it the request is refused
+> with `400` and the list of fields actually received — a silent accept would mark the webhook
+> "delivered" in Zoho while the lead was never nudged.
+>
+> **A sparse payload never blanks a lead.** `mapZohoLead` maps an absent field to `null`, and writing
+> those through an update would wipe values the webhook did not mention. Only non-null fields are
+> written on update; the full record is used only when creating. The consequence to know: a field
+> *cleared* in the CRM will not be cleared here by the webhook — the next sync handles that.
+>
+> If the payload omits `KYC_Documents_Expected_Count`, the last synced value is used. If there is none,
+> the lead is refused with `kyc_expected_unknown` — never guessed at.
+
+**Setting it up in Zoho CRM.** Workflow → *Instant Action* → *Webhook* on the Leads module, condition
+`Lead Status is Documents Pending` **and** `Business Vertical is EPS`, method `POST`, URL as above,
+and include the **record id** plus whichever KYC fields you want kept current. Enable *Instant
+Actions* for the workflow, and re-save it if you rotate the secret.
+
+**Checking it without a payload.** `GET` the same URL and it returns the contract — nudge, channel,
+template, filters and whether the secret is configured:
+
+```bash
+curl "https://<host>/api/hooks/nudge/documents_submitted_review?token=$LEAD_WEBHOOK_SECRET"
+```
+
 ## Reading customer replies
 
 The WhatsApp webhook stores **what the customer actually wrote**, not just that they replied:
@@ -1147,9 +1259,10 @@ kind of change.
 | `GET/POST /api/track/email` | shared secret | Inbound reply webhook |
 | `POST /api/cron/run` | shared secret | Run one full cycle now |
 | `GET/POST /api/cron/replies` | shared secret | Poll the mailbox for replies only |
+| `GET/POST /api/hooks/nudge/{key}` | shared secret | **CRM lead webhook** — `GET` returns the contract, `POST` upserts one lead, applies the nudge's filters and sends |
 
 Shared-secret callers pass `x-cron-secret` / `x-webhook-secret`, `Authorization: Bearer <secret>`,
-or `?secret=`.
+or `?secret=`. The CRM webhook uses `LEAD_WEBHOOK_SECRET` and accepts `?token=` instead of `?secret=`.
 
 ---
 
@@ -1374,8 +1487,13 @@ after a sleep to take ~30–60 s.
 > contained must be rotated.**
 
 - Every mutating route sits behind Basic auth. The only public endpoints are `/api/health`
-  (liveness only), the tracking routes (inboxes and Meta cannot authenticate) and `/api/cron/*`
-  (shared-secret checked in-route).
+  (liveness only), the tracking routes (inboxes and Meta cannot authenticate), `/api/cron/*` and
+  `/api/hooks/*` (both shared-secret checked in-route).
+- `/api/hooks/*` is exempt from Basic auth because a CRM cannot answer an HTTP Basic prompt. It is
+  not unauthenticated: `POST /api/hooks/nudge/{key}` requires `LEAD_WEBHOOK_SECRET` and **fails
+  closed** when that is unset. Rotate it by changing the env var and re-saving the Zoho workflow —
+  the old URL stops working immediately. `GET` on the same route reveals the nudge's filters and
+  template to anyone holding the token, so treat the URL as a credential.
 - Credentials belong in `.env` locally and in the host's environment dashboard when deployed —
   never in a committed file. `.env.example` is the committed template with no values.
 - Basic auth is enforced by edge middleware, so in a **production** build `APP_PASSWORD` /

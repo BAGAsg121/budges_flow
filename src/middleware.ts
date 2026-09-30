@@ -4,15 +4,28 @@
  * Public (cannot authenticate, must stay open):
  *   /api/track/*  — email open pixel + Meta WhatsApp webhook
  *   /api/cron/*   — external schedulers; the routes validate CRON_SECRET themselves
+ *   /api/hooks/*  — CRM lead webhooks; each route validates its own shared secret
  *
  * Everything else (UI + all data/mutating APIs) requires APP_USERNAME/APP_PASSWORD.
  * Fails closed: with AUTH_ENABLED=true and no APP_PASSWORD set, every request is denied.
  */
 import { NextRequest, NextResponse } from 'next/server'
 
-// Public: /api/health (liveness only), /api/track/* and /api/cron/* (validated in-route)
-// plus non-sensitive static assets.
-const PUBLIC_PREFIXES = ['/api/health', '/api/track/', '/api/cron/', '/logo.svg', '/robots.txt', '/favicon.ico']
+// Public: /api/health (liveness only), /api/track/*, /api/cron/* and /api/hooks/*
+// (each validates its own secret in-route) plus non-sensitive static assets.
+//
+// /api/hooks/ is here because a CRM cannot answer an HTTP Basic prompt: without this the webhook
+// never reaches its handler and Zoho logs a 401 that looks like a wrong URL. The route authenticates
+// with LEAD_WEBHOOK_SECRET and fails closed when that is unset, so this does not open a hole.
+const PUBLIC_PREFIXES = [
+  '/api/health',
+  '/api/track/',
+  '/api/cron/',
+  '/api/hooks/',
+  '/logo.svg',
+  '/robots.txt',
+  '/favicon.ico',
+]
 
 function safeEqual(a: string, b: string): boolean {
   const ab = new TextEncoder().encode(a)

@@ -51,6 +51,10 @@ services:
         sync: false
       - key: EMAIL_WEBHOOK_SECRET
         sync: false
+      # Shared secret for POST /api/hooks/nudge/<key> (the CRM lead webhook).
+      # Required in production or that route refuses every call.
+      - key: LEAD_WEBHOOK_SECRET
+        sync: false
       - key: SB_READ_HOST
         sync: false
       - key: SB_USER

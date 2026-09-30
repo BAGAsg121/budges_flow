@@ -35,5 +35,19 @@ export async function resolve(specifier, context, nextResolve) {
     if (resolved) return { url: resolved, shortCircuit: true }
     // Fall through so Node produces its normal, informative error.
   }
+  // `next/server` and friends are extensionless entry points that Next's bundler resolves but
+  // plain Node ESM does not (ERR_MODULE_NOT_FOUND: did you mean "next/server.js"?). Without this,
+  // a script cannot import a route module to exercise the REAL handler — which is exactly what
+  // scripts/.tmp-test-webhook.mjs does for the CRM webhook.
+  if (!specifier.startsWith('.') && !specifier.startsWith('/') && !specifier.includes('://')) {
+    try {
+      return await nextResolve(specifier, context)
+    } catch (err) {
+      if (err && err.code === 'ERR_MODULE_NOT_FOUND' && !specifier.endsWith('.js')) {
+        return nextResolve(`${specifier}.js`, context)
+      }
+      throw err
+    }
+  }
   return nextResolve(specifier, context)
 }

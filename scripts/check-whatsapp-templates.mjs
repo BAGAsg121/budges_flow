@@ -25,6 +25,7 @@ import {
 import {
   MYSQL_FLOW_TEMPLATES,
   WA_SHEET_FLOW_TEMPLATES,
+  ZOHO_FLOW_TEMPLATES,
   DEFAULT_NUDGES,
   CONSOLE_URL,
   PAY_ACTIVATION_FEE_URL,
@@ -59,6 +60,14 @@ function templateSpecFor(name) {
       body: sheetFlow.body,
       buttonText: sheetFlow.buttonText ?? null,
       buttonUrl: tracked ? (templateButtonUrlFor(name) ?? null) : (sheetFlow.buttonUrl ?? null),
+    }
+  }
+  const zohoFlow = Object.values(ZOHO_FLOW_TEMPLATES).find((t) => t.templateName === base)
+  if (zohoFlow) {
+    return {
+      body: zohoFlow.body,
+      buttonText: zohoFlow.buttonText ?? null,
+      buttonUrl: tracked ? (templateButtonUrlFor(name) ?? null) : (zohoFlow.buttonUrl ?? null),
     }
   }
   return null
@@ -160,6 +169,18 @@ async function main() {
     ]
 
     const seenTargets = new Set()
+
+    // A tracked (`x_cta`) template has its UNTRACKED base as its delivery fallback: when Meta
+    // reports the tracked one unavailable (132001), sendWhatsAppTemplate retries the base so the
+    // customer still gets the message and only the attribution is lost. That fallback is a real
+    // template, so it has to exist — a tracked template on its own means a PENDING/erroring
+    // tracked name falls back to nothing at all. Adding the base here keeps the pair together.
+    for (const t of [...targets]) {
+      const name = (t.templateName || '').trim()
+      if (!name || !isTrackedTemplate(name)) continue
+      const base = baseTemplateName(name)
+      if (base && base !== name) targets.push({ key: `${t.key} (fallback base)`, templateName: base, language: t.language })
+    }
 
     for (const n of targets) {
       const name = (n.templateName || '').trim()

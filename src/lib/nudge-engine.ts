@@ -25,7 +25,8 @@ import { buildWhatsAppParams } from '@/lib/whatsapp-params'
 import { isDeliveryCapError, capBackoffHours } from '@/lib/whatsapp-errors'
 import { ctaSendParams } from '@/lib/cta'
 import { ctaDestinationFor } from '@/lib/nudge-defaults'
-import type { Nudge } from '@prisma/client'
+import { splitByKycMatch, type KycCounts } from '@/lib/kyc-match'
+import type { Lead, Nudge } from '@prisma/client'
 
 export type Channel = 'email' | 'whatsapp'
 
@@ -53,6 +54,14 @@ export interface NudgeFilters {
    */
   dedupeByEmail?: boolean
   createdAfter?: string // ISO date
+  /**
+   * Only leads whose KYC upload count EQUALS their expected count — "all documents submitted".
+   *
+   * Note this is NOT enforced by buildWhere(): it compares two columns of the same row, which
+   * Prisma cannot express, so it is applied as a post-query predicate by every caller. See
+   * src/lib/kyc-match.ts for why a null/zero expected count must never count as a match.
+   */
+  kycMatchesExpected?: boolean
 }
 
 export interface RunSkipped {
@@ -123,6 +132,10 @@ function buildWhere(filters: NudgeFilters, channel: Channel) {
     }
   }
 
+  // kycMatchesExpected deliberately has no clause here: it compares the row's OWN two count
+  // columns, which is not expressible in a Prisma where. It is applied in memory (see
+  // applyRowPredicates) so that runNudge, previewNudge and the CRM webhook agree exactly.
+
   if (filters.createdAfter) {
     const d = new Date(filters.createdAfter)
     if (!Number.isNaN(d.getTime())) where.createdTime = { gte: d }
@@ -130,6 +143,21 @@ function buildWhere(filters: NudgeFilters, channel: Channel) {
 
   if (and.length) where.AND = and
   return where
+}
+
+/**
+ * Filters that compare two columns of the same row, applied after the query.
+ *
+ * The only one today is kycMatchesExpected ("all documents submitted"). Prisma cannot express
+ * `colA = colB`, so it has to run in memory — but it must not become a second, divergent source of
+ * truth about who is eligible. The implementation lives in kyc-match.ts, beside the rule, and
+ * runNudge, previewNudge and the CRM webhook all call THIS wrapper.
+ */
+function applyRowPredicates<T extends KycCounts>(
+  leads: T[],
+  filters: NudgeFilters
+): { kept: T[]; rejected: { lead: T; reason: string }[] } {
+  return splitByKycMatch(leads, filters)
 }
 
 /** Leads matching the nudge's local filters. */
@@ -329,6 +357,16 @@ function decideSend(
   return { action: 'send', messageNumber: sentOkLogs.length + 1 }
 }
 
+/**
+ * Public alias for the sequence decision, for callers outside this module (the CRM webhook).
+ *
+ * Exported as its own name rather than re-exporting `decideSend` so that the webhook reads as
+ * "ask the same sequence question", and so the internal name stays free to change. A webhook that
+ * decided "has this lead already been messaged?" on its own is exactly how one lead receives the
+ * same nudge twice.
+ */
+export const sequenceDecision = decideSend
+
 function buildLeadVars(lead: {
   fullName: string | null
   firstName: string | null
@@ -339,6 +377,7 @@ function buildLeadVars(lead: {
   company: string | null
   leadStatus: string | null
   kycDocumentUploadCount: number | null
+  kycDocumentsExpectedCount: number | null
   businessVertical: string | null
   city: string | null
   ownerName: string | null
@@ -352,6 +391,7 @@ function buildLeadVars(lead: {
     company: lead.company,
     lead_status: lead.leadStatus,
     kyc_document_upload_count: lead.kycDocumentUploadCount,
+    kyc_documents_expected_count: lead.kycDocumentsExpectedCount,
     business_vertical: lead.businessVertical,
     city: lead.city,
     owner_name: lead.ownerName,
@@ -364,6 +404,149 @@ function buildLeadVars(lead: {
 function resolveBatchLimit(limit?: number): number | null {
   const raw = limit !== undefined ? limit : Number(process.env.NUDGE_MAX_PER_RUN || 0)
   return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : null
+}
+
+/** Outcome of delivering one already-decided message. */
+export interface DeliveryResult {
+  /** Set when nothing was sent and why — the caller turns this into a skip entry. */
+  skipped?: 'no_valid_phone' | 'no_email'
+  /** Present only when a send was attempted. */
+  attempted?: boolean
+  ok?: boolean
+  error?: string | null
+  trackingId?: string
+  templateName?: string | null
+  toPhone?: string | null
+  toEmail?: string | null
+}
+
+/**
+ * Deliver ONE already-decided message for one lead, and log it.
+ *
+ * Extracted so that every entry point uses the SAME implementation: runNudge (batch/run),
+ * the CRM webhook (single lead), and anything added later. A second copy of this logic is how
+ * a webhook-triggered send ends up rendering different parameters, storing a different
+ * trackingId or skipping the CTA destination — the message still goes out, so nothing looks
+ * broken, but the click can no longer be attributed to anyone.
+ *
+ * The caller is responsible for the sequence decision (decideSend) and the per-run caps; this
+ * function only sends and records. It does NOT throw on a delivery failure — it returns ok:false
+ * and the failure is logged, because a webhook must answer the CRM rather than 500.
+ */
+export async function deliverToLead(opts: {
+  nudge: Nudge
+  lead: Lead
+  messageNumber: number
+  baseUrl: string
+  now?: Date
+}): Promise<DeliveryResult> {
+  const { nudge, lead, messageNumber, baseUrl } = opts
+  const now = opts.now ?? new Date()
+  const channel: Channel = nudge.channel === 'whatsapp' ? 'whatsapp' : 'email'
+  const vars = buildLeadVars(lead, messageNumber, now)
+
+  if (channel === 'whatsapp') {
+    const rawPhone = lead.mobile || lead.phone
+    const toPhone = normalizePhone(rawPhone)
+    if (!toPhone) return { skipped: 'no_valid_phone' }
+
+    // With a template name configured we send the approved template (required for
+    // business-initiated messages). Without one we send free-form text, which Meta
+    // allows inside the 24h customer service window or to a registered test number —
+    // useful for verifying the integration before a template is approved.
+    const templateName = (nudge.whatsappTemplateName || '').trim()
+    const trackingId = randomUUID()
+    const mobileDigits = buttonMobile(rawPhone)
+    const waParams = buildWhatsAppParams(nudge.whatsappParams, vars)
+    const { buttonParams, ctaUrl, fallback: templateFallback } = ctaSendParams({
+      templateName,
+      destination: ctaDestinationFor(templateName, mobileDigits),
+      trackingId,
+      mobileDigits,
+      configured: waParams.button,
+    })
+    const result = templateName
+      ? await sendWhatsAppTemplate({
+          to: toPhone,
+          templateName,
+          language: nudge.whatsappLanguage || getDefaultTemplateLanguage(),
+          params: waParams.body,
+          buttonParams,
+          fallback: templateFallback,
+        })
+      : await sendWhatsAppText({
+          to: toPhone,
+          text: renderTemplate(nudge.bodyTemplate || '', vars),
+        })
+
+    await db.messageLog.create({
+      data: {
+        leadId: lead.id,
+        nudgeId: nudge.id,
+        channel: 'whatsapp',
+        messageNumber,
+        toPhone,
+        // Record the template that ACTUALLY went out: a tracked template that Meta has not
+        // approved falls back to its base, and the log must not then claim attribution it lost.
+        templateName: result.usedFallbackTemplate ?? nudge.whatsappTemplateName,
+        messageId: result.waMessageId ?? null,
+        trackingId,
+        ctaUrl,
+        sentOk: result.ok,
+        sendError: result.error ?? null,
+        sentAt: result.ok ? new Date() : null,
+        engagementStatus: 'sent',
+      },
+    })
+
+    return {
+      attempted: true,
+      ok: result.ok,
+      error: result.error ?? null,
+      trackingId,
+      templateName: result.usedFallbackTemplate ?? nudge.whatsappTemplateName,
+      toPhone,
+      toEmail: lead.email,
+    }
+  }
+
+  if (!lead.email) return { skipped: 'no_email' }
+
+  const trackingId = randomUUID()
+  const subject = renderTemplate(nudge.subjectTemplate || '', vars)
+  // escape substituted values: lead data must not inject markup into the email body
+  const bodyHtml = injectTrackingPixel(
+    renderTemplate(nudge.bodyTemplate || '', vars, { escapeValues: true }),
+    baseUrl,
+    trackingId
+  )
+
+  const result = await sendEmail({ to: lead.email, subject, html: bodyHtml, text: htmlToText(bodyHtml) })
+
+  await db.messageLog.create({
+    data: {
+      leadId: lead.id,
+      nudgeId: nudge.id,
+      channel: 'email',
+      messageNumber,
+      toEmail: lead.email,
+      subject,
+      messageId: result.messageId ?? null,
+      trackingId,
+      sentOk: result.ok,
+      sendError: result.error ?? null,
+      sentAt: result.ok ? new Date() : null,
+      engagementStatus: 'sent',
+    },
+  })
+
+  return {
+    attempted: true,
+    ok: result.ok,
+    error: result.error ?? null,
+    trackingId,
+    toEmail: lead.email,
+  }
 }
 
 /**
@@ -564,10 +747,23 @@ export async function runNudge(
   }
 
   // 2. Select locally
-  const leads = await db.lead.findMany({
+  const selected = await db.lead.findMany({
     where: buildWhere(filters, channel),
     orderBy: { createdAt: 'desc' },
   })
+  // Row-level predicates (today: "all documents submitted") are applied here rather than in the
+  // query — see applyRowPredicates. Rejections are reported, not silently dropped, so a run that
+  // sends nothing explains itself instead of looking broken.
+  const { kept: leads, rejected } = applyRowPredicates(selected, filters)
+  for (const r of rejected) {
+    summary.skipped.push({
+      lead: r.lead.fullName || r.lead.email || r.lead.zohoId,
+      email: r.lead.email,
+      phone: r.lead.phone || r.lead.mobile,
+      reason: r.reason,
+      detail: `upload ${r.lead.kycDocumentUploadCount ?? '—'} vs expected ${r.lead.kycDocumentsExpectedCount ?? '—'}`,
+    })
+  }
   summary.leadsConsidered = leads.length
 
   const now = new Date()
@@ -626,109 +822,23 @@ export async function runNudge(
     }
 
     const messageNumber = decision.messageNumber ?? 1
-    const vars = buildLeadVars(lead, messageNumber, now)
 
-    if (channel === 'whatsapp') {
-      const rawPhone = lead.mobile || lead.phone
-      const toPhone = normalizePhone(rawPhone)
-      if (!toPhone) {
-        summary.skipped.push({
-          lead: lead.fullName || lead.zohoId,
-          email: lead.email,
-          phone: rawPhone,
-          reason: 'no_valid_phone',
-        })
-        continue
-      }
+    // One delivery implementation for every entry point (see deliverToLead).
+    const delivery = await deliverToLead({ nudge, lead, messageNumber, baseUrl, now })
 
-      attempts++
-      // With a template name configured we send the approved template (required for
-      // business-initiated messages). Without one we send free-form text, which Meta
-      // allows inside the 24h customer service window or to a registered test number —
-      // useful for verifying the integration before a template is approved.
-      const templateName = (nudge.whatsappTemplateName || '').trim()
-      const trackingId = randomUUID()
-      const mobileDigits = buttonMobile(rawPhone)
-      const waParams = buildWhatsAppParams(nudge.whatsappParams, vars)
-      const { buttonParams, ctaUrl, fallback: templateFallback } = ctaSendParams({
-        templateName,
-        destination: ctaDestinationFor(templateName, mobileDigits),
-        trackingId,
-        mobileDigits,
-        configured: waParams.button,
+    if (delivery.skipped) {
+      summary.skipped.push({
+        lead: lead.fullName || lead.zohoId,
+        email: lead.email,
+        phone: lead.phone || lead.mobile,
+        reason: delivery.skipped,
       })
-      const result = templateName
-        ? await sendWhatsAppTemplate({
-            to: toPhone,
-            templateName,
-            language: nudge.whatsappLanguage || getDefaultTemplateLanguage(),
-            params: waParams.body,
-            buttonParams,
-            fallback: templateFallback,
-          })
-        : await sendWhatsAppText({
-            to: toPhone,
-            text: renderTemplate(nudge.bodyTemplate || '', vars),
-          })
-
-      await db.messageLog.create({
-        data: {
-          leadId: lead.id,
-          nudgeId: nudge.id,
-          channel: 'whatsapp',
-          messageNumber,
-          toPhone,
-          templateName: result.usedFallbackTemplate ?? nudge.whatsappTemplateName,
-          messageId: result.waMessageId ?? null,
-          trackingId,
-          ctaUrl,
-          sentOk: result.ok,
-          sendError: result.error ?? null,
-          sentAt: result.ok ? new Date() : null,
-          engagementStatus: 'sent',
-        },
-      })
-
-      if (result.ok) summary.sent++
-      else summary.failed++
-    } else {
-      if (!lead.email) {
-        summary.skipped.push({ lead: lead.fullName || lead.zohoId, email: null, phone: lead.phone, reason: 'no_email' })
-        continue
-      }
-
-      attempts++
-      const trackingId = randomUUID()
-      const subject = renderTemplate(nudge.subjectTemplate || '', vars)
-      // escape substituted values: lead data must not inject markup into the email body
-      const bodyHtml = injectTrackingPixel(
-        renderTemplate(nudge.bodyTemplate || '', vars, { escapeValues: true }),
-        baseUrl,
-        trackingId
-      )
-
-      const result = await sendEmail({ to: lead.email, subject, html: bodyHtml, text: htmlToText(bodyHtml) })
-
-      await db.messageLog.create({
-        data: {
-          leadId: lead.id,
-          nudgeId: nudge.id,
-          channel: 'email',
-          messageNumber,
-          toEmail: lead.email,
-          subject,
-          messageId: result.messageId ?? null,
-          trackingId,
-          sentOk: result.ok,
-          sendError: result.error ?? null,
-          sentAt: result.ok ? new Date() : null,
-          engagementStatus: 'sent',
-        },
-      })
-
-      if (result.ok) summary.sent++
-      else summary.failed++
+      continue
     }
+
+    attempts++
+    if (delivery.ok) summary.sent++
+    else summary.failed++
 
     // small delay to stay API/SMTP-friendly
     await new Promise((r) => setTimeout(r, 250))
@@ -744,14 +854,22 @@ export async function previewNudge(nudgeId: string) {
   if (!nudge) throw new Error('Nudge not found')
   const channel: Channel = nudge.channel === 'whatsapp' ? 'whatsapp' : 'email'
   const filters = parseFilters(nudge.filters)
-  const leads = await db.lead.findMany({
+  const selectedForPreview = await db.lead.findMany({
     where: buildWhere(filters, channel),
     orderBy: { createdAt: 'desc' },
   })
+  // Same row predicates as the real run, so a preview can never promise a send the run would refuse.
+  const { kept: leads, rejected } = applyRowPredicates(selectedForPreview, filters)
   const now = new Date()
 
   const wouldSend: { lead: string; email: string | null; phone: string | null; messageNumber: number }[] = []
-  const wouldSkip: RunSkipped[] = []
+  const wouldSkip: RunSkipped[] = rejected.map((r) => ({
+    lead: r.lead.fullName || r.lead.email || r.lead.zohoId,
+    email: r.lead.email,
+    phone: r.lead.phone || r.lead.mobile,
+    reason: r.reason,
+    detail: `upload ${r.lead.kycDocumentUploadCount ?? '—'} vs expected ${r.lead.kycDocumentsExpectedCount ?? '—'}`,
+  }))
   const dedupe = filters.dedupeByEmail !== false
   const seenContacts = new Set<string>()
   const contactKey = (lead: { email: string | null; phone: string | null; mobile: string | null }) =>

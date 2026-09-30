@@ -157,18 +157,29 @@ interface VerifyRow {
 async function fetchVerifyRows(opts: MysqlFlowOptions): Promise<VerifyRow[]> {
   const hours = Math.max(1, opts.lookbackHours ?? 2)
   const limit = Math.min(opts.limit ?? 500, 1000)
-  // The n8n query carried `AND (verifyAt IS NULL OR panNumber IS NULL)` and the SQL is kept here
-  // too: rows that can never qualify for B or C are fetched and thrown away otherwise.
+  // The n8n query carried `AND (verifyAt IS NULL OR panNumber IS NULL)` and that is what is kept
+  // here: rows that can never qualify for B or C are fetched and thrown away otherwise.
   //
-  // Written as NULL-or-empty rather than plain `IS NULL` because the n8n If-nodes tested
-  // `x == null || String(x).trim() === ''`, so a blank string counts as missing. A plain
-  // `IS NULL` here would drop those rows and silently change who gets nudged.
+  // This deliberately does NOT also test the columns for blank strings, which an earlier version
+  // added on the reasoning that the n8n If-nodes tested `String(x).trim() === ''`. Two reasons it
+  // was wrong:
+  //   1. It buys nothing. Measured on the live table: `verifyAt = ''` and `panNumber = ''` match
+  //      ZERO rows (both columns hold real datetimes / PAN strings), so the extra predicates can
+  //      never select a row that `IS NULL` would have missed.
+  //   2. It costs a little and scales badly. Wrapping a column in TRIM() removes any chance of an
+  //      index being used on it, so this is a straight loss if the table is ever indexed — and it
+  //      already measures slower (108ms vs 74ms on ~4.7k rows).
+  //
+  // The `requestAt` window is what keeps this cheap, and it is kept exactly as the n8n had it.
+  // Note that `requestAt` is NOT indexed on this table (only PRIMARY(Id) exists), so the plan is
+  // `type=ALL ... Using filesort` for ANY window; the short window limits rows RETURNED, not rows
+  // read. Do not widen it casually on a large table, and do not expect an index to be used here.
   return queryRead<VerifyRow>(
     `SELECT Id, csp_number, customer_id, requestAt, verifyAt, panNumber
        FROM verify_csp
       WHERE requestAt >= DATE_SUB(NOW(), INTERVAL ? HOUR)
         AND requestAt < NOW()
-        AND (verifyAt IS NULL OR TRIM(verifyAt) = '' OR panNumber IS NULL OR TRIM(panNumber) = '')
+        AND (verifyAt IS NULL OR panNumber IS NULL)
       ORDER BY requestAt DESC
       LIMIT ?`,
     [hours, limit]

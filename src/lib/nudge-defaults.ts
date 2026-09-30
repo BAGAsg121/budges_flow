@@ -26,6 +26,9 @@ import { CTA_TEMPLATE_SUFFIX, baseTemplateName, ctaTrackBaseUrl, isTrackedTempla
   UNQUALIFIED_JUNK: 'Unqualified (Junk)',
 } as const
 
+/** The business vertical every nudge in this app targets. */
+export const EPS_BUSINESS_VERTICAL = 'EPS'
+
 /**
  * Zoho lead cut-off. Everything created after this is fetched, so the window
  * runs from 1 Aug up to "now" automatically (no upper bound needed).
@@ -41,7 +44,7 @@ export const ZOHO_TZ_OFFSET = '+05:30'
  * `greater_than` the cut-off and nothing else means the window always runs up to "now".
  */
 export function zohoCriteriaSince(createdAfter: string): string {
-  return `((Business_vertical:equals:EPS)and(Created_Time:greater_than:${createdAfter}))`
+  return `((Business_vertical:equals:${EPS_BUSINESS_VERTICAL})and(Created_Time:greater_than:${createdAfter}))`
 }
 
 /**
@@ -112,6 +115,21 @@ export const KYC_COMPLETE_AT = 11
 export const WHATSAPP_TEST_STATUS = 'WhatsApp Test'
 
 export const ZOHO_CRITERIA = zohoCriteriaSince(ZOHO_LEADS_CREATED_AFTER)
+
+/**
+ * Criteria for the "documents submitted, under review" nudge.
+ *
+ * Deliberately NOT `zohoCriteriaSince`: that helper always adds a Created_Time cut-off, and this
+ * flow is driven by lead STATUS rather than by age — a lead that reached "Documents Pending" six
+ * months ago and only now completed its uploads still needs the message. Keeping the cut-off out
+ * also means the CRM webhook and the manual sync agree on exactly the same population.
+ *
+ * Passed to the CRM verbatim (Zoho compares the strings literally), so the spacing inside
+ * `Documents Pending` matters.
+ */
+export function zohoDocumentsPendingCriteria(): string {
+  return `((Business_vertical:equals:${EPS_BUSINESS_VERTICAL})and(Lead_Status:equals:${LEAD_STATUS.DOCUMENTS_PENDING}))`
+}
 
 /** Payment link used by the two onboarding nudges. */
 export const PAY_ACTIVATION_FEE_URL = 'https://eps.eko.in/console/pay-activation-fee'
@@ -302,6 +320,8 @@ export function whatsappButtonUrlFor(templateName: string | null | undefined): s
   if (mysqlFlow) return `${CONSOLE_URL}?mobile={{1}}`
   const sheetFlow = Object.values(WA_SHEET_FLOW_TEMPLATES).find((t) => t.templateName === name)
   if (sheetFlow) return sheetFlow.buttonUrl ?? null
+  const zohoFlow = Object.values(ZOHO_FLOW_TEMPLATES).find((t) => t.templateName === name)
+  if (zohoFlow) return zohoFlow.buttonUrl ?? null
   return null
 }
 
@@ -397,6 +417,37 @@ export const WA_SHEET_FLOW_TEMPLATES: Record<string, WaSheetFlowTemplate> = {
 export const WA_EMAIL_TWIN: Record<string, string> = {
   whatsapp_onboarded_transacting: 'onboarded_transacting',
   whatsapp_onboarded_not_transacting: 'onboarded_not_transacting',
+}
+
+/**
+ * Templates for CRM-driven WhatsApp nudges that are neither a MySQL flow nor a sheet flow.
+ *
+ * These carry a URL button pointing at the console, exactly like the six MySQL flows, which is why
+ * they are registered here as well as in the seed: `whatsappButtonUrlFor()` has to recognise the
+ * name so the tracked `…_cta` twin resolves back to the console destination rather than falling
+ * through to "unknown template" and losing the link.
+ */
+export const ZOHO_FLOW_TEMPLATES: Record<string, WaSheetFlowTemplate> = {
+  /**
+   * "All your documents are in, we are reviewing them."
+   *
+   * UTILITY, not MARKETING: it is a status notification about the recipient's own application with
+   * nothing promotional in it. That matters — a MARKETING template is subject to Meta's per-user
+   * frequency cap, which silently drops sends with 131049 (the same trap the activation-fee nudges
+   * had to be moved out of).
+   *
+   * No body variables: the message is the same for everyone, and a template with no `{{n}}` cannot
+   * be broken by a missing lead field. The only parameter is the button's, which is the mobile.
+   */
+  documents_submitted_review: {
+    templateName: 'documents_submitted_review',
+    title: 'Documents submitted — under review (WhatsApp)',
+    body:
+      'Hi 👋 We have received all the documents submitted from your end for your Eko partner account.\n\n' +
+      'Our team is reviewing them accordingly. You can check your current status on the console at any time.',
+    buttonText: 'Check Status',
+    buttonUrl: `${CONSOLE_URL}?mobile={{1}}`,
+  },
 }
 
 // ---------------------------------------------------------------------------
@@ -654,6 +705,48 @@ export const DEFAULT_NUDGES: NudgeSeed[] = [
     // parameter-count mismatch.
     whatsappParams: json(t.buttonText && t.buttonUrl ? { body: [], button: ['mobile_digits'] } : { body: [] }),
     // Inert for sheet nudges — the send path applies one-message-per-recipient instead.
+    maxEmailsPerLead: 1,
+    followUpDays: 0,
+  })),
+
+  // -------------------------------------------------------------------------
+  // CRM status nudge: every document is in, so tell the customer it is under review.
+  //
+  // Fires on the KYC COUNTS AGREEING (upload === expected), not on a status change: Zoho's
+  // "Documents Pending" status stays put while documents trickle in, so status alone cannot tell
+  // "still uploading" from "finished uploading". The counts can, and kyc-match.ts refuses to treat
+  // an unknown expected count as a match — 25 of the 39 live Documents-Pending leads have no
+  // expected count, and they must never receive "all your documents are in".
+  // -------------------------------------------------------------------------
+  ...Object.entries(ZOHO_FLOW_TEMPLATES).map(([key, t]): NudgeSeed => ({
+    key,
+    name: `WhatsApp · ${t.title.replace(/\s*\(WhatsApp\)\s*$/, '')}`,
+    description:
+      `WhatsApp status nudge for EPS leads whose KYC_Document_Upload_Count EQUALS ` +
+      `KYC_Documents_Expected_Count — i.e. everything asked for has been uploaded and is now ` +
+      `awaiting review. Sends the approved Meta template ` +
+      `"${templateHasButton(t.templateName) ? trackedTemplateName(t.templateName) : t.templateName}" in ` +
+      `${WHATSAPP_TEMPLATE_LANGUAGE_DEFAULT}; its button "${t.buttonText}" opens ` +
+      `${CONSOLE_URL}?mobile=<recipient mobile>. ` +
+      `Sync criteria: business vertical EPS and lead status "Documents Pending". ` +
+      `Also callable per-lead from the CRM webhook (POST /api/hooks/nudge/${key}). ` +
+      `One message per lead, ever. Ships disabled until the template is approved.`,
+    enabled: false,
+    channel: 'whatsapp',
+    zohoCriteria: zohoDocumentsPendingCriteria(),
+    filters: json({
+      requirePhone: true,
+      includeStatuses: [LEAD_STATUS.DOCUMENTS_PENDING],
+      businessVertical: EPS_BUSINESS_VERTICAL,
+      // The rule this nudge exists for. Applied in memory (two columns of the same row).
+      kycMatchesExpected: true,
+    }),
+    bodyTemplate: t.body,
+    whatsappTemplateName: templateHasButton(t.templateName) ? trackedTemplateName(t.templateName) : t.templateName,
+    whatsappLanguage: WHATSAPP_TEMPLATE_LANGUAGE_DEFAULT,
+    whatsappParams: json(t.buttonText && t.buttonUrl ? { body: [], button: ['mobile_digits'] } : { body: [] }),
+    // Once per lead: it is a one-off status notification, not a reminder sequence. Re-sending it
+    // would tell someone "we are reviewing your documents" again for no reason.
     maxEmailsPerLead: 1,
     followUpDays: 0,
   })),

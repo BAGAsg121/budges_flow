@@ -5,7 +5,8 @@
  */
 import { renderTemplate, escapeHtml, injectTrackingPixel, htmlToText } from '../src/lib/template.ts'
 import { isCronAuthorized, isWebhookAuthorized } from '../src/lib/cron-auth.ts'
-import { DEFAULT_NUDGES, ZOHO_CRITERIA, LEAD_STATUS, PAY_ACTIVATION_FEE_URL, WHATSAPP_TEST_STATUS, MYSQL_FLOW_TEMPLATES, WA_SHEET_FLOW_TEMPLATES, MYSQL_FLOW_LOOKBACK, CONSOLE_URL, zohoTodayIso, zohoTodayCriteria, zohoCriteriaSince, ZOHO_LEADS_CREATED_AFTER, ZOHO_TZ_OFFSET, zohoCriteriaBetween, zohoIstIso, zohoSyncOverlapMinutes } from '../src/lib/nudge-defaults.ts'
+import { checkKycCounts, kycCountsMatch, requiresKycMatch, splitByKycMatch as applyRowPredicates } from '../src/lib/kyc-match.ts'
+import { DEFAULT_NUDGES, ZOHO_CRITERIA, LEAD_STATUS, PAY_ACTIVATION_FEE_URL, WHATSAPP_TEST_STATUS, MYSQL_FLOW_TEMPLATES, WA_SHEET_FLOW_TEMPLATES, ZOHO_FLOW_TEMPLATES, EPS_BUSINESS_VERTICAL, zohoDocumentsPendingCriteria, MYSQL_FLOW_LOOKBACK, CONSOLE_URL, zohoTodayIso, zohoTodayCriteria, zohoCriteriaSince, ZOHO_LEADS_CREATED_AFTER, ZOHO_TZ_OFFSET, zohoCriteriaBetween, zohoIstIso, zohoSyncOverlapMinutes } from '../src/lib/nudge-defaults.ts'
 import { MYSQL_FLOW_KEYS, isMysqlFlowKey } from '../src/lib/mysql-nudges.ts'
 import { buildWhatsAppParams as buildWhatsAppParamsRaw, missingSheetColumns as missingSheetColumnsRaw } from '../src/lib/whatsapp-params.ts'
 import { extractInboundText, appendInbound, INBOUND_KEEP } from '../src/lib/whatsapp-inbound.ts'
@@ -210,7 +211,7 @@ check('whatsapp_sample targets exactly one status', filtersOf('whatsapp_sample')
 checkTrue('whatsapp_sample asks for a phone', filtersOf('whatsapp_sample').requirePhone === true)
 check('whatsapp_sample is capped at 1 message/lead', wa.maxEmailsPerLead, 1)
 checkTrue('whatsapp_sample body renders first_name', renderTemplate(wa.bodyTemplate, { first_name: 'Asha' }).includes('Hi Asha'))
-check('whatsapp nudges: sample + legacy doc twin + 6 MySQL flows + 3 sheet', DEFAULT_NUDGES.filter((n) => n.channel === 'whatsapp').length, 11)
+check('whatsapp nudges: sample + legacy doc twin + 6 MySQL flows + 3 sheet + 1 CRM status', DEFAULT_NUDGES.filter((n) => n.channel === 'whatsapp').length, 12)
 const waDocs = byKey['documents_pending_wa']
 check('documents_pending_wa template language is en_US (not en)', waDocs.whatsappLanguage, 'en_US')
 check('documents_pending_wa supplies 3 params for its 3 variables', JSON.parse(waDocs.whatsappParams).length, countTemplateVars(waDocs.bodyTemplate))
@@ -496,6 +497,85 @@ check(
     .join(','),
   ''
 )
+
+// --- the "all documents submitted" rule (kyc_match) --------------------------
+// Measured on the live CRM: of 39 EPS leads with Lead_Status = "Documents Pending", 25 (64%) have
+// KYC_Documents_Expected_Count = NULL. So the null/zero guards below are the entire safety story —
+// a naive "the counts are equal" test nudgees most of the cohort with a false claim.
+const kycOk = { kycDocumentUploadCount: 11, kycDocumentsExpectedCount: 11 }
+check('kyc: equal counts match', checkKycCounts(kycOk).matches, true)
+check('kyc: lower upload does not match', checkKycCounts({ kycDocumentUploadCount: 6, kycDocumentsExpectedCount: 11 }).matches, false)
+check('kyc: lower upload gives a differ reason', checkKycCounts({ kycDocumentUploadCount: 6, kycDocumentsExpectedCount: 11 }).reason, 'kyc_counts_differ')
+check('kyc: an UNKNOWN expected count never matches', checkKycCounts({ kycDocumentUploadCount: 6, kycDocumentsExpectedCount: null }).matches, false)
+check('kyc: unknown expected gives its own reason', checkKycCounts({ kycDocumentUploadCount: 6, kycDocumentsExpectedCount: null }).reason, 'kyc_expected_unknown')
+check('kyc: null === null does NOT match (the 25/39 trap)', checkKycCounts({ kycDocumentUploadCount: null, kycDocumentsExpectedCount: null }).matches, false)
+check('kyc: 0 === 0 does NOT match (the double-zero trap)', checkKycCounts({ kycDocumentUploadCount: 0, kycDocumentsExpectedCount: 0 }).matches, false)
+check('kyc: expected 0 is refused even when the upload is 0', checkKycCounts({ kycDocumentUploadCount: 0, kycDocumentsExpectedCount: 0 }).reason, 'kyc_expected_zero')
+check('kyc: a negative expected count is refused', checkKycCounts({ kycDocumentUploadCount: 5, kycDocumentsExpectedCount: -5 }).matches, false)
+check('kyc: a MISSING upload is refused', checkKycCounts({ kycDocumentUploadCount: null, kycDocumentsExpectedCount: 11 }).matches, false)
+check('kyc: missing upload gives its own reason', checkKycCounts({ kycDocumentUploadCount: null, kycDocumentsExpectedCount: 11 }).reason, 'kyc_upload_unknown')
+check('kyc: uploading MORE than expected is not a match (needs a human)', checkKycCounts({ kycDocumentUploadCount: 12, kycDocumentsExpectedCount: 11 }).matches, false)
+check('kyc: the boolean helper agrees', kycCountsMatch(kycOk), true)
+check('kyc: the filter is off unless asked for', requiresKycMatch({}), false)
+check('kyc: the filter is on when true', requiresKycMatch({ kycMatchesExpected: true }), true)
+check('kyc: a truthy non-true value does not switch it on', requiresKycMatch({ kycMatchesExpected: 1 }), false)
+
+// applyRowPredicates is the single place the rule is applied, shared by runNudge, previewNudge
+// and the CRM webhook — so its keep/reject split must be exact.
+const kycRows = [
+  { id: 'a', kycDocumentUploadCount: 11, kycDocumentsExpectedCount: 11 },
+  { id: 'b', kycDocumentUploadCount: 6, kycDocumentsExpectedCount: 11 },
+  { id: 'c', kycDocumentUploadCount: null, kycDocumentsExpectedCount: null },
+]
+check('row predicates: off means everything passes', applyRowPredicates(kycRows, {}).kept.length, 3)
+check('row predicates: off rejects nothing', applyRowPredicates(kycRows, {}).rejected.length, 0)
+check('row predicates: on keeps exactly the match', applyRowPredicates(kycRows, { kycMatchesExpected: true }).kept.map((r) => r.id).join(','), 'a')
+check('row predicates: on rejects the other two', applyRowPredicates(kycRows, { kycMatchesExpected: true }).rejected.length, 2)
+check(
+  'row predicates: each rejection carries its reason',
+  applyRowPredicates(kycRows, { kycMatchesExpected: true }).rejected.map((r) => r.reason).join(','),
+  'kyc_counts_differ,kyc_expected_unknown'
+)
+
+// --- the documents-submitted-review nudge -----------------------------------
+const reviewNudge = DEFAULT_NUDGES.find((n) => n.key === 'documents_submitted_review')
+const reviewFilters = reviewNudge ? JSON.parse(reviewNudge.filters) : {}
+check('review nudge exists', Boolean(reviewNudge), true)
+check('review nudge is a WhatsApp nudge', reviewNudge?.channel, 'whatsapp')
+check('review nudge ships disabled until its template is approved', reviewNudge?.enabled, false)
+check('review nudge requires a phone', reviewFilters.requirePhone, true)
+check('review nudge is scoped to the Documents Pending status', JSON.stringify(reviewFilters.includeStatuses), JSON.stringify([LEAD_STATUS.DOCUMENTS_PENDING]))
+check('review nudge is scoped to the EPS vertical', reviewFilters.businessVertical, EPS_BUSINESS_VERTICAL)
+check('review nudge turns on the KYC match rule', reviewFilters.kycMatchesExpected, true)
+check('review nudge does not also set a KYC range', reviewFilters.maxKycCount === undefined && reviewFilters.minKycCount === undefined, true)
+check('review nudge syncs on EPS', reviewNudge?.zohoCriteria?.includes('Business_vertical:equals:EPS'), true)
+check('review nudge syncs on the Documents Pending status', reviewNudge?.zohoCriteria?.includes('Lead_Status:equals:Documents Pending'), true)
+// The criteria must NOT carry a Created_Time bound: the flow is status-driven, and a created-after
+// cut-off would silently stop covering older leads that only just finished uploading.
+check('review nudge criteria has no Created_Time bound', reviewNudge?.zohoCriteria?.includes('Created_Time') ?? true, false)
+check('review criteria builder matches the seeded criteria', zohoDocumentsPendingCriteria(), reviewNudge?.zohoCriteria)
+check('review nudge uses the tracked template', reviewNudge?.whatsappTemplateName, 'documents_submitted_review_cta')
+check('review nudge language is en_US', reviewNudge?.whatsappLanguage, 'en_US')
+check('review nudge sends only the button parameter', JSON.stringify(JSON.parse(reviewNudge?.whatsappParams ?? '{}')), JSON.stringify({ body: [], button: ['mobile_digits'] }))
+check('review nudge is once per lead, ever', `${reviewNudge?.maxEmailsPerLead}/${reviewNudge?.followUpDays}`, '1/0')
+check('review template declares no body variables', countTemplateVars(ZOHO_FLOW_TEMPLATES.documents_submitted_review.body), 0)
+check('review template body is within Meta limits', ZOHO_FLOW_TEMPLATES.documents_submitted_review.body.length <= 1024, true)
+check('review template body says the documents are received', /received all the documents submitted/i.test(ZOHO_FLOW_TEMPLATES.documents_submitted_review.body), true)
+check('review template body says it is under review', /reviewing them/i.test(ZOHO_FLOW_TEMPLATES.documents_submitted_review.body), true)
+check('review template body carries no promotional wording', /discount|offer|free|hurry/i.test(ZOHO_FLOW_TEMPLATES.documents_submitted_review.body), false)
+check('review template button is the console link', ZOHO_FLOW_TEMPLATES.documents_submitted_review.buttonUrl, `${CONSOLE_URL}?mobile={{1}}`)
+// The tracked twin's button must reach the tracker; the base template's must reach the console.
+// With no tracker configured (the state this early in the script) the tracked twin must fall back
+// to the real destination rather than producing a dead link. The tracker case is asserted further
+// down, after CTA_TRACK_BASE_URL is set.
+check('review tracked template falls back to the console when no tracker is set', templateButtonUrlFor('documents_submitted_review_cta'), `${CONSOLE_URL}?mobile={{1}}`)
+check('review tracked template resolves to the console destination', whatsappButtonUrlFor('documents_submitted_review_cta'), `${CONSOLE_URL}?mobile={{1}}`)
+check('review template has a button, so it is tracked', templateHasButton('documents_submitted_review'), true)
+check('review base template button is the console link', whatsappButtonUrlFor('documents_submitted_review'), `${CONSOLE_URL}?mobile={{1}}`)
+check('review destination fills in the mobile', ctaDestinationFor('documents_submitted_review_cta', '9876543210'), `${CONSOLE_URL}?mobile=9876543210`)
+check('review nudge flows through the webhook-able Zoho source', nudgeSourceOf({ zohoCriteria: reviewNudge?.zohoCriteria ?? null, filters: reviewNudge?.filters ?? '{}' }), 'zoho')
+// Every CRM-driven nudge must be reachable from the webhook; a MySQL flow must not be offered.
+check('a mysql nudge is not offered to the CRM webhook', nudgeSourceOf({ zohoCriteria: null, filters: '{"source":"mysql","flow":"mobile_otp_pending"}' }), 'mysql')
 
 // --- Zoho MCP tool selection and argument building ---------------------------
 // The real tool list from the live server. The bug this guards against: every tool name
@@ -1050,6 +1130,9 @@ check(
 process.env.CTA_TRACK_BASE_URL = 'https://app.test/api/track/cta/'
 check('a trailing slash is tolerated', ctaTrackBaseUrl(), 'https://app.test/api/track/cta')
 check('tracking turns on', isCtaTrackingEnabled(), true)
+// The CRM status nudge's tracked template must go through the tracker once one is configured —
+// otherwise its button points straight at the console and the click is never attributable.
+check('review tracked template button goes through the tracker', templateButtonUrlFor('documents_submitted_review_cta'), `${ctaTrackBaseUrl()}/{{1}}`)
 check('with tracking on the button param is the token', ctaButtonParam({ token: 'abc-123', mobileDigits: '9876543210' }), 'abc-123')
 check(
   'with tracking on the button points at the tracker',
@@ -1161,7 +1244,7 @@ const waNudges = DEFAULT_NUDGES.filter((n) => n.channel === 'whatsapp' && n.what
 const shouldTrack = waNudges.filter((n) => templateHasButton(n.whatsappTemplateName))
 check('every button template is tracked', shouldTrack.every((n) => isTrackedTemplate(n.whatsappTemplateName)), true)
 check('templates without a button stay untracked', waNudges.filter((n) => !templateHasButton(n.whatsappTemplateName)).every((n) => !isTrackedTemplate(n.whatsappTemplateName)), true)
-check('8 templates are tracked', shouldTrack.length, 8)
+check('9 templates are tracked', shouldTrack.length, 9)
 // The retired MARKETING templates must not be resurrected by this change.
 check(
   'no nudge points at a retired MARKETING template',
