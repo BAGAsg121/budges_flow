@@ -729,8 +729,14 @@ row, so UI edits are safe. Refresh definitions deliberately with:
 
 ```bash
 npm run seed:nudges           # create-if-missing + targeting report
-npm run seed:nudges -- --force   # also refresh templates/filters on existing rows
+npm run seed:nudges -- --force                            # refresh templates/filters on existing rows
+npm run seed:nudges -- --force --only documents_pending_wa  # refresh ONE nudge
 ```
+
+`--only` takes one key or several comma-separated. It exists because `--force` rewrites **every**
+nudge, so changing one nudge's criteria should not mean re-asserting the configuration of the other
+fifteen — some of which have been edited in the UI. `enabled` is operator state and is never touched
+by either flag.
 
 | Key | Trigger | Who it targets |
 | --- | --- | --- |
@@ -738,35 +744,43 @@ npm run seed:nudges -- --force   # also refresh templates/filters on existing ro
 | `documents_pending` | Zoho sync | status = `Agreement Signed` **and** `KYC_Document_Upload_Count <= 10` → complete the document upload |
 | `onboarded_transacting` | **Manual — Google Sheet** | expiring-discount activation-fee reminder with a pay CTA |
 | `onboarded_not_transacting` | **Manual — Google Sheet** | account-activated + integration next steps, then the discount reminder with a pay CTA |
-| `documents_pending_wa` | Zoho sync | WhatsApp twin of `documents_pending` (disabled until Meta approves the template) |
+| `documents_pending_wa` | Zoho sync | **same pool** as `documents_submitted_review` (EPS + `Documents Pending`) but the opposite comparison: `KYC_Document_Upload_Count` **<** `KYC_Documents_Expected_Count` → document upload still pending. At most one a day, max 7 |
 | `documents_submitted_review` | Zoho sync **or** CRM webhook | EPS leads whose `KYC_Document_Upload_Count` **equals** `KYC_Documents_Expected_Count` → "we've received everything, it's under review", with a console CTA |
 
-### "All documents submitted" — the KYC count match
+### The two KYC count rules — one pool, opposite comparisons
 
-`documents_submitted_review` fires on a **count comparison**, not a status change: Zoho's
-`Documents Pending` status stays put while documents trickle in, so status alone cannot tell "still
-uploading" from "finished uploading". The two counts can.
+`documents_pending_wa` and `documents_submitted_review` share the same candidate pool (business
+vertical EPS, lead status `Documents Pending`) and differ only in the comparison, so they partition
+the cohort rather than overlapping:
 
-The rule lives in `src/lib/kyc-match.ts` and the guards are the whole point. Measured on the live
-CRM — 39 EPS leads with status `Documents Pending`:
+| Rule | Nudge | Meaning | Measured today |
+| --- | --- | --- | --- |
+| `less_than` | `documents_pending_wa` | upload **<** expected → still outstanding | 13 leads |
+| `equals` | `documents_submitted_review` | upload **==** expected → under review | 1 lead |
 
-| Situation | Count | Decision |
+13 + 1 = the 14 leads that have both counts. Both rules live in `src/lib/kyc-match.ts` and are
+applied through one function (`splitByKycMatch`) that `runNudge`, `previewNudge` and the CRM webhook
+all call — a filter that compares two columns of the same row cannot be expressed in a Prisma
+`where`, and duplicating it in three callers is how the definitions drift apart.
+
+The guards are the whole point. Measured on the live CRM — 39 EPS leads with status
+`Documents Pending`:
+
+| Situation | Count | Decision (both rules) |
 | --- | --- | --- |
 | `expected` is **NULL** | 25 of 39 (64%) | **refused** — `kyc_expected_unknown` |
-| counts present and equal | 1 | **sent** |
-| counts present and different | 13 | refused — `kyc_counts_differ` |
 | `expected` is 0 | 0 | refused — `kyc_expected_zero` |
+| upload missing | 0 | refused — `kyc_upload_unknown` |
+| counts present but unequal | 13 | `less_than` sends; `equals` refuses |
+| counts present and equal | 1 | `equals` sends; `less_than` refuses |
 
-An unknown expectation means *we do not know what complete looks like*, which must never be treated
-as complete. `null === null` and `0 === 0` are both `true` in JavaScript, so a naive equality test
-would have nudged 25 of those 39 leads with the false claim that their documents are all in. A lead
-that has uploaded **more** than expected is also refused: that is a data anomaly for a human, not a
-"you're done".
-
-The comparison is between two columns of the same row, which Prisma cannot express in a `where`, so
-it runs in memory — through one function (`splitByKycMatch`) that `runNudge`, `previewNudge` and the
-CRM webhook all call. Rejections are reported with their reason, so a run that sends nothing explains
-itself instead of looking broken.
+An unknown expectation means *we do not know what complete looks like*, and must never satisfy either
+rule. For `equals` the danger is `null === null` being `true` — a naive test would have nudged 25 of
+those 39 leads with the false claim that everything was in. For `less_than` the danger is quieter:
+`upload < null` coerces to `upload < 0` in JS, so the leads would have vanished silently instead of
+being reported. The rule is declared as `kycCountRule: 'less_than' | 'equals'`; setting both that and
+the older `kycMatchesExpected: true` to *different* rules is treated as a conflict that refuses the
+whole batch and says so, rather than being resolved by guessing.
 
 `KYC_Documents_Expected_Count` is synced into `nudge_lead.kycDocumentsExpectedCount`:
 
@@ -776,6 +790,23 @@ npm run db:add-kyc-expected-column -- --apply  # additive ALTER TABLE only
 ```
 
 Nothing is backfilled — existing rows stay NULL until their next sync, and NULL never matches.
+
+### Cadence ("once a day", "once per recipient")
+
+The sequence rule moved to `src/lib/sequence.ts`, which imports no database, so the promises the
+config rows make are actually tested instead of assumed:
+
+| Order | Check | Result |
+| --- | --- | --- |
+| 1 | the lead has replied | stop, permanently |
+| 2 | the LAST attempt hit Meta's cap | wait out `DELIVERY_CAP_BACKOFF_HOURS` (a later success clears it) |
+| 3 | `maxEmailsPerLead` successful sends reached | stop, permanently |
+| 4 | `followUpDays` not yet elapsed since the last success | wait |
+
+Only **successful** sends count towards the cap, and the gap is measured from the last success — a
+failed attempt must not consume the allowance, or one transient provider error would end the
+sequence. So `followUpDays: 1` really does mean "at most one a day" (1h or 23h after a send → wait;
+24h → eligible), and `maxEmailsPerLead: 7` bounds it at a week of daily reminders.
 
 ### Two things that will bite you
 

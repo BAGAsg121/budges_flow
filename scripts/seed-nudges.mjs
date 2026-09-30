@@ -2,24 +2,41 @@
  * Create the built-in nudges (create-if-missing) and report who each one targets.
  *
  *   node --env-file=.env scripts/seed-nudges.mjs
- *   node --env-file=.env scripts/seed-nudges.mjs --force   # also refresh templates on existing rows
+ *   node --env-file=.env scripts/seed-nudges.mjs --force                 # refresh every existing row
+ *   node --env-file=.env scripts/seed-nudges.mjs --force --only dp_wa     # refresh ONE nudge
  *
  * Create-if-missing is the default so that edits made in the UI are never silently
- * reverted. --force is opt-in and overwrites the template/filter fields only.
+ * reverted. --force is opt-in and overwrites the template/filter fields only; `enabled` is
+ * operator state and is never touched.
+ *
+ * --only exists because --force rewrites EVERY nudge: changing one nudge's criteria should not
+ * mean re-asserting the configuration of the other fifteen, some of which have been edited in the
+ * UI. Pass one key or several comma-separated.
  */
 import { PrismaClient } from '@prisma/client'
 import { DEFAULT_NUDGES, LEAD_STATUS, KYC_COMPLETE_AT, ZOHO_CRITERIA } from '../src/lib/nudge-defaults.ts'
 import { collectMysqlRecipients, isMysqlFlowKey } from '../src/lib/mysql-nudges.ts'
+import { splitByKycMatch } from '../src/lib/kyc-match.ts'
 import { closeSbPool } from '../src/lib/sb-db.ts'
 
 const db = new PrismaClient()
 const force = process.argv.includes('--force')
 
+const onlyArgIndex = process.argv.indexOf('--only')
+const only = onlyArgIndex >= 0 ? new Set((process.argv[onlyArgIndex + 1] || '').split(',').map((s) => s.trim()).filter(Boolean)) : null
+if (onlyArgIndex >= 0 && (!only || only.size === 0)) {
+  console.error('--only needs at least one nudge key, e.g. --only documents_pending_wa')
+  process.exit(2)
+}
+
 console.log('Zoho fetch criteria:')
 console.log('  ' + ZOHO_CRITERIA)
 console.log('  (EPS leads created after ' + ZOHO_CRITERIA.match(/greater_than:([^)]+)/)?.[1] + ' — no KYC or status filter at fetch time)\n')
+if (only) console.log(`--only ${[...only].join(', ')} — every other nudge is left alone\n`)
 
 for (const seed of DEFAULT_NUDGES) {
+  if (only && !only.has(seed.key)) continue
+
   const existing = await db.nudge.findUnique({ where: { key: seed.key }, select: { id: true, enabled: true } })
 
   if (!existing) {
@@ -35,6 +52,10 @@ for (const seed of DEFAULT_NUDGES) {
   } else {
     console.log(`exists    ${seed.key}  (left untouched — use --force to refresh the copy)`)
   }
+}
+if (only) {
+  const missing = [...only].filter((k) => !DEFAULT_NUDGES.some((s) => s.key === k))
+  if (missing.length) console.log(`\n⚠️  --only named keys that are not built-in nudges: ${missing.join(', ')}`)
 }
 
 // ---- who would each nudge target? -----------------------------------------
@@ -89,6 +110,7 @@ for (const n of all) {
   const where = {}
   if (f.includeStatuses?.length) where.leadStatus = { in: f.includeStatuses }
   else if (f.excludeStatuses?.length) where.leadStatus = { notIn: f.excludeStatuses }
+  if (f.businessVertical) where.businessVertical = f.businessVertical
   if (f.maxKycCount !== undefined) {
     // A missing KYC value counts as 0 ("nothing uploaded yet"), so NULL is included
     // alongside `<= max`.
@@ -98,9 +120,29 @@ for (const n of all) {
   }
   if (and.length) where.AND = and
 
-  const n_count = await db.lead.count({ where })
+  // The count rule (equals / less_than) compares two columns of the same row, so a COUNT query
+  // cannot express it — and reporting the pre-rule number would overstate the audience badly.
+  // Measured example: the Documents Pending cohort is 40 leads, but only 1 satisfies "counts equal"
+  // and 13 satisfy "upload < expected". So fetch the cohort and apply the SAME predicate the send
+  // path uses.
+  const cohort = await db.lead.findMany({ where })
+  const { kept, rejected } = splitByKycMatch(cohort, f)
+
   const who = n.channel === 'email' ? 'with an email' : 'with a phone'
-  console.log(`  ${n.key.padEnd(30)} ${String(n_count).padStart(4)} lead(s) ${who}  ${f.includeStatuses ? '· ' + f.includeStatuses.join(', ') : ''}${f.maxKycCount !== undefined ? ` · KYC <= ${f.maxKycCount} or unset` : ''}`)
+  const rule = f.kycCountRule || (f.kycMatchesExpected ? 'equals' : null)
+  const ruleText = rule === 'less_than' ? ' · upload < expected' : rule === 'equals' ? ' · upload = expected' : ''
+  const refusalText = rejected.length
+    ? ` (of ${cohort.length} in the pool; ${Object.entries(
+        rejected.reduce((m, r) => ({ ...m, [r.reason]: (m[r.reason] ?? 0) + 1 }), {})
+      )
+        .map(([k, v]) => `${k}×${v}`)
+        .join(', ')})`
+    : ''
+  console.log(
+    `  ${n.key.padEnd(30)} ${String(kept.length).padStart(4)} lead(s) ${who}  ` +
+      `${f.includeStatuses ? '· ' + f.includeStatuses.join(', ') : ''}` +
+      `${f.maxKycCount !== undefined ? ` · KYC <= ${f.maxKycCount} or unset` : ''}${ruleText}${refusalText}`
+  )
 }
 
 // ---- lead data integrity ---------------------------------------------------

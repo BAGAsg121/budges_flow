@@ -23,6 +23,7 @@ import { renderTemplate, injectTrackingPixel, htmlToText } from '@/lib/template'
 import { collectMysqlRecipients, isMysqlFlowKey } from '@/lib/mysql-nudges'
 import { buildWhatsAppParams } from '@/lib/whatsapp-params'
 import { isDeliveryCapError, capBackoffHours } from '@/lib/whatsapp-errors'
+import { decideSend, type SendDecision, type SequenceLog } from '@/lib/sequence'
 import { ctaSendParams } from '@/lib/cta'
 import { ctaDestinationFor } from '@/lib/nudge-defaults'
 import { splitByKycMatch, type KycCounts } from '@/lib/kyc-match'
@@ -296,74 +297,9 @@ export async function syncLeads(criteria: string, opts: { via?: 'mcp' | 'api' | 
   return { synced, via: 'api' }
 }
 
-interface SendDecision {
-  action: 'send' | 'skip'
-  reason?: string
-  detail?: string
-  messageNumber?: number
-}
-
-/** The parts of a MessageLog row the sequence logic needs. */
-interface SequenceLog {
-  sentOk: boolean
-  replied: boolean
-  sentAt: Date | null
-  createdAt: Date
-  sendError: string | null
-}
-
-function decideSend(
-  logs: SequenceLog[],
-  maxEmailsPerLead: number,
-  followUpDays: number,
-  now: Date
-): SendDecision {
-  if (logs.some((l) => l.replied)) return { action: 'skip', reason: 'replied' }
-
-  // Meta's per-user marketing cap drops a message it will accept again later. Retrying on
-  // every scheduler cycle just repeats the same failure and floods the log, so wait out the
-  // cap instead. Only the MOST RECENT failure matters: a later success clears it.
-  const newest = [...logs].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0]
-  if (newest && !newest.sentOk && isDeliveryCapError(newest.sendError)) {
-    const retryAt = new Date(newest.createdAt.getTime() + capBackoffHours() * 60 * 60 * 1000)
-    if (now < retryAt) {
-      return {
-        action: 'skip',
-        reason: 'delivery_cap_backoff',
-        detail: `Meta capped this recipient — retry after ${retryAt.toISOString().slice(0, 16).replace('T', ' ')}`,
-      }
-    }
-  }
-
-  const sentOkLogs = logs.filter((l) => l.sentOk && l.sentAt)
-  if (sentOkLogs.length >= maxEmailsPerLead) {
-    return { action: 'skip', reason: 'max_reached', detail: `${sentOkLogs.length}/${maxEmailsPerLead} already sent` }
-  }
-
-  if (sentOkLogs.length > 0 && followUpDays > 0) {
-    const lastSentAt = sentOkLogs
-      .map((l) => l.sentAt as Date)
-      .sort((a, b) => b.getTime() - a.getTime())[0]
-    const nextEligibleAt = new Date(lastSentAt.getTime() + followUpDays * 24 * 60 * 60 * 1000)
-    if (now < nextEligibleAt) {
-      return {
-        action: 'skip',
-        reason: 'waiting_followup',
-        detail: `next eligible ${nextEligibleAt.toISOString().slice(0, 16).replace('T', ' ')}`,
-      }
-    }
-  }
-
-  return { action: 'send', messageNumber: sentOkLogs.length + 1 }
-}
-
 /**
- * Public alias for the sequence decision, for callers outside this module (the CRM webhook).
- *
- * Exported as its own name rather than re-exporting `decideSend` so that the webhook reads as
- * "ask the same sequence question", and so the internal name stays free to change. A webhook that
- * decided "has this lead already been messaged?" on its own is exactly how one lead receives the
- * same nudge twice.
+ * The sequence rule now lives in src/lib/sequence.ts, which has no database imports so the verify
+ * script can test the cadences directly. Re-exported under the public name the webhook uses.
  */
 export const sequenceDecision = decideSend
 

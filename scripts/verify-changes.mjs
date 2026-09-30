@@ -5,7 +5,8 @@
  */
 import { renderTemplate, escapeHtml, injectTrackingPixel, htmlToText } from '../src/lib/template.ts'
 import { isCronAuthorized, isWebhookAuthorized } from '../src/lib/cron-auth.ts'
-import { checkKycCounts, kycCountsMatch, requiresKycMatch, splitByKycMatch as applyRowPredicates } from '../src/lib/kyc-match.ts'
+import { checkKycCounts, kycCountsMatch, requiresKycMatch, kycRuleOf, hasKycRule, splitByKycMatch } from '../src/lib/kyc-match.ts'
+import { decideSend, sentLog } from '../src/lib/sequence.ts'
 import { DEFAULT_NUDGES, ZOHO_CRITERIA, LEAD_STATUS, PAY_ACTIVATION_FEE_URL, WHATSAPP_TEST_STATUS, MYSQL_FLOW_TEMPLATES, WA_SHEET_FLOW_TEMPLATES, ZOHO_FLOW_TEMPLATES, EPS_BUSINESS_VERTICAL, zohoDocumentsPendingCriteria, MYSQL_FLOW_LOOKBACK, CONSOLE_URL, zohoTodayIso, zohoTodayCriteria, zohoCriteriaSince, ZOHO_LEADS_CREATED_AFTER, ZOHO_TZ_OFFSET, zohoCriteriaBetween, zohoIstIso, zohoSyncOverlapMinutes } from '../src/lib/nudge-defaults.ts'
 import { MYSQL_FLOW_KEYS, isMysqlFlowKey } from '../src/lib/mysql-nudges.ts'
 import { buildWhatsAppParams as buildWhatsAppParamsRaw, missingSheetColumns as missingSheetColumnsRaw } from '../src/lib/whatsapp-params.ts'
@@ -516,26 +517,55 @@ check('kyc: a MISSING upload is refused', checkKycCounts({ kycDocumentUploadCoun
 check('kyc: missing upload gives its own reason', checkKycCounts({ kycDocumentUploadCount: null, kycDocumentsExpectedCount: 11 }).reason, 'kyc_upload_unknown')
 check('kyc: uploading MORE than expected is not a match (needs a human)', checkKycCounts({ kycDocumentUploadCount: 12, kycDocumentsExpectedCount: 11 }).matches, false)
 check('kyc: the boolean helper agrees', kycCountsMatch(kycOk), true)
+
+// --- the less_than rule (the Documents Pending reminder) ----------------------
+check('less_than: fewer uploaded than expected matches', checkKycCounts({ kycDocumentUploadCount: 6, kycDocumentsExpectedCount: 11 }, 'less_than').matches, true)
+check('less_than: 0 uploaded matches', checkKycCounts({ kycDocumentUploadCount: 0, kycDocumentsExpectedCount: 11 }, 'less_than').matches, true)
+check('less_than: equal counts do NOT match', checkKycCounts({ kycDocumentUploadCount: 11, kycDocumentsExpectedCount: 11 }, 'less_than').matches, false)
+check('less_than: equal counts give the not_less reason', checkKycCounts({ kycDocumentUploadCount: 11, kycDocumentsExpectedCount: 11 }, 'less_than').reason, 'kyc_counts_not_less')
+check('less_than: MORE than expected does not match', checkKycCounts({ kycDocumentUploadCount: 12, kycDocumentsExpectedCount: 11 }, 'less_than').matches, false)
+// The guards must hold for BOTH rules, not just equals: `upload < null` coerces to `upload < 0`
+// in JS, which would drop the lead silently instead of reporting why.
+check('less_than: an UNKNOWN expected count is refused, not coerced', checkKycCounts({ kycDocumentUploadCount: 6, kycDocumentsExpectedCount: null }, 'less_than').matches, false)
+check('less_than: unknown expected gives the unknown reason', checkKycCounts({ kycDocumentUploadCount: 6, kycDocumentsExpectedCount: null }, 'less_than').reason, 'kyc_expected_unknown')
+check('less_than: expected 0 is refused', checkKycCounts({ kycDocumentUploadCount: 0, kycDocumentsExpectedCount: 0 }, 'less_than').reason, 'kyc_expected_zero')
+check('less_than: a missing upload is refused', checkKycCounts({ kycDocumentUploadCount: null, kycDocumentsExpectedCount: 11 }, 'less_than').reason, 'kyc_upload_unknown')
+
+// --- rule resolution (enum, with the legacy boolean spelling) -----------------
+check('rule: no filter means no rule', kycRuleOf({}), null)
+check('rule: the enum is read (less_than)', kycRuleOf({ kycCountRule: 'less_than' }), 'less_than')
+check('rule: the enum is read (equals)', kycRuleOf({ kycCountRule: 'equals' }), 'equals')
+check('rule: the legacy boolean still means equals', kycRuleOf({ kycMatchesExpected: true }), 'equals')
+check('rule: the legacy boolean false means no rule', kycRuleOf({ kycMatchesExpected: false }), null)
+check('rule: the two spellings agreeing is fine', kycRuleOf({ kycCountRule: 'equals', kycMatchesExpected: true }), 'equals')
+// Contradictory configuration must NOT be silently resolved in either direction.
+check('rule: the two spellings disagreeing is a conflict', kycRuleOf({ kycCountRule: 'less_than', kycMatchesExpected: true }), 'conflict')
+check('rule: a conflict refuses the whole batch', splitByKycMatch([kycOk], { kycCountRule: 'less_than', kycMatchesExpected: true }).kept.length, 0)
+check('rule: a conflict is reported, not silent', splitByKycMatch([kycOk], { kycCountRule: 'less_than', kycMatchesExpected: true }).rejected[0].reason, 'kyc_rule_conflict')
+check('rule: hasKycRule is false when unset', hasKycRule({}), false)
+check('rule: hasKycRule is true when set', hasKycRule({ kycCountRule: 'equals' }), true)
 check('kyc: the filter is off unless asked for', requiresKycMatch({}), false)
 check('kyc: the filter is on when true', requiresKycMatch({ kycMatchesExpected: true }), true)
 check('kyc: a truthy non-true value does not switch it on', requiresKycMatch({ kycMatchesExpected: 1 }), false)
 
-// applyRowPredicates is the single place the rule is applied, shared by runNudge, previewNudge
-// and the CRM webhook — so its keep/reject split must be exact.
+// splitByKycMatch is the single place a rule is applied, shared by runNudge, previewNudge and the
+// CRM webhook — so its keep/reject split must be exact.
 const kycRows = [
   { id: 'a', kycDocumentUploadCount: 11, kycDocumentsExpectedCount: 11 },
   { id: 'b', kycDocumentUploadCount: 6, kycDocumentsExpectedCount: 11 },
   { id: 'c', kycDocumentUploadCount: null, kycDocumentsExpectedCount: null },
 ]
-check('row predicates: off means everything passes', applyRowPredicates(kycRows, {}).kept.length, 3)
-check('row predicates: off rejects nothing', applyRowPredicates(kycRows, {}).rejected.length, 0)
-check('row predicates: on keeps exactly the match', applyRowPredicates(kycRows, { kycMatchesExpected: true }).kept.map((r) => r.id).join(','), 'a')
-check('row predicates: on rejects the other two', applyRowPredicates(kycRows, { kycMatchesExpected: true }).rejected.length, 2)
+check('row predicates: off means everything passes', splitByKycMatch(kycRows, {}).kept.length, 3)
+check('row predicates: off rejects nothing', splitByKycMatch(kycRows, {}).rejected.length, 0)
+check('row predicates: equals keeps exactly the match', splitByKycMatch(kycRows, { kycCountRule: 'equals' }).kept.map((r) => r.id).join(','), 'a')
+check('row predicates: equals rejects the other two', splitByKycMatch(kycRows, { kycCountRule: 'equals' }).rejected.length, 2)
 check(
   'row predicates: each rejection carries its reason',
-  applyRowPredicates(kycRows, { kycMatchesExpected: true }).rejected.map((r) => r.reason).join(','),
+  splitByKycMatch(kycRows, { kycCountRule: 'equals' }).rejected.map((r) => r.reason).join(','),
   'kyc_counts_differ,kyc_expected_unknown'
 )
+check('row predicates: less_than keeps exactly the shortfall', splitByKycMatch(kycRows, { kycCountRule: 'less_than' }).kept.map((r) => r.id).join(','), 'b')
+check('row predicates: less_than rejects the equality', splitByKycMatch(kycRows, { kycCountRule: 'less_than' }).rejected.map((r) => r.reason).join(','), 'kyc_counts_not_less,kyc_expected_unknown')
 
 // --- the documents-submitted-review nudge -----------------------------------
 const reviewNudge = DEFAULT_NUDGES.find((n) => n.key === 'documents_submitted_review')
@@ -546,7 +576,8 @@ check('review nudge ships disabled until its template is approved', reviewNudge?
 check('review nudge requires a phone', reviewFilters.requirePhone, true)
 check('review nudge is scoped to the Documents Pending status', JSON.stringify(reviewFilters.includeStatuses), JSON.stringify([LEAD_STATUS.DOCUMENTS_PENDING]))
 check('review nudge is scoped to the EPS vertical', reviewFilters.businessVertical, EPS_BUSINESS_VERTICAL)
-check('review nudge turns on the KYC match rule', reviewFilters.kycMatchesExpected, true)
+check('review nudge uses the equals rule', reviewFilters.kycCountRule, 'equals')
+check('review nudge uses no legacy rule spelling', reviewFilters.kycMatchesExpected, undefined)
 check('review nudge does not also set a KYC range', reviewFilters.maxKycCount === undefined && reviewFilters.minKycCount === undefined, true)
 check('review nudge syncs on EPS', reviewNudge?.zohoCriteria?.includes('Business_vertical:equals:EPS'), true)
 check('review nudge syncs on the Documents Pending status', reviewNudge?.zohoCriteria?.includes('Lead_Status:equals:Documents Pending'), true)
@@ -576,6 +607,82 @@ check('review destination fills in the mobile', ctaDestinationFor('documents_sub
 check('review nudge flows through the webhook-able Zoho source', nudgeSourceOf({ zohoCriteria: reviewNudge?.zohoCriteria ?? null, filters: reviewNudge?.filters ?? '{}' }), 'zoho')
 // Every CRM-driven nudge must be reachable from the webhook; a MySQL flow must not be offered.
 check('a mysql nudge is not offered to the CRM webhook', nudgeSourceOf({ zohoCriteria: null, filters: '{"source":"mysql","flow":"mobile_otp_pending"}' }), 'mysql')
+
+// --- documents_pending_wa: same pool, inverted rule, daily cadence -----------
+const dpWa = DEFAULT_NUDGES.find((n) => n.key === 'documents_pending_wa')
+const dpWaFilters = dpWa ? JSON.parse(dpWa.filters) : {}
+check('dp_wa exists', Boolean(dpWa), true)
+check('dp_wa is a WhatsApp nudge', dpWa?.channel, 'whatsapp')
+check('dp_wa uses the SAME sync criteria as the review nudge', dpWa?.zohoCriteria, zohoDocumentsPendingCriteria())
+check('dp_wa targets the same Documents Pending status', JSON.stringify(dpWaFilters.includeStatuses), JSON.stringify([LEAD_STATUS.DOCUMENTS_PENDING]))
+check('dp_wa targets the same EPS vertical', dpWaFilters.businessVertical, EPS_BUSINESS_VERTICAL)
+check('dp_wa uses the less_than rule (the difference from the review nudge)', dpWaFilters.kycCountRule, 'less_than')
+check('dp_wa no longer filters on the old Agreement Signed status', JSON.stringify(dpWaFilters.includeStatuses).includes(LEAD_STATUS.AGREEMENT_SIGNED), false)
+check('dp_wa no longer uses the KYC range filter', dpWaFilters.maxKycCount === undefined && dpWaFilters.minKycCount === undefined, true)
+check('dp_wa requires a phone', dpWaFilters.requirePhone, true)
+check('dp_wa keeps its approved template', dpWa?.whatsappTemplateName, 'documents_pending_reminder')
+check('dp_wa language is en_US', dpWa?.whatsappLanguage, 'en_US')
+// "Once in a day": exactly one day between sends, bounded at a week of reminders.
+check('dp_wa sends at most once a day', dpWa?.followUpDays, 1)
+check('dp_wa is capped at 7 messages, not unlimited', dpWa?.maxEmailsPerLead, 7)
+// The two nudges must be mutually exclusive: one fires below the target, the other exactly on it.
+const belowTarget = { kycDocumentUploadCount: 6, kycDocumentsExpectedCount: 11 }
+check('a shortfall lead matches ONLY dp_wa, not the review nudge', `${checkKycCounts(belowTarget, 'less_than').matches}/${checkKycCounts(belowTarget, 'equals').matches}`, 'true/false')
+const onTarget = { kycDocumentUploadCount: 11, kycDocumentsExpectedCount: 11 }
+check('a complete lead matches ONLY the review nudge, not dp_wa', `${checkKycCounts(onTarget, 'equals').matches}/${checkKycCounts(onTarget, 'less_than').matches}`, 'true/false')
+
+// --- the send-sequence rule (the cadence promises) ---------------------------
+// Extracted to src/lib/sequence.ts specifically so these can be tested: "once in a day" is
+// otherwise only a number in a config row.
+const seqNow = new Date('2026-09-30T12:00:00Z')
+const dpCadence = DEFAULT_NUDGES.find((n) => n.key === 'documents_pending_wa')
+const maxPer = dpCadence?.maxEmailsPerLead ?? 7
+const gapDays = dpCadence?.followUpDays ?? 1
+
+check('sequence: a first send goes out as message 1', decideSend([], maxPer, gapDays, seqNow).action, 'send')
+check('sequence: the first send is message number 1', decideSend([], maxPer, gapDays, seqNow).messageNumber, 1)
+// "Once in a day": 1h after a send it must wait; 23h59m still waiting; 24h+ it may send again.
+check('sequence: 1h after a send it waits', decideSend([sentLog(seqNow, 1)], maxPer, gapDays, seqNow).action, 'skip')
+check('sequence: the wait reason is waiting_followup', decideSend([sentLog(seqNow, 1)], maxPer, gapDays, seqNow).reason, 'waiting_followup')
+check('sequence: 23h after a send it still waits', decideSend([sentLog(seqNow, 23)], maxPer, gapDays, seqNow).action, 'skip')
+check('sequence: 24h after a send it may send again', decideSend([sentLog(seqNow, 24)], maxPer, gapDays, seqNow).action, 'send')
+check('sequence: the follow-up is message 2', decideSend([sentLog(seqNow, 24)], maxPer, gapDays, seqNow).messageNumber, 2)
+check('sequence: 25h after a send it may send again', decideSend([sentLog(seqNow, 25)], maxPer, gapDays, seqNow).action, 'send')
+// The "once per day" reading in one assertion: two sends in one day are impossible.
+check(
+  'sequence: a send 1h after another is refused (no two in a day)',
+  decideSend([sentLog(seqNow, 1), sentLog(seqNow, 25)], maxPer, gapDays, seqNow).action,
+  'skip'
+)
+// The cap bounds the sequence at 7. Every send here is at least a day old, so the daily gap is
+// satisfied and only the cap can stop it.
+check('sequence: 7 sends in the past is max_reached', decideSend([24, 48, 72, 96, 120, 144, 168].map((h) => sentLog(seqNow, h)), maxPer, gapDays, seqNow).reason, 'max_reached')
+check('sequence: 6 sends in the past may still send', decideSend([24, 48, 72, 96, 120, 144].map((h) => sentLog(seqNow, h)), maxPer, gapDays, seqNow).action, 'send')
+check('sequence: 6 sends makes the next one message 7', decideSend([24, 48, 72, 96, 120, 144].map((h) => sentLog(seqNow, h)), maxPer, gapDays, seqNow).messageNumber, 7)
+// A reply always wins, whatever else is true.
+check('sequence: a reply stops the sequence', decideSend([{ ...sentLog(seqNow, 100), replied: true }], maxPer, gapDays, seqNow).reason, 'replied')
+check('sequence: a reply beats an elapsed follow-up', decideSend([{ ...sentLog(seqNow, 200), replied: true }], maxPer, gapDays, seqNow).action, 'skip')
+// A pending Meta cap is waited out rather than retried every cycle. The stored form is Meta's own
+// wording — isDeliveryCapError reads the code out of "(code N)", not a bare number.
+const capLog = {
+  sentOk: false,
+  replied: false,
+  sentAt: null,
+  createdAt: new Date(seqNow.getTime() - 60 * 60 * 1000),
+  sendError: 'Message failed (code 131049): healthy ecosystem engagement',
+}
+check('sequence: a pending Meta cap is waited out', decideSend([capLog], maxPer, gapDays, seqNow).reason, 'delivery_cap_backoff')
+check('sequence: a pending Meta cap blocks even past the daily gap', decideSend([{ ...capLog, createdAt: new Date(seqNow.getTime() - 20 * 60 * 60 * 1000) }], maxPer, gapDays, seqNow).action, 'skip')
+const oldCapLog = { ...capLog, createdAt: new Date(seqNow.getTime() - 48 * 60 * 60 * 1000) }
+check('sequence: an elapsed cap allows a retry', decideSend([oldCapLog], maxPer, gapDays, seqNow).action, 'send')
+// Only SUCCESSFUL sends count, so a provider failure must not consume the allowance.
+const failedLog = { sentOk: false, replied: false, sentAt: null, createdAt: new Date(seqNow.getTime() - 60 * 60 * 1000), sendError: 'some transient error' }
+check('sequence: a failed attempt does not consume the allowance', decideSend([failedLog], maxPer, gapDays, seqNow).action, 'send')
+check('sequence: a failed attempt is still message 1', decideSend([failedLog], maxPer, gapDays, seqNow).messageNumber, 1)
+// A once-ever nudge (max 1, gap 0) sends exactly once.
+const onceNudge = DEFAULT_NUDGES.find((n) => n.key === 'documents_submitted_review')
+check('sequence: a once-ever nudge sends first time', decideSend([], onceNudge?.maxEmailsPerLead ?? 1, onceNudge?.followUpDays ?? 0, seqNow).action, 'send')
+check('sequence: a once-ever nudge never sends twice', decideSend([sentLog(seqNow, 1000)], onceNudge?.maxEmailsPerLead ?? 1, onceNudge?.followUpDays ?? 0, seqNow).reason, 'max_reached')
 
 // --- Zoho MCP tool selection and argument building ---------------------------
 // The real tool list from the live server. The bug this guards against: every tool name
@@ -1110,8 +1217,8 @@ check(
   true
 )
 checkTrue(
-  'documents_pending_wa (lead-driven) still allows 3',
-  DEFAULT_NUDGES.find((n) => n.key === 'documents_pending_wa')?.maxEmailsPerLead === 3
+  'documents_pending_wa (lead-driven) still allows repeats — it is a daily reminder, not a one-off',
+  DEFAULT_NUDGES.find((n) => n.key === 'documents_pending_wa')?.maxEmailsPerLead === 7
 )
 
 // --- WhatsApp CTA click tracking ----------------------------------------------

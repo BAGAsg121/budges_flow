@@ -618,14 +618,27 @@ export const DEFAULT_NUDGES: NudgeSeed[] = [
     key: 'documents_pending_wa',
     name: 'Documents Pending (WhatsApp)',
     description:
-      'WhatsApp twin of the documents-pending nudge, delivered via the Meta Cloud API. DISABLED until you create and approve the template. To go live: open the Templates tab, create a UTILITY template named "documents_pending_reminder" in language en_US with the body below, wait for approval, then enable this nudge. Its parameters are sent positionally as {{1}}={{first_name}}, {{2}}={{company}}, {{3}}={{kyc_document_upload_count}}. Template body: "Hi {{1}}, your KYC document upload for {{2}} is still pending ({{3}} document(s) uploaded). Please complete it to keep your onboarding moving. - Eko Onboarding Team"',
+      'WhatsApp reminder while a lead still has documents outstanding. Same candidate pool as ' +
+      '"Documents submitted — under review" — business vertical EPS and lead status "Documents Pending" ' +
+      '— but the opposite comparison: it fires when KYC_Document_Upload_Count is LESS THAN ' +
+      'KYC_Documents_Expected_Count. A lead whose expected count is unknown is refused, never ' +
+      'guessed at (see src/lib/kyc-match.ts). Sends the approved Meta template ' +
+      '"documents_pending_reminder" in en_US, positionally as {{1}}={{first_name}}, ' +
+      '{{2}}={{company}}, {{3}}={{kyc_document_upload_count}}. ' +
+      'Cadence: at most once per day per lead, up to 7 messages. Sync/Run driven — no webhook.',
     enabled: false,
     channel: 'whatsapp',
-    zohoCriteria: ZOHO_CRITERIA,
+    // The same criteria as the review nudge: the pool is identical, only the count comparison
+    // differs. Deliberately not `zohoCriteriaSince` — this flow is status-driven, and a Created_Time
+    // cut-off would stop covering older leads that are still uploading.
+    zohoCriteria: zohoDocumentsPendingCriteria(),
     filters: json({
       requirePhone: true,
-      includeStatuses: [LEAD_STATUS.AGREEMENT_SIGNED],
-      maxKycCount: KYC_COMPLETE_AT - 1,
+      includeStatuses: [LEAD_STATUS.DOCUMENTS_PENDING],
+      businessVertical: EPS_BUSINESS_VERTICAL,
+      // upload < expected. The rule lives in kyc-match.ts and is applied in memory, because it
+      // compares two columns of the same row (see that file for why the null guards matter).
+      kycCountRule: 'less_than',
     }),
     bodyTemplate:
       'Hi {{1}}, your KYC document upload for {{2}} is still pending ({{3}} document(s) uploaded). Please complete it to keep your onboarding moving. - Eko Onboarding Team',
@@ -633,8 +646,11 @@ export const DEFAULT_NUDGES: NudgeSeed[] = [
     // Must match the approved template exactly — "en" and "en_US" are different locales.
     whatsappLanguage: 'en_US',
     whatsappParams: json(['first_name', 'company', 'kyc_document_upload_count']),
-    maxEmailsPerLead: 3,
-    followUpDays: 2,
+    // "Once in a day": followUpDays 1 makes the next send eligible 24h after the last one, so a
+    // daily sync sends at most one a day. maxEmailsPerLead bounds it at a week of reminders rather
+    // than repeating forever for a lead who never uploads.
+    maxEmailsPerLead: 7,
+    followUpDays: 1,
   },
 
   // -------------------------------------------------------------------------
@@ -739,7 +755,7 @@ export const DEFAULT_NUDGES: NudgeSeed[] = [
       includeStatuses: [LEAD_STATUS.DOCUMENTS_PENDING],
       businessVertical: EPS_BUSINESS_VERTICAL,
       // The rule this nudge exists for. Applied in memory (two columns of the same row).
-      kycMatchesExpected: true,
+      kycCountRule: 'equals',
     }),
     bodyTemplate: t.body,
     whatsappTemplateName: templateHasButton(t.templateName) ? trackedTemplateName(t.templateName) : t.templateName,
