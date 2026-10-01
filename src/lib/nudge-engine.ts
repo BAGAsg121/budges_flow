@@ -77,6 +77,8 @@ export interface RunSummary {
   nudgeKey: string
   channel: Channel
   syncedFromZoho: number | null
+  /** Which Zoho path did the sync: 'mcp' (preferred) or 'api' (fallback). Null when no sync ran. */
+  syncedVia?: 'mcp' | 'api' | null
   leadsConsidered: number
   sent: number
   failed: number
@@ -661,6 +663,7 @@ export async function runNudge(
     nudgeKey: nudge.key,
     channel,
     syncedFromZoho: null,
+    syncedVia: null,
     leadsConsidered: 0,
     sent: 0,
     failed: 0,
@@ -677,9 +680,18 @@ export async function runNudge(
     return runMysqlNudge(nudge, summary, batchLimit)
   }
 
-  // 1. Optional Zoho sync for this nudge's criteria
+  // 1. Optional Zoho sync for this nudge's criteria.
+  //
+  // This MUST go through syncLeads(), not syncLeadsFromCriteria(): syncLeads prefers the Zoho MCP
+  // server and only falls back to the REST API, which is the whole point of having connected MCP.
+  // It used the REST-only helper, so the Run button and the scheduler bypassed MCP entirely while
+  // /api/zoho/sync used it — and when the REST client credentials stopped being accepted
+  // (`invalid_client_secret`) every nudge run failed to sync at all, even though MCP was fine.
+  // One sync path, MCP-first, everywhere.
   if (opts.sync && nudge.zohoCriteria && nudge.zohoCriteria.trim()) {
-    summary.syncedFromZoho = await syncLeadsFromCriteria(nudge.zohoCriteria.trim())
+    const outcome = await syncLeads(nudge.zohoCriteria.trim())
+    summary.syncedFromZoho = outcome.synced
+    summary.syncedVia = outcome.via
   }
 
   // 2. Select locally

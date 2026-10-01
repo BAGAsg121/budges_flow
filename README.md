@@ -721,6 +721,28 @@ a broken MCP setup, so the UI says which path ran.
 
 ---
 
+### One sync path, MCP-first, everywhere
+
+`syncLeads()` is the only way the app pulls the CRM: it reads through the **Zoho MCP server** when
+that is connected and falls back to the REST API only if MCP fails (reporting the reason). That is
+the whole point of having connected MCP.
+
+> **A divergence worth knowing about.** `/api/zoho/sync` used `syncLeads()`, but `runNudge` and the
+> scheduler called `syncLeadsFromCriteria()` — the **REST-ONLY** helper. So the Run button and every
+> scheduled cycle bypassed the MCP server entirely. It stayed invisible until the REST client
+> credentials were rejected (`invalid_client_secret`): `/api/zoho/sync` kept working through MCP
+> while every nudge run failed to sync at all. Both now use `syncLeads()`, and the run summary
+> reports which path was used (`syncedVia`). Six assertions guard the wiring, since "which helper
+> does the send path call" is not something a unit test can see.
+
+If MCP is connected, a broken REST client ID/secret no longer matters. Check either path with:
+
+```bash
+npm run mcp:check     # MCP config + OAuth discovery
+npm run mcp:tools     # connect and list every MCP tool (read-only)
+npm run email:check   # unrelated, but the same "is this wired up" idea
+```
+
 ## Built-in nudges
 
 All defined in `src/lib/nudge-defaults.ts` (single source of truth for the Zoho criteria and

@@ -10,7 +10,7 @@
  * run past a request timeout; the remainder is picked up on the next cycle.
  */
 import { db } from '@/lib/db'
-import { runNudge, syncLeadsFromCriteria, type RunSummary } from '@/lib/nudge-engine'
+import { runNudge, syncLeads, type RunSummary } from '@/lib/nudge-engine'
 import { getStaticBaseUrl } from '@/lib/base-url'
 import { isImapConfigured, syncRepliesFromImap, type ImapSyncResult } from '@/lib/reply-tracker'
 import { nudgeSourceOf } from '@/lib/nudge-kind'
@@ -128,14 +128,18 @@ export async function runAllEnabledNudges(opts?: { sync?: boolean; limit?: numbe
   //
   // A failed sync is NOT swallowed into "ran on stale data": the nudges that would have used that
   // criteria are reported as errored and skipped, exactly as they were when the sync was per-nudge.
-  const syncOutcome = new Map<string, { count: number } | { error: string }>()
+  const syncOutcome = new Map<string, { count: number; via: 'mcp' | 'api' } | { error: string }>()
   if (sync) {
     const criterias = new Set(
       nudges.map((n) => (n.zohoCriteria || '').trim()).filter((c) => c.length > 0)
     )
     for (const criteria of criterias) {
       try {
-        syncOutcome.set(criteria, { count: await syncLeadsFromCriteria(criteria) })
+        // syncLeads, NOT syncLeadsFromCriteria: MCP first, REST only as a fallback. Using the
+        // REST-only helper here (and inside runNudge) bypassed the connected MCP server and made
+        // every scheduled run depend on REST credentials that are currently rejected.
+        const outcome = await syncLeads(criteria)
+        syncOutcome.set(criteria, { count: outcome.synced, via: outcome.via })
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         syncOutcome.set(criteria, { error: message })
@@ -162,7 +166,10 @@ export async function runAllEnabledNudges(opts?: { sync?: boolean; limit?: numbe
       // sync:false — the refresh already happened above, once for this criteria.
       const summary = await runNudge(nudge.id, baseUrl, { sync: false, limit: limit ?? undefined })
       // Report the shared sync's count so the run summary still says what was pulled.
-      if (synced && 'count' in synced) summary.syncedFromZoho = synced.count
+      if (synced && 'count' in synced) {
+        summary.syncedFromZoho = synced.count
+        summary.syncedVia = synced.via
+      }
       results.push({ nudgeKey: nudge.key, name: nudge.name, channel: nudge.channel, summary })
     } catch (err) {
       results.push({

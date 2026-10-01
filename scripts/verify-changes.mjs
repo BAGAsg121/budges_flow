@@ -3,6 +3,7 @@
  * Run: node scripts/verify-changes.mjs
  * (No server, no child processes — safe under a locked-down environment.)
  */
+import { readFileSync } from 'node:fs'
 import { renderTemplate, escapeHtml, injectTrackingPixel, htmlToText } from '../src/lib/template.ts'
 import { isCronAuthorized, isWebhookAuthorized } from '../src/lib/cron-auth.ts'
 import { checkKycCounts, kycCountsMatch, requiresKycMatch, kycRuleOf, hasKycRule, splitByKycMatch } from '../src/lib/kyc-match.ts'
@@ -683,6 +684,33 @@ check('sequence: a failed attempt is still message 1', decideSend([failedLog], m
 const onceNudge = DEFAULT_NUDGES.find((n) => n.key === 'documents_submitted_review')
 check('sequence: a once-ever nudge sends first time', decideSend([], onceNudge?.maxEmailsPerLead ?? 1, onceNudge?.followUpDays ?? 0, seqNow).action, 'send')
 check('sequence: a once-ever nudge never sends twice', decideSend([sentLog(seqNow, 1000)], onceNudge?.maxEmailsPerLead ?? 1, onceNudge?.followUpDays ?? 0, seqNow).reason, 'max_reached')
+
+// --- the Zoho sync path must be MCP-first everywhere -------------------------
+// The bug this guards: runNudge and the scheduler called syncLeadsFromCriteria (REST-ONLY) while
+// /api/zoho/sync used syncLeads (MCP-first). So the Run button and every scheduled cycle bypassed
+// the connected MCP server — contradicting the whole reason MCP was connected — and the moment the
+// REST client credentials were rejected (`invalid_client_secret`) every nudge run failed to sync
+// even though MCP was working. A source-level assertion is crude, but "which helper does the send
+// path call" is a wiring decision that no unit test can see, and this is the second time the two
+// paths have diverged.
+const engineSource = readFileSync(new URL('../src/lib/nudge-engine.ts', import.meta.url), 'utf8')
+const schedulerSource = readFileSync(new URL('../src/lib/scheduler.ts', import.meta.url), 'utf8')
+const restHelperCalls = (src) => (src.match(/(?:await|=)\s*syncLeadsFromCriteria\s*\(/g) ?? []).length
+
+check('the scheduler never calls the REST-only sync helper', restHelperCalls(schedulerSource), 0)
+check('the scheduler imports the MCP-first sync', /import\s*\{[^}]*\bsyncLeads\b/.test(schedulerSource), true)
+// In the engine, EVERY call to syncLeadsFromCriteria must be inside syncLeads() itself — its MCP
+// fallback and its explicit via:'api' branch. Any call elsewhere means some other path silently
+// went back to REST-only. Scoped to the function body so the definition and comments do not count.
+const syncLeadsBody = engineSource.slice(
+  engineSource.indexOf('export async function syncLeads('),
+  engineSource.indexOf('export async function', engineSource.indexOf('export async function syncLeads(') + 10)
+)
+check('syncLeads is where the REST fallback lives', restHelperCalls(syncLeadsBody), 2)
+check('no REST-only sync call exists outside syncLeads', restHelperCalls(engineSource) - restHelperCalls(syncLeadsBody), 0)
+check('the engine also calls the MCP-first sync where it syncs a run', /syncLeads\(nudge\.zohoCriteria\.trim\(\)\)/.test(engineSource), true)
+check('runNudge no longer syncs via the REST-only helper', /syncLeadsFromCriteria\(nudge\.zohoCriteria/.test(engineSource), false)
+check('the run summary reports which path synced', /syncedVia/.test(engineSource), true)
 
 // --- Zoho MCP tool selection and argument building ---------------------------
 // The real tool list from the live server. The bug this guards against: every tool name

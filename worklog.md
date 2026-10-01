@@ -897,3 +897,24 @@ Stage Summary:
 - Still owed: `documents_submitted_review` should be enabled now that its template is approved (its 1 matching lead has not been messaged). Still owed from Task 35: a real `npm run build` in this environment.
 
 ---
+
+Task ID: 38
+Agent: Main agent (DeepSeek Harness)
+Task: Run both Documents-Pending WhatsApp nudges from the data already present, and confirm the review nudge's CRM webhook URL.
+
+Work Log:
+- RAN BOTH, from local data only (sync:false), as asked. `documents_pending_wa` → **13 sent, 0 failed**; `documents_submitted_review` → **1 sent, 0 failed**. 14 real WhatsApp messages, all accepted by Meta with a wamid. 26 + 13 + 1 = the full 40-lead pool, each refusal reported with its reason.
+- VERIFIED WHAT ACTUALLY WENT INTO THE TEMPLATES rather than trusting "sent". The 13 pending reminders carried real first names, real company names and real upload counts, and **0 of 14 had a blank ("-") parameter** — the fallback that a missing column or unmapped field would have produced silently. The review nudge sent no body parameters (by design) and its tracked button resolved to `https://eps.eko.in/console?mobile=9624422311`, i.e. the tracker recorded the destination, so that recipient's tap will be attributable per person.
+- THE FIRST ATTEMPT FAILED, AND THE FAILURE WAS THE VALUABLE PART: `Zoho token refresh failed: invalid_client_secret`. Diagnosed instead of retried — the raw token endpoint returns **HTTP 200 with `{"error":"invalid_client_secret"}`** (Zoho hides auth failures behind a 200), while the MCP path was completely healthy (39 leads upserted via `ZohoCRM_searchRecords`). So the stored REST client credentials are being rejected; MCP is unaffected.
+- THAT EXPOSED A REAL WIRING BUG, the second divergence between the two Zoho paths. `/api/zoho/sync` uses `syncLeads()` (MCP-first, REST fallback); `runNudge` and the scheduler called `syncLeadsFromCriteria()` — the REST-ONLY helper. The Run button and every scheduled cycle therefore **bypassed the connected MCP server**, contradicting the original instruction to read the CRM through MCP rather than the API — and it meant a broken REST secret stopped every nudge run from syncing even though MCP was fine. Both now use `syncLeads()`; `RunSummary` gained `syncedVia` so the UI/log says which path did the work; the scheduler's hoisted per-cycle sync reports it too.
+- Guarded the wiring with six source-level assertions, because "which helper does the send path call" is invisible to unit tests: the scheduler must not reference the REST-only helper, every `syncLeadsFromCriteria` CALL must be inside `syncLeads()` itself (scoped to the function body so the definition and a comment do not count), and `runNudge` must not call it. Two of those assertions failed first time on my own regex counting the definition and a comment — fixed by matching only `await|=` call sites, which is what makes the count meaningful.
+- Restored both nudges to `enabled=false` after the run and asserted it, so a test never leaves a live nudge behind.
+- Webhook URL reconfirmed for the new-lead workflow: `POST /api/hooks/nudge/documents_submitted_review?token=<LEAD_WEBHOOK_SECRET>`, with the record id in the payload.
+- verify now 681 assertions. tsc clean, eslint clean. README gained "One sync path, MCP-first, everywhere" documenting the divergence and how to check both paths.
+
+Stage Summary:
+- Both flows were run and delivered: 14/14 accepted, message contents verified, click attribution live on the review nudge.
+- The app now reads the CRM through MCP on every path, so the rejected REST client secret no longer blocks a run — but **the REST credentials are genuinely broken and should be re-issued in the Zoho console** if the REST fallback is to be trusted when MCP is down.
+- Both nudges remain disabled; they run when enabled (Run / scheduler / external cron).
+
+---
