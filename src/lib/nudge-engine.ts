@@ -26,6 +26,7 @@ import { isDeliveryCapError, capBackoffHours } from '@/lib/whatsapp-errors'
 import { decideSend, type SendDecision, type SequenceLog } from '@/lib/sequence'
 import { ctaSendParams } from '@/lib/cta'
 import { ctaDestinationFor } from '@/lib/nudge-defaults'
+import { runGuard } from '@/lib/nudge-kind'
 import { splitByKycMatch, type KycCounts } from '@/lib/kyc-match'
 import type { Lead, Nudge } from '@prisma/client'
 
@@ -79,6 +80,11 @@ export interface RunSummary {
   syncedFromZoho: number | null
   /** Which Zoho path did the sync: 'mcp' (preferred) or 'api' (fallback). Null when no sync ran. */
   syncedVia?: 'mcp' | 'api' | null
+  /**
+   * True when this run happened on a DISABLED nudge via an explicit one-click force. Surfaced so
+   * "how did messages go out from a nudge that is off?" always has an answer.
+   */
+  forced?: boolean
   leadsConsidered: number
   sent: number
   failed: number
@@ -645,15 +651,21 @@ async function runMysqlNudge(nudge: Nudge, summary: RunSummary, batchLimit: numb
   return summary
 }
 
-/** Run a nudge end-to-end. Set opts.sync=false to skip the Zoho refresh and send to already-synced leads. */
+/**
+ * Run a nudge end-to-end. Set opts.sync=false to skip the Zoho refresh and send to already-synced
+ * leads. Set opts.force=true to run a DISABLED nudge once (the UI's "Fetch & Send" button) — see
+ * runGuard() in nudge-kind.ts for why that is allowed and what it does not do.
+ */
 export async function runNudge(
   nudgeId: string,
   baseUrl: string,
-  opts: { sync: boolean; limit?: number }
+  opts: { sync: boolean; limit?: number; force?: boolean }
 ): Promise<RunSummary> {
   const nudge = await db.nudge.findUnique({ where: { id: nudgeId } })
   if (!nudge) throw new Error('Nudge not found')
-  if (!nudge.enabled) throw new Error('Nudge is disabled')
+
+  const guard = runGuard(nudge, opts.force)
+  if (!guard.ok) throw new Error(guard.error)
 
   const channel: Channel = nudge.channel === 'whatsapp' ? 'whatsapp' : 'email'
   const filters = parseFilters(nudge.filters)
@@ -664,6 +676,7 @@ export async function runNudge(
     channel,
     syncedFromZoho: null,
     syncedVia: null,
+    forced: guard.forced,
     leadsConsidered: 0,
     sent: 0,
     failed: 0,

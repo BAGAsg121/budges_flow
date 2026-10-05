@@ -142,7 +142,21 @@ export async function collectCspDetailsPending(opts: MysqlFlowOptions = {}): Pro
 }
 
 // ---------------------------------------------------------------------------
-// B / C — mobile OTP and PAN
+// B / C — mobile OTP and PAN, from ONE query
+//
+// These two flows are not independent: the n8n ran the verify_csp query once and then branched —
+//
+//     if (verifyAt is empty)            → WhatsApp · Mobile Verification Pending
+//     else if (panNumber is empty)      → WhatsApp · PAN Verification Pending
+//     else                              → nothing
+//
+// so B and C are two arms of one decision, not two flows that happen to share a WHERE clause.
+// Running the query twice (once per nudge) is not merely wasteful, it is a RACE: verifyAt is
+// written by the product within seconds of requestAt (measured: min/max gap 3–8s across the
+// table). If verifyAt lands between the two queries, the mobile nudge sends because its snapshot
+// showed it empty, and the PAN nudge sends too because its LATER snapshot showed it set with
+// panNumber still empty — the same person gets both messages in the same cycle. One query, one
+// snapshot, both branches derived from it, so a row can only ever land in one arm.
 // ---------------------------------------------------------------------------
 
 interface VerifyRow {
@@ -154,11 +168,72 @@ interface VerifyRow {
   panNumber: string | null
 }
 
-async function fetchVerifyRows(opts: MysqlFlowOptions): Promise<VerifyRow[]> {
+/** Exported so the pure partition can be tested with hand-built rows. */
+export type { VerifyRow }
+
+/** Both arms of the verify_csp decision, plus what the single query actually looked at. */
+export interface VerifyBranchSplit {  /** verifyAt empty → mobile verification still pending. */
+  mobilePending: MysqlRecipient[]
+  /** verifyAt present but panNumber empty → PAN pending. */
+  panPending: MysqlRecipient[]
+  /** Rows the query returned before branching (so the two arms must sum to this). */
+  scanned: number
+  /** The effective look-back window, including the overlap (see windowMinutesFor). */
+  windowMinutes: number
+}
+
+/**
+ * The overlap added to a flow's look-back window, in minutes.
+ *
+ * WHY THIS EXISTS: the n8n's window matched its trigger interval EXACTLY (a 2-hour window on a
+ * 2-hour trigger), which has no margin at all. If a run is even a minute late, rows that arrived
+ * between the two runs fall outside the next window and are never seen — silently, because a
+ * missed customer looks identical to a quiet hour. An overlap costs nothing here: `requestAt` is
+ * NOT indexed (only PRIMARY(Id)), so `EXPLAIN` reports `type=ALL rows≈4692` for a 2-hour and a
+ * 30-day window alike — the window limits rows RETURNED, not rows read. And because de-duplication
+ * is once-per-phone-ever, a wider window can never produce a repeat message.
+ *
+ * Set MYSQL_WINDOW_OVERLAP_MINUTES=0 for the literal n8n window.
+ */
+export function windowOverlapMinutes(): number {
+  const raw = Number(process.env.MYSQL_WINDOW_OVERLAP_MINUTES ?? 30)
+  return Number.isFinite(raw) && raw >= 0 ? raw : 30
+}
+
+/** Look-back window for a flow, in minutes, including the overlap. Exported for testing. */
+export function windowMinutesFor(lookbackHours: number): number {
+  return Math.max(1, Math.round(lookbackHours * 60)) + windowOverlapMinutes()
+}
+
+/**
+ * One snapshot shared by both arms within a single scheduler cycle.
+ *
+ * Armed by the scheduler around its nudge loop. Outside a cycle there is NO cache, so a manual Run
+ * always reads fresh data — a cached result serving a "who should we message" decision to a run the
+ * operator just triggered by hand would be the wrong trade.
+ */
+let snapshotArmed = false
+let verifySnapshot: Promise<VerifyRow[]> | null = null
+
+/** Arm the snapshot for one cycle. Idempotent, so nesting or a missing end() cannot corrupt state. */
+export function beginMysqlSnapshot(): void {
+  snapshotArmed = true
+  verifySnapshot = null
+}
+
+/** Disarm the snapshot, so the next cycle re-reads. */
+export function endMysqlSnapshot(): void {
+  snapshotArmed = false
+  verifySnapshot = null
+}
+
+async function fetchVerifyRows(opts: MysqlFlowOptions): Promise<{ rows: VerifyRow[]; windowMinutes: number }> {
   const hours = Math.max(1, opts.lookbackHours ?? 2)
   const limit = Math.min(opts.limit ?? 500, 1000)
-  // The n8n query carried `AND (verifyAt IS NULL OR panNumber IS NULL)` and that is what is kept
-  // here: rows that can never qualify for B or C are fetched and thrown away otherwise.
+  const windowMinutes = windowMinutesFor(hours)
+
+  // The n8n query carried `AND (verifyAt IS NULL OR panNumber IS NULL)` and that is kept: rows that
+  // can never qualify for either arm are fetched and thrown away otherwise.
   //
   // This deliberately does NOT also test the columns for blank strings, which an earlier version
   // added on the reasoning that the n8n If-nodes tested `String(x).trim() === ''`. Two reasons it
@@ -166,61 +241,88 @@ async function fetchVerifyRows(opts: MysqlFlowOptions): Promise<VerifyRow[]> {
   //   1. It buys nothing. Measured on the live table: `verifyAt = ''` and `panNumber = ''` match
   //      ZERO rows (both columns hold real datetimes / PAN strings), so the extra predicates can
   //      never select a row that `IS NULL` would have missed.
-  //   2. It costs a little and scales badly. Wrapping a column in TRIM() removes any chance of an
-  //      index being used on it, so this is a straight loss if the table is ever indexed — and it
-  //      already measures slower (108ms vs 74ms on ~4.7k rows).
+  //   2. It costs a little and scales badly. Wrapping a column in TRIM() forfeits any chance of an
+  //      index being used on it, and it already measures slower (108ms vs 74ms on ~4.7k rows).
   //
-  // The `requestAt` window is what keeps this cheap, and it is kept exactly as the n8n had it.
-  // Note that `requestAt` is NOT indexed on this table (only PRIMARY(Id) exists), so the plan is
-  // `type=ALL ... Using filesort` for ANY window; the short window limits rows RETURNED, not rows
-  // read. Do not widen it casually on a large table, and do not expect an index to be used here.
-  return queryRead<VerifyRow>(
-    `SELECT Id, csp_number, customer_id, requestAt, verifyAt, panNumber
-       FROM verify_csp
-      WHERE requestAt >= DATE_SUB(NOW(), INTERVAL ? HOUR)
-        AND requestAt < NOW()
-        AND (verifyAt IS NULL OR panNumber IS NULL)
-      ORDER BY requestAt DESC
-      LIMIT ?`,
-    [hours, limit]
-  )
+  // `INTERVAL ? MINUTE` rather than HOUR so the overlap is exact integer arithmetic rather than a
+  // fractional-hours expression.
+  const run = () =>
+    queryRead<VerifyRow>(
+      `SELECT Id, csp_number, customer_id, requestAt, verifyAt, panNumber
+         FROM verify_csp
+        WHERE requestAt >= DATE_SUB(NOW(), INTERVAL ? MINUTE)
+          AND requestAt < NOW()
+          AND (verifyAt IS NULL OR panNumber IS NULL)
+        ORDER BY requestAt DESC
+        LIMIT ?`,
+      [windowMinutes, limit]
+    )
+
+  if (!snapshotArmed) return { rows: await run(), windowMinutes }
+
+  // Inside a cycle: exactly one query per window, shared by both arms.
+  if (!verifySnapshot) verifySnapshot = run()
+  return { rows: await verifySnapshot, windowMinutes }
+}
+
+/**
+ * The branch decision on already-fetched rows — pure, so it can be tested without a database.
+ *
+ * Mirrors the n8n's node order exactly:
+ *   verifyAt empty  → branch 1 (mobile pending)
+ *   else panNumber empty → branch 2 (PAN pending)
+ *   else → neither; do nothing
+ *
+ * Mutual exclusivity is per ROW by construction (branch 1 `continue`s). It is deliberately NOT
+ * per phone number: two different rows can share a csp_number — the same person requesting a
+ * verification twice — and then one row can be mobile-pending while the other is PAN-pending. That
+ * is the n8n's behaviour too, and the two messages are different templates, so it is correct.
+ */
+export function partitionVerifyRows(rows: VerifyRow[]): { mobilePending: MysqlRecipient[]; panPending: MysqlRecipient[] } {
+  const mobilePending: MysqlRecipient[] = []
+  const panPending: MysqlRecipient[] = []
+
+  for (const r of rows) {
+    const phone = str(r.csp_number)
+    const key = `csp:${r.customer_id || phone}`
+
+    // Branch 1 — verifyAt empty → mobile verification pending.
+    if (!str(r.verifyAt)) {
+      mobilePending.push({ key, phone, params: [], buttonParam: phone, detail: 'verifyAt empty' })
+      continue
+    }
+    // Branch 2 — mobile verified, panNumber empty → PAN pending.
+    if (!str(r.panNumber)) {
+      panPending.push({ key, phone, params: [], buttonParam: phone, detail: 'panNumber empty after verifyAt' })
+      continue
+    }
+    // Branch 3 — both present: do nothing. Unreachable given the WHERE clause, but stated rather
+    // than implied, because "no branch matched" must never silently mean "send everything".
+  }
+
+  return { mobilePending, panPending }
+}
+
+/**
+ * The verify_csp decision: one query, then the n8n's branch.
+ */
+export async function collectVerifyBranches(opts: MysqlFlowOptions = {}): Promise<VerifyBranchSplit> {
+  const { rows, windowMinutes } = await fetchVerifyRows(opts)
+  const { mobilePending, panPending } = partitionVerifyRows(rows)
+  return { mobilePending, panPending, scanned: rows.length, windowMinutes }
 }
 
 /** B — mobile verification still pending: verifyAt is empty. */
 export async function collectMobileOtpPending(opts: MysqlFlowOptions = {}): Promise<MysqlRecipient[]> {
-  const rows = await fetchVerifyRows(opts)
-  return rows
-    .filter((r) => !str(r.verifyAt))
-    .map((r) => {
-      const phone = str(r.csp_number)
-      return {
-        key: `csp:${r.customer_id || phone}`,
-        phone,
-        params: [],
-        buttonParam: phone,
-        detail: 'verifyAt empty',
-      }
-    })
+  return (await collectVerifyBranches(opts)).mobilePending
 }
 
 /**
- * C — PAN pending. Mirrors the n8n branch order: only reached once the mobile IS verified,
- * so a lead missing both is nudged for the mobile first and for PAN on a later pass.
+ * C — PAN pending. Mirrors the n8n branch order: only reached once the mobile IS verified, so a
+ * lead missing both is nudged for the mobile now and for PAN on a later pass.
  */
 export async function collectPanVerificationPending(opts: MysqlFlowOptions = {}): Promise<MysqlRecipient[]> {
-  const rows = await fetchVerifyRows(opts)
-  return rows
-    .filter((r) => str(r.verifyAt) && !str(r.panNumber))
-    .map((r) => {
-      const phone = str(r.csp_number)
-      return {
-        key: `csp:${r.customer_id || phone}`,
-        phone,
-        params: [],
-        buttonParam: phone,
-        detail: 'panNumber empty',
-      }
-    })
+  return (await collectVerifyBranches(opts)).panPending
 }
 
 // ---------------------------------------------------------------------------

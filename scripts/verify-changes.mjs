@@ -9,7 +9,8 @@ import { isCronAuthorized, isWebhookAuthorized } from '../src/lib/cron-auth.ts'
 import { checkKycCounts, kycCountsMatch, requiresKycMatch, kycRuleOf, hasKycRule, splitByKycMatch } from '../src/lib/kyc-match.ts'
 import { decideSend, sentLog } from '../src/lib/sequence.ts'
 import { DEFAULT_NUDGES, ZOHO_CRITERIA, LEAD_STATUS, PAY_ACTIVATION_FEE_URL, WHATSAPP_TEST_STATUS, MYSQL_FLOW_TEMPLATES, WA_SHEET_FLOW_TEMPLATES, ZOHO_FLOW_TEMPLATES, EPS_BUSINESS_VERTICAL, zohoDocumentsPendingCriteria, MYSQL_FLOW_LOOKBACK, CONSOLE_URL, zohoTodayIso, zohoTodayCriteria, zohoCriteriaSince, ZOHO_LEADS_CREATED_AFTER, ZOHO_TZ_OFFSET, zohoCriteriaBetween, zohoIstIso, zohoSyncOverlapMinutes } from '../src/lib/nudge-defaults.ts'
-import { MYSQL_FLOW_KEYS, isMysqlFlowKey } from '../src/lib/mysql-nudges.ts'
+import { MYSQL_FLOW_KEYS, isMysqlFlowKey, partitionVerifyRows, windowOverlapMinutes, windowMinutesFor } from '../src/lib/mysql-nudges.ts'
+import { cadenceHoursOf, cadenceDue } from '../src/lib/cadence.ts'
 import { buildWhatsAppParams as buildWhatsAppParamsRaw, missingSheetColumns as missingSheetColumnsRaw } from '../src/lib/whatsapp-params.ts'
 import { extractInboundText, appendInbound, INBOUND_KEEP } from '../src/lib/whatsapp-inbound.ts'
 import { explainWhatsAppError, isDeliveryCapError, isPermanentDeliveryFailure } from '../src/lib/whatsapp-errors.ts'
@@ -20,7 +21,7 @@ import { explainMailError, isRetryableMailError } from '../src/lib/mail-errors.t
 import { isRetryableWhatsAppError } from '../src/lib/whatsapp-errors.ts'
 import { buildSheetVars, normaliseMobileDigits, pickSheetEmail, pickSheetMobile, planSheetSends } from '../src/lib/sheet-vars.ts'
 import { buildDailySeries, seriesIsEmpty, istDayKey } from '../src/lib/engagement-stats.ts'
-import { nudgeSourceOf, capAppliesTo, isManualSheetNudge } from '../src/lib/nudge-kind.ts'
+import { nudgeSourceOf, capAppliesTo, isManualSheetNudge, runGuard } from '../src/lib/nudge-kind.ts'
 import { buildXlsx, buildZip, crc32, columnLetter, sanitiseSheetName } from '../src/lib/xlsx.ts'
 import { istDay, istDateTime, istRangeToUtc, istDaysAgo, toCsv, exportStatus, logToExportRow, buildBreakdown, EXPORT_COLUMNS, EXPORT_WIDTHS } from '../src/lib/export-format.ts'
 import { readZip, validateXlsx } from './lib/read-zip.mjs'
@@ -711,6 +712,117 @@ check('no REST-only sync call exists outside syncLeads', restHelperCalls(engineS
 check('the engine also calls the MCP-first sync where it syncs a run', /syncLeads\(nudge\.zohoCriteria\.trim\(\)\)/.test(engineSource), true)
 check('runNudge no longer syncs via the REST-only helper', /syncLeadsFromCriteria\(nudge\.zohoCriteria/.test(engineSource), false)
 check('the run summary reports which path synced', /syncedVia/.test(engineSource), true)
+
+// --- verify_csp: one query, two branches (Mobile then PAN) --------------------
+// The n8n ran this query once and branched. The arm conditions below are exactly its If-nodes.
+const vrow = (over) => ({
+  Id: 1,
+  csp_number: '9064995873',
+  customer_id: null,
+  requestAt: '2026-10-01 11:28:02',
+  verifyAt: null,
+  panNumber: null,
+  ...over,
+})
+const pv = (rows) => partitionVerifyRows(rows)
+
+// Branch 1 — verifyAt empty (null OR blank), exactly the n8n test.
+check('verify: verifyAt null goes to the MOBILE branch', pv([vrow({ verifyAt: null }) ]).mobilePending.length, 1)
+check('verify: verifyAt blank string also goes to the MOBILE branch', pv([vrow({ verifyAt: '   ' })]).mobilePending.length, 1)
+check('verify: the mobile branch does not also fill the PAN branch', pv([vrow({ verifyAt: null })]).panPending.length, 0)
+// Branch 2 — reached only when verifyAt is present.
+check('verify: verified + pan null goes to the PAN branch', pv([vrow({ verifyAt: '2026-10-01 11:28:14', panNumber: null })]).panPending.length, 1)
+check('verify: verified + pan blank also goes to the PAN branch', pv([vrow({ verifyAt: '2026-10-01 11:28:14', panNumber: '' })]).panPending.length, 1)
+check('verify: the PAN branch does not also fill the mobile branch', pv([vrow({ verifyAt: '2026-10-01 11:28:14', panNumber: null })]).mobilePending.length, 0)
+// Branch 3 — both present: do nothing.
+check('verify: both present goes to NEITHER branch', pv([vrow({ verifyAt: '2026-10-01 11:28:14', panNumber: 'AUQPM3118F' })]).mobilePending.length + pv([vrow({ verifyAt: '2026-10-01 11:28:14', panNumber: 'AUQPM3118F' })]).panPending.length, 0)
+// The user's own sample row.
+const SAMPLE_ROW = vrow({ Id: 2647917, csp_number: '9064995873', mobile_verification_status: 2, verifyAt: '2026-10-01 11:28:14', panNumber: null })
+check('verify: the supplied sample row branches to PAN', pv([SAMPLE_ROW]).panPending.length, 1)
+check('verify: the supplied sample row does not branch to mobile', pv([SAMPLE_ROW]).mobilePending.length, 0)
+
+// A row must never be classified into both arms.
+const mixed = [
+  vrow({ Id: 1, csp_number: 'A', verifyAt: null }),
+  vrow({ Id: 2, csp_number: 'B', verifyAt: '2026-10-01 11:28:14', panNumber: null }),
+  vrow({ Id: 3, csp_number: 'C', verifyAt: '2026-10-01 11:28:14', panNumber: 'AUQPM3118F' }),
+  vrow({ Id: 4, csp_number: 'D', verifyAt: '2026-10-01 11:28:14', panNumber: '' }),
+]
+const split = pv(mixed)
+check('verify: the two arms are row-exclusive', split.mobilePending.length + split.panPending.length <= mixed.length, true)
+check('verify: only row A is mobile-pending', split.mobilePending.map((r) => r.phone).join(','), 'A')
+check('verify: rows B and D are PAN-pending', split.panPending.map((r) => r.phone).join(','), 'B,D')
+check('verify: row C (complete) reaches nobody', split.mobilePending.some((r) => r.phone === 'C') || split.panPending.some((r) => r.phone === 'C'), false)
+// Recipients carry the mobile for the button parameter.
+check('verify: the button parameter is the recipient mobile', split.mobilePending[0].buttonParam, 'A')
+check('verify: the mobile arm declares no body params', JSON.stringify(split.mobilePending[0].params), '[]')
+check('verify: the arms explain themselves', split.mobilePending[0].detail, 'verifyAt empty')
+check('verify: the PAN arm explains itself', split.panPending[0].detail, 'panNumber empty after verifyAt')
+// Keying prefers customer_id (the product's own id) and falls back to the phone.
+check('verify: the key uses customer_id when present', pv([vrow({ customer_id: 4242 })]).mobilePending[0].key, 'csp:4242')
+check('verify: the key falls back to the phone', pv([vrow({ customer_id: null })]).mobilePending[0].key, 'csp:9064995873')
+check('verify: no rows means no arms', JSON.stringify(pv([])), JSON.stringify({ mobilePending: [], panPending: [] }))
+
+// The look-back window: cadence-matched plus an overlap, so a late run cannot lose rows.
+delete process.env.MYSQL_WINDOW_OVERLAP_MINUTES
+check('window: the default overlap is 30 minutes', windowOverlapMinutes(), 30)
+check('window: a 2h flow looks back 150 minutes', windowMinutesFor(2), 150)
+check('window: a 3h flow looks back 210 minutes', windowMinutesFor(3), 210)
+check('window: the overlap is configurable', (() => { process.env.MYSQL_WINDOW_OVERLAP_MINUTES = '90'; const v = windowMinutesFor(2); delete process.env.MYSQL_WINDOW_OVERLAP_MINUTES; return v })(), 210)
+check('window: 0 overlap gives the literal n8n window', (() => { process.env.MYSQL_WINDOW_OVERLAP_MINUTES = '0'; const v = `${windowOverlapMinutes()}/${windowMinutesFor(2)}`; delete process.env.MYSQL_WINDOW_OVERLAP_MINUTES; return v })(), '0/120')
+check('window: a nonsense overlap falls back to 30', (() => { process.env.MYSQL_WINDOW_OVERLAP_MINUTES = 'abc'; const v = windowOverlapMinutes(); delete process.env.MYSQL_WINDOW_OVERLAP_MINUTES; return v })(), 30)
+check('window: a negative overlap falls back to 30', (() => { process.env.MYSQL_WINDOW_OVERLAP_MINUTES = '-5'; const v = windowOverlapMinutes(); delete process.env.MYSQL_WINDOW_OVERLAP_MINUTES; return v })(), 30)
+check('window: a fractional lookback is rounded to whole minutes', windowMinutesFor(1.5), 90 + 30)
+
+// --- per-flow cadence ("run every 2 hours") ----------------------------------
+const cadNow = new Date('2026-10-01T12:00:00Z')
+const hoursAgo = (h) => new Date(cadNow.getTime() - h * 60 * 60 * 1000)
+check('cadence: no everyHours means inherit the tick', cadenceHoursOf({ filters: '{}' }), null)
+check('cadence: everyHours is read', cadenceHoursOf({ filters: '{"everyHours":2}' }), 2)
+check('cadence: an unparseable filter falls back to the tick', cadenceHoursOf({ filters: '{oops' }), null)
+check('cadence: a zero interval means inherit the tick', cadenceHoursOf({ filters: '{"everyHours":0}' }), null)
+check('cadence: a negative interval means inherit the tick', cadenceHoursOf({ filters: '{"everyHours":-3}' }), null)
+check('cadence: a nudge that never ran is always due', cadenceDue({ filters: '{"everyHours":2}', lastRunAt: null }, cadNow).due, true)
+check('cadence: no interval means always due', cadenceDue({ filters: '{}', lastRunAt: hoursAgo(0) }, cadNow).due, true)
+// The 2-hour case the verify flows use.
+check('cadence: 1h after a 2h run is NOT due', cadenceDue({ filters: '{"everyHours":2}', lastRunAt: hoursAgo(1) }, cadNow).due, false)
+check('cadence: not-due reports how long is left', cadenceDue({ filters: '{"everyHours":2}', lastRunAt: hoursAgo(1) }, cadNow).reason, 'runs every 2h — last ran 2026-10-01 11:00, next in 60m')
+check('cadence: 119m after a 2h run is NOT due', cadenceDue({ filters: '{"everyHours":2}', lastRunAt: new Date(cadNow.getTime() - 119 * 60000) }, cadNow).due, false)
+check('cadence: exactly 2h after a run IS due', cadenceDue({ filters: '{"everyHours":2}', lastRunAt: hoursAgo(2) }, cadNow).due, true)
+check('cadence: 3h after a run IS due', cadenceDue({ filters: '{"everyHours":2}', lastRunAt: hoursAgo(3) }, cadNow).due, true)
+check('cadence: a 12h flow is not due after 2h', cadenceDue({ filters: '{"everyHours":12}', lastRunAt: hoursAgo(2) }, cadNow).due, false)
+check('cadence: a 12h flow is due after 12h', cadenceDue({ filters: '{"everyHours":12}', lastRunAt: hoursAgo(12) }, cadNow).due, true)
+
+// The two verify flows must carry the 2h cadence, and must share it: PAN is the second arm of the
+// SAME query, so a different cadence would let it miss the rows the mobile arm just classified.
+for (const key of ['mobile_otp_pending', 'pan_verification_pending']) {
+  const f = JSON.parse(DEFAULT_NUDGES.find((n) => n.key === key)?.filters ?? '{}')
+  check(`cadence: ${key} runs every 2h`, f.everyHours, 2)
+  check(`cadence: ${key} declares its flow`, f.flow, key)
+  check(`cadence: ${key} is a MySQL flow`, f.source, 'mysql')
+  check(`cadence: ${key} has no Zoho criteria (database only)`, DEFAULT_NUDGES.find((n) => n.key === key)?.zohoCriteria, null)
+}
+check('cadence: only the verify pair uses 2h so far', DEFAULT_NUDGES.filter((n) => JSON.parse(n.filters || '{}').everyHours === 2).map((n) => n.key).sort().join(','), 'mobile_otp_pending,pan_verification_pending')
+
+// --- running a paused nudge once (the "Fetch & Send" button) ------------------
+// `enabled` governs the automatic paths; an operator clicking a button that names the audience has
+// made the decision explicitly. force must be asked for, must NOT enable the nudge, and must be
+// reported back so a send from a nudge that is "off" is never invisible.
+check('run: an enabled nudge runs without force', runGuard({ enabled: true }).ok, true)
+check('run: an enabled nudge is not flagged as forced', runGuard({ enabled: true }).forced, false)
+check('run: a disabled nudge is refused by default', runGuard({ enabled: false }).ok, false)
+check('run: the refusal says how to proceed', /force/i.test(runGuard({ enabled: false }).error), true)
+check('run: a disabled nudge runs when force is asked for', runGuard({ enabled: false }, true).ok, true)
+check('run: the forced run is flagged', runGuard({ enabled: false }, true).forced, true)
+check('run: force is not truthy-coerced from junk', runGuard({ enabled: false }, 0).ok, false)
+// Both Documents-Pending nudges ship disabled, which is exactly the case this feature exists for.
+for (const key of ['documents_pending_wa', 'documents_submitted_review']) {
+  const n = DEFAULT_NUDGES.find((x) => x.key === key)
+  check(`run: ${key} ships disabled (so the one-off button is the way to send it)`, n?.enabled, false)
+  check(`run: ${key} is refusable without force`, runGuard({ enabled: n?.enabled ?? false }).ok, false)
+  check(`run: ${key} is runnable with force`, runGuard({ enabled: n?.enabled ?? false }, true).ok, true)
+  check(`run: ${key} is fetch-driven (has a Zoho criteria to fetch with)`, Boolean(n?.zohoCriteria), true)
+}
 
 // --- Zoho MCP tool selection and argument building ---------------------------
 // The real tool list from the live server. The bug this guards against: every tool name

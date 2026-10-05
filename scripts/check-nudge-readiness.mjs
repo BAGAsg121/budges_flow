@@ -14,6 +14,7 @@ import { db } from '../src/lib/db.ts'
 import { previewNudge } from '../src/lib/nudge-engine.ts'
 import { collectMysqlRecipients, isMysqlFlowKey } from '../src/lib/mysql-nudges.ts'
 import { nudgeSourceOf, capAppliesTo } from '../src/lib/nudge-kind.ts'
+import { cadenceHoursOf } from '../src/lib/cadence.ts'
 import { isWhatsAppConfigured } from '../src/lib/whatsapp.ts'
 import { isMailerConfigured, describeMailConfig } from '../src/lib/mailer.ts'
 import { listTemplates } from '../src/lib/whatsapp-templates.ts'
@@ -82,6 +83,15 @@ for (const n of nudges) {
   console.log(
     `   cap: ${capAppliesTo(n) ? `max ${n.maxEmailsPerLead}/lead, ${n.followUpDays}d apart` : 'not applied (sheet-driven)'}`
   )
+
+  // How often this flow actually RUNS, which is separate from the scheduler's global tick.
+  const every = cadenceHoursOf(n)
+  if (every) {
+    const next = n.lastRunAt ? new Date(n.lastRunAt.getTime() + every * 3600_000) : null
+    console.log(
+      `   runs every ${every}h${n.lastRunAt ? ` · last ${n.lastRunAt.toISOString().slice(0, 16).replace('T', ' ')} · next ${next.toISOString().slice(0, 16).replace('T', ' ')}` : ' · never run yet'}`
+    )
+  }
 
   // Who it would actually reach, using the real selection path.
   if (source === 'zoho') {

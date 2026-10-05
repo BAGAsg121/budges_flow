@@ -161,6 +161,27 @@ export const MYSQL_FLOW_LOOKBACK: Record<string, { lookbackHours?: number; lookb
   documents_reupload_required: { lookbackDays: 30 },
 }
 
+/**
+ * How often each flow should RUN, in hours, mirroring the n8n trigger intervals.
+ *
+ * Separate from the look-back window on purpose. The window answers "which rows count as
+ * candidates"; the cadence answers "how often do we look". The n8n conflated them by making the
+ * window equal the trigger interval, which left no margin: a run one minute late loses the rows
+ * that arrived in the gap, permanently, and a missed customer looks exactly like a quiet hour.
+ *
+ * `mobile_otp_pending` and `pan_verification_pending` are BOTH 2h because they are the two arms of
+ * ONE decision over one query — they must run together or the PAN arm would never see the rows the
+ * mobile arm just classified.
+ */
+export const MYSQL_FLOW_CADENCE_HOURS: Record<string, number> = {
+  csp_details_pending: 3,
+  mobile_otp_pending: 2,
+  pan_verification_pending: 2,
+  agreement_signature_pending: 12,
+  documents_pending_upload: 12,
+  documents_reupload_required: 12,
+}
+
 // ---------------------------------------------------------------------------
 // Meta template bodies for the six MySQL-driven flows.
 // These are the reference copies; the same text is submitted to Meta from the
@@ -660,6 +681,7 @@ export const DEFAULT_NUDGES: NudgeSeed[] = [
   // -------------------------------------------------------------------------
   ...Object.entries(MYSQL_FLOW_TEMPLATES).map(([flow, t]): NudgeSeed => {
     const window = MYSQL_FLOW_LOOKBACK[flow] ?? {}
+    const everyHours = MYSQL_FLOW_CADENCE_HOURS[flow]
     const windowText = window.lookbackHours
       ? `last ${window.lookbackHours}h`
       : `last ${window.lookbackDays} days`
@@ -672,12 +694,15 @@ export const DEFAULT_NUDGES: NudgeSeed[] = [
         `Meta template "${t.templateName}" in ${WHATSAPP_TEMPLATE_LANGUAGE_DEFAULT}. ` +
         `The button opens ${CONSOLE_URL}?mobile=<recipient mobile>. ` +
         `Ships disabled — create and approve the template in the Templates tab, then enable it. ` +
-        `Recipients are de-duplicated by phone number, so nobody is messaged twice.`,
+        `Recipients are de-duplicated by phone number, so nobody is messaged twice. ` +
+        (everyHours ? `Runs every ${everyHours}h.` : ''),
       enabled: false,
       channel: 'whatsapp',
       // null -> not lead-driven; filters.source routes it to MySQL instead
       zohoCriteria: null,
-      filters: json({ source: 'mysql', flow, ...window }),
+      // everyHours is this flow's own run interval; the scheduler enforces it. `pan_verification_pending`
+      // shares the 2h cadence because it is the second arm of the same verify_csp query.
+      filters: json({ source: 'mysql', flow, ...window, ...(everyHours ? { everyHours } : {}) }),
       // reference copy of the Meta template body
       bodyTemplate: t.body,
       // These six all have a console URL button, so they are pointed at the TRACKED template

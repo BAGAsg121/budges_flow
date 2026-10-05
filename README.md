@@ -914,20 +914,45 @@ Notes:
   window means better coverage, not repeat messages. Measured on the real data, the signed cohort is
   the *narrower* one (30d: 5 signed customers vs 13 recent applications) and therefore the more
   precise; do not "fix" a small recipient count by switching it back without checking.
-- `verify_csp` uses exactly the n8n predicate — `requestAt` in the last N hours **and**
+- `verify_csp` uses exactly the n8n predicate — `requestAt` in the window **and**
   `(verifyAt IS NULL OR panNumber IS NULL)` — on the exact n8n column set.
   > An earlier version also tested `TRIM(verifyAt) = ''` / `TRIM(panNumber) = ''`, reasoning that the
   > n8n If-nodes treated a blank string as missing. That was measured and reverted: on the live table
   > both blank-string predicates match **zero** rows (both columns hold real datetimes and PAN
   > strings), so they could never select anyone `IS NULL` missed — and wrapping a column in `TRIM()`
   > forfeits any chance of an index being used on it.
+- **`mobile_otp_pending` and `pan_verification_pending` are TWO ARMS OF ONE DECISION, not two flows.**
+  The n8n ran the query once and branched:
+
+  ```
+  verifyAt empty            → WhatsApp · Mobile Verification Pending
+  else panNumber empty      → WhatsApp · PAN Verification Pending
+  else                      → nothing
+  ```
+
+  `collectVerifyBranches()` implements exactly that: one query, then `partitionVerifyRows()` decides
+  the arm. Running the query per nudge is not merely wasteful — `verifyAt` is written **seconds**
+  after `requestAt` in production, so a write landing between the two queries would let the same
+  person receive BOTH messages in one cycle. Within a scheduler cycle the two nudges therefore share
+  one snapshot (`beginMysqlSnapshot()` / `endMysqlSnapshot()`), which is also why they must carry the
+  same cadence. Outside a cycle there is no cache, so a manual Run always reads fresh data.
+
+  The arms are exclusive per **row** by construction. They are not exclusive per **phone**: two rows
+  can share a `csp_number` (the same person verifying twice), and then one row can be mobile-pending
+  while the other is PAN-pending. That is the n8n's behaviour and the two messages are different
+  templates, so it is correct — de-duplication then applies per nudge per phone.
+- **The look-back window is the cadence PLUS an overlap** (`MYSQL_WINDOW_OVERLAP_MINUTES`, default
+  30). The n8n made the window equal to its trigger interval, which leaves no margin: a run one
+  minute late loses the rows that arrived in the gap, permanently, and a missed customer looks
+  exactly like a quiet hour. The overlap is free here — `requestAt` is not indexed, so `EXPLAIN`
+  reports the same full scan either way, and de-duplication is once-per-phone so a wider window can
+  never produce a repeat. Set the overlap to `0` for the literal n8n window.
 - **`requestAt` is not indexed** on `verify_csp` (the table's only index is `PRIMARY(Id)`). `EXPLAIN`
   reports `type=ALL`, `key=NULL`, `rows≈4692`, `Using filesort` for *every* variant of this query,
-  including the 2-hour one. So the narrow window limits how many rows are **returned**, not how many
-  are **read** — it is not a performance lever, and widening it costs nothing extra on a table this
-  size. On a much larger table the fix would be an index on `requestAt`, which is a DDL write and
-  therefore out of bounds for this app (the business database is read-only). Do not try to buy
-  performance back by shrinking the window; measure with `EXPLAIN` instead.
+  including the 2-hour one. So the window limits how many rows are **returned**, not how many
+  are **read** — it is not a performance lever. On a much larger table the fix would be an index on
+  `requestAt`, which is a DDL write and therefore out of bounds for this app (the business database is
+  read-only). Do not try to buy performance back by shrinking the window; measure with `EXPLAIN`.
 - `pan_verification_pending` requires the mobile to be **already verified**, which is the n8n branch
   order (`Check Mobile Verification` false-branch → `Check PAN`). A lead missing both is nudged for
   the mobile now and for PAN on a later pass — never twice at once.
@@ -1334,6 +1359,65 @@ Two options; both call the same code path:
 
 Each nudge sends at most `NUDGE_MAX_PER_RUN` messages per cycle, so a cycle can never run past a
 request timeout; leftover leads are deferred to the next cycle (shown as `deferred` in the UI).
+
+### Running a nudge that is switched OFF (one-off "Fetch & Send")
+
+`enabled` governs the **automatic** paths: only an enabled nudge is run by the scheduler or an
+external cron. It is deliberately separate from "may the operator send this once, by hand" — a nudge
+often has to stay off while its template is pending or while it is still being configured, and the
+operator still needs to send it once.
+
+So the Run button stays usable on a disabled nudge. It changes label and appearance (plain **Run**
+when the nudge is on, **Fetch & Send** / **Run once** when it is off, in outline), and opens a
+confirm dialog that states the nudge is OFF and that this does **not** switch it on.
+
+Under the hood that is `{ "force": true }`:
+
+```bash
+# refused — the nudge is disabled
+curl -X POST https://<host>/api/nudges/<id>/run -u "$APP_USERNAME:$APP_PASSWORD" \
+  -H 'content-type: application/json' -d '{"sync":true}'
+
+# runs once: fetch, apply filters, send
+curl -X POST https://<host>/api/nudges/<id>/run -u "$APP_USERNAME:$APP_PASSWORD" \
+  -H 'content-type: application/json' -d '{"sync":true,"force":true}'
+```
+
+`force` is never implied — the API only honours an explicit `true`, and the UI sends it only for a
+nudge that is off. It does **not** enable the nudge, and every forced run is marked in the returned
+summary (`"forced": true`) and in the UI's result dialog, so "how did messages go out from a nudge
+that is off?" always has an answer. The rule lives in `runGuard()` in `src/lib/nudge-kind.ts`, shared
+by the API and the UI so they cannot disagree about when the button is available.
+
+> Sending is still subject to the same sequence rules — `maxEmailsPerLead` and `followUpDays` are
+> checked exactly as in a normal run, so a one-off cannot bypass the cap. Use **Preview** first: it
+> reports who would be messaged *right now*, which is the number that matters.
+
+### Two clocks: the tick, and each flow's own cadence
+
+`SCHEDULE_INTERVAL_MINUTES` decides how often the scheduler **looks**. A nudge's
+`filters.everyHours` decides how often that flow actually **runs** — the n8n gave each flow its own
+trigger, and without this every flow inherits the tick and re-scans the same window several times
+over. Harmless for correctness (de-duplication is per recipient) but pointless load, and it makes the
+config impossible to reason about.
+
+| Flow | Cadence | Window |
+| --- | --- | --- |
+| `mobile_otp_pending` | **2h** | 2h + 30m overlap |
+| `pan_verification_pending` | **2h** | 2h + 30m overlap |
+| `csp_details_pending` | 3h | 3h + 30m overlap |
+| `agreement_signature_pending` | 12h | 30 days |
+| `documents_pending_upload` | 12h | 30 days |
+| `documents_reupload_required` | 12h | 30 days |
+
+A nudge that has never run is always due, so a freshly enabled flow does not sit idle. A cycle reports
+`notDue` with the reason ("runs every 2h — last ran …, next in 47m") instead of silently skipping, so
+"why did nothing send" is answerable from the result. `npm run readiness` prints each flow's last and
+next run.
+
+`mobile_otp_pending` and `pan_verification_pending` share the 2h cadence deliberately: they are the
+two arms of one query, so a different cadence would let the PAN arm miss the rows the mobile arm just
+classified.
 
 **Which nudges a cycle runs.** Lead-driven (Zoho) and MySQL-driven nudges, and only those. Sheet
 nudges are excluded — they are triggered by pasting a sheet URL, and running one on a timer would

@@ -11,6 +11,7 @@
  */
 import { db } from '@/lib/db'
 import { runNudge, syncLeads, type RunSummary } from '@/lib/nudge-engine'
+import { beginMysqlSnapshot, endMysqlSnapshot } from '@/lib/mysql-nudges'
 import { getStaticBaseUrl } from '@/lib/base-url'
 import { isImapConfigured, syncRepliesFromImap, type ImapSyncResult } from '@/lib/reply-tracker'
 import { nudgeSourceOf } from '@/lib/nudge-kind'
@@ -21,7 +22,29 @@ export interface NudgeRunResult {
   channel: string
   summary?: RunSummary
   error?: string
+  /**
+   * Set when the nudge has its own cadence (`filters.everyHours`) and was not due yet, so the
+   * cycle skipped it deliberately. Reported rather than silently dropped: "why did nothing send"
+   * must be answerable from the cycle result.
+   */
+  notDue?: string
 }
+
+/**
+ * A nudge's own run interval, in hours, from `filters.everyHours`.
+ *
+ * The global tick (SCHEDULE_INTERVAL_MINUTES) decides how often the scheduler LOOKS; this decides
+ * how often a given flow actually runs. They are different questions, and the n8n had a different
+ * trigger per flow (the verify_csp flows every 2 hours, csp_application every 3, the document
+ * flows every 12). Without this every flow inherits the tick, which would re-scan the same window
+ * many times over — harmless for correctness (de-duplication is per recipient) but pointless load
+ * and impossible to reason about.
+ *
+ * The arithmetic lives in src/lib/cadence.ts so it can be tested without a database.
+ */
+import { cadenceDue } from '@/lib/cadence'
+
+export { cadenceHoursOf, cadenceDue } from '@/lib/cadence'
 
 export interface SchedulerStatus {
   enabled: boolean
@@ -117,6 +140,7 @@ export async function runAllEnabledNudges(opts?: { sync?: boolean; limit?: numbe
   })
   const nudges = enabled.filter((n) => nudgeSourceOf(n) !== 'sheet')
   const results: NudgeRunResult[] = []
+  const now = new Date()
 
   // 1. Sync ONCE per distinct Zoho criteria — not once per nudge.
   //
@@ -148,37 +172,55 @@ export async function runAllEnabledNudges(opts?: { sync?: boolean; limit?: numbe
     }
   }
 
-  for (const nudge of nudges) {
-    const criteria = (nudge.zohoCriteria || '').trim()
-    const synced = criteria ? syncOutcome.get(criteria) : undefined
+  // Arm the MySQL snapshot for the duration of this cycle: the verify_csp flows are two arms of ONE
+  // decision (mobile pending, else PAN pending), so both read a single query result. Running the
+  // query per nudge is not just wasteful — `verifyAt` is written seconds after `requestAt` in
+  // production, so a write landing between the two queries would let the same person receive BOTH
+  // messages in one cycle. Disarmed in `finally` so a throw cannot leave a stale snapshot armed.
+  beginMysqlSnapshot()
+  try {
+    for (const nudge of nudges) {
+      const criteria = (nudge.zohoCriteria || '').trim()
+      const synced = criteria ? syncOutcome.get(criteria) : undefined
 
-    if (synced && 'error' in synced) {
-      results.push({
-        nudgeKey: nudge.key,
-        name: nudge.name,
-        channel: nudge.channel,
-        error: `Zoho sync failed: ${synced.error}`,
-      })
-      continue
-    }
-
-    try {
-      // sync:false — the refresh already happened above, once for this criteria.
-      const summary = await runNudge(nudge.id, baseUrl, { sync: false, limit: limit ?? undefined })
-      // Report the shared sync's count so the run summary still says what was pulled.
-      if (synced && 'count' in synced) {
-        summary.syncedFromZoho = synced.count
-        summary.syncedVia = synced.via
+      if (synced && 'error' in synced) {
+        results.push({
+          nudgeKey: nudge.key,
+          name: nudge.name,
+          channel: nudge.channel,
+          error: `Zoho sync failed: ${synced.error}`,
+        })
+        continue
       }
-      results.push({ nudgeKey: nudge.key, name: nudge.name, channel: nudge.channel, summary })
-    } catch (err) {
-      results.push({
-        nudgeKey: nudge.key,
-        name: nudge.name,
-        channel: nudge.channel,
-        error: err instanceof Error ? err.message : String(err),
-      })
+
+      // Does this nudge have its own cadence, and is it due? Checked per nudge because the global
+      // tick is only how often we LOOK, not how often each flow should run.
+      const cadence = cadenceDue(nudge, now)
+      if (!cadence.due) {
+        results.push({ nudgeKey: nudge.key, name: nudge.name, channel: nudge.channel, notDue: cadence.reason })
+        continue
+      }
+
+      try {
+        // sync:false — the refresh already happened above, once for this criteria.
+        const summary = await runNudge(nudge.id, baseUrl, { sync: false, limit: limit ?? undefined })
+        // Report the shared sync's count so the run summary still says what was pulled.
+        if (synced && 'count' in synced) {
+          summary.syncedFromZoho = synced.count
+          summary.syncedVia = synced.via
+        }
+        results.push({ nudgeKey: nudge.key, name: nudge.name, channel: nudge.channel, summary })
+      } catch (err) {
+        results.push({
+          nudgeKey: nudge.key,
+          name: nudge.name,
+          channel: nudge.channel,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
     }
+  } finally {
+    endMysqlSnapshot()
   }
 
   return results

@@ -123,6 +123,10 @@ export interface RunSummaryDto {
   nudgeKey: string
   channel: NudgeChannel
   syncedFromZoho: number | null
+  /** Which Zoho path did the sync: 'mcp' (preferred) or 'api' (fallback). Null when no sync ran. */
+  syncedVia?: 'mcp' | 'api' | null
+  /** True when this run was a one-off on a DISABLED nudge (the "Fetch & Send" button). */
+  forced?: boolean
   leadsConsidered: number
   sent: number
   failed: number

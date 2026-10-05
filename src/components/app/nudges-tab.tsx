@@ -290,7 +290,9 @@ export function NudgesTab({
       const res = await fetch(`/api/nudges/${n.id}/run`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sync: runWithSync }),
+        // force is sent ONLY for a nudge that is off. The API refuses to imply it, so a disabled
+        // nudge can only ever send because the operator confirmed it here.
+        body: JSON.stringify({ sync: runWithSync, force: !n.enabled }),
       })
       const data = (await res.json()) as { ok: boolean; summary?: RunSummaryDto; error?: string }
       if (!data.ok || !data.summary) {
@@ -491,9 +493,27 @@ export function NudgesTab({
                       only the sheet flow is exposed for them. */}
                   {(source === 'zoho' || source === 'mysql') && (
                     <>
-                      <Button size="sm" onClick={() => { setRunWithSync(source === 'zoho'); setRunTarget(n) }} disabled={!n.enabled}>
+                      {/* One button, two states. When the nudge is ON this is the ordinary Run.
+                          When it is OFF the button stays usable but changes label and colour, and
+                          asks for confirmation first: a nudge often has to stay disabled while its
+                          template is pending, and the operator still needs to be able to send it
+                          once. It used to be disabled outright, which made "send this now" look
+                          broken. Force is sent explicitly (see run()) and never turns the nudge on. */}
+                      <Button
+                        size="sm"
+                        variant={n.enabled ? 'default' : 'outline'}
+                        onClick={() => {
+                          setRunWithSync(source === 'zoho')
+                          setRunTarget(n)
+                        }}
+                        title={
+                          n.enabled
+                            ? 'Fetch eligible leads and send'
+                            : 'This nudge is OFF — fetch eligible leads and send once'
+                        }
+                      >
                         {running === n.id ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Play className="h-4 w-4 mr-1" />}
-                        Run
+                        {source === 'zoho' && !n.enabled ? 'Fetch & Send' : n.enabled ? 'Run' : 'Run once'}
                       </Button>
                       {source === 'zoho' && (
                         <Button size="sm" variant="outline" onClick={() => openPreview(n)}>
@@ -688,7 +708,9 @@ export function NudgesTab({
       <AlertDialog open={!!runTarget} onOpenChange={(o) => !o && setRunTarget(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Run nudge &ldquo;{runTarget?.name}&rdquo;?</AlertDialogTitle>
+            <AlertDialogTitle>
+              {runTarget && !runTarget.enabled ? 'Send once from a paused nudge' : 'Run nudge'} &ldquo;{runTarget?.name}&rdquo;?
+            </AlertDialogTitle>
             <AlertDialogDescription>
               {runTarget?.channel === 'whatsapp'
                 ? 'This will send WhatsApp template messages (Meta Cloud API) to every eligible lead that hasn\'t hit the sequence limit.'
@@ -698,17 +720,34 @@ export function NudgesTab({
               scheduled run.
             </AlertDialogDescription>
           </AlertDialogHeader>
+
+          {runTarget && !runTarget.enabled && (
+            <p className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
+              <b>{runTarget.name}</b> is currently <b>OFF</b>. This sends it once, now.
+              It does <b>not</b> switch it on — the scheduler will keep ignoring it until you enable it.
+              Nothing goes out until you confirm below.
+            </p>
+          )}
+
           <div className="flex items-center gap-2 py-1">
             <Switch id="run-sync" checked={runWithSync} onCheckedChange={setRunWithSync} />
             <Label htmlFor="run-sync" className="text-sm font-normal">
               Sync from Zoho first
-              <span className="block text-xs text-muted-foreground">uncheck to send to already-synced leads (e.g. when the Zoho token is expired)</span>
+              <span className="block text-xs text-muted-foreground">
+                {runTarget?.channel === 'whatsapp' && runTarget?.zohoCriteria === null
+                  ? 'ignored — this nudge reads the business database, not the CRM'
+                  : 'uncheck to send to already-synced leads (e.g. when the Zoho token is expired)'}
+              </span>
             </Label>
           </div>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction onClick={() => runTarget && run(runTarget)}>
-              {running ? 'Running…' : runTarget?.channel === 'whatsapp' ? 'Send WhatsApp messages' : 'Send emails'}
+              {running
+                ? 'Running…'
+                : runTarget?.channel === 'whatsapp'
+                  ? 'Send WhatsApp messages'
+                  : 'Send emails'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -720,8 +759,13 @@ export function NudgesTab({
           <DialogHeader>
             <DialogTitle>Run complete: {runResult?.nudgeKey}</DialogTitle>
             <DialogDescription>
+              {runResult?.forced ? (
+                <span className="mb-1 block text-warning">
+                  One-off run on a nudge that is <b>OFF</b> — the scheduler is still ignoring it.
+                </span>
+              ) : null}
               {runResult?.syncedFromZoho !== null && runResult?.syncedFromZoho !== undefined
-                ? `${runResult.syncedFromZoho} leads synced from Zoho · `
+                ? `${runResult.syncedFromZoho} leads synced from Zoho${runResult.syncedVia ? ` (via ${runResult.syncedVia.toUpperCase()})` : ''} · `
                 : ''}
               {runResult?.leadsConsidered} leads considered ·{' '}
               <b className="text-success">{runResult?.sent} sent</b> ·{' '}

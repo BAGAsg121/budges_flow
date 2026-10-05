@@ -60,3 +60,30 @@ export const SHEET_DEDUP_RULE =
 export function skipsAlreadyMessaged(n: NudgeLike): boolean {
   return nudgeSourceOf(n) !== 'sheet'
 }
+
+/**
+ * May this nudge be run right now?
+ *
+ * `enabled` means "the scheduler and the automatic paths may act on this". It is deliberately
+ * separate from "may the operator send it once, by hand": a nudge often has to stay disabled while
+ * its template is pending, or while it is being set up, and an operator who has just clicked a
+ * button labelled with the audience it will reach has made the decision explicitly. So `force`
+ * permits a single deliberate run and nothing else — it never turns the nudge on, and the scheduler
+ * still ignores it.
+ *
+ * Kept here, dependency-free, so the rule is testable and so the UI and the API cannot disagree
+ * about when the button is available.
+ */
+export function runGuard(
+  nudge: { enabled: boolean },
+  force?: boolean
+): { ok: true; forced: boolean } | { ok: false; error: string } {
+  if (nudge.enabled) return { ok: true, forced: false }
+  if (force) return { ok: true, forced: true }
+  return {
+    ok: false,
+    error:
+      'Nudge is disabled. Enable it first, or run it once with an explicit force (the UI offers ' +
+      '"Fetch & Send" for this) — enabling it is what lets the scheduler send it automatically.',
+  }
+}
