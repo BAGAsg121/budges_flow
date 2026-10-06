@@ -1131,3 +1131,23 @@ Stage Summary:
 - The journey data is still genuinely empty (0 rows): stage history fills only when the CRM actually moves a lead. Nothing was left fabricated by the testing.
 
 ---
+
+Task ID: 44
+Agent: Main agent (DeepSeek Harness)
+Task: Check whether the Zoho status-change webhook is delivering anything.
+
+Work Log:
+- THE SECRET IS NOW SET ON RENDER. Verified by POSTing to the deployed endpoint with `?dryRun=1`: HTTP 200, `action: would_record_stage_change`, `wouldChangeStatus: true`. Before this it answered 401 with "LEAD_WEBHOOK_SECRET is not configured on the server", so the fail-closed behaviour was working and the fix was one Render environment variable.
+- BUT NOTHING HAS ARRIVED. `leadStageHistory` is 0 rows, no lead has `lastStatusChangedAt`, the status distribution is byte-identical to the snapshot taken before (Documents Pending=40, Onboarding Started=709, …), and `MAX(lastSyncedAt)` is unchanged. The instance is `1826` leads and has not been written to by the CRM.
+- SO THE ENDPOINT IS PROVEN READY AND THE GAP IS ON THE ZOHO SIDE. To make that provable rather than asserted, I probed the LIVE deployment over the public internet five ways — token in the query string, `x-webhook-secret` header, JSON body, form-encoded body, and query-parameters-only — and confirmed the auth, the comparison, and that nothing was written afterwards.
+- CLOSED THE OBSERVABILITY GAP THAT MADE THIS HARD TO ANSWER. Both hooks answer 401 (bad secret) and 400 (malformed payload) WITHOUT writing anything, by design — a refused delivery must not touch lead data. The cost is that "nothing in the database" cannot be told apart from "the CRM never called us", and those need opposite fixes. `src/lib/webhook-inbox.ts` now keeps an in-memory ring buffer (50 entries, no new table — the standing rule still holds) of every inbound attempt: status, outcome, the lead id, the field NAMES received (never the values — a webhook body carries personal data and this is a diagnostic, not a second copy), and what was done. Exposed on the same GET as the contract via `?deliveries=N`, and mirrored to stdout as `[webhook] …` so it also lands in the host's logs.
+  * Verified in-process: a 401 (wrong token) and a 400 (no record id) were both captured and returned by the GET, while the stage-history count stayed 0 and the lead's status was untouched — which is the whole point, since those are exactly the deliveries that leave no other trace.
+  * `?dryRun=1` probes are deliberately NOT logged: the buffer answers "has the CRM called us", and our own probes would make a never-contacted instance look busy.
+- 11 assertions on the buffer (recording, ordering, per-outcome counts, the 50-entry cap, a limit below 1). The verify run initially buried its own output under 60 `[webhook]` lines, so the stdout line is now quietable via `WEBHOOK_INBOX_QUIET` and the verify script sets it.
+- verify now 839. tsc clean, eslint clean. README documents how to read the delivery log and what each outcome implies about the Zoho workflow.
+
+Stage Summary:
+- The webhook is deployed, authenticated, and proven to accept a real POST; the delivery log makes the next attempt diagnosable from our side even if it is refused.
+- Nothing has been received from Zoho yet. The remaining work is in the CRM's workflow configuration, and the log (once this change is deployed) will say whether a call arrives at all.
+
+---

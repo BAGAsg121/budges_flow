@@ -31,6 +31,7 @@ import { upsertLeadWithJourney } from '@/lib/journey-sync'
 import { recalculateScores } from '@/lib/score-leads'
 import { isLeadWebhookAuthorized } from '@/lib/cron-auth'
 import { leadRecordId, leadStatusFrom, payloadFields, readWebhookPayload } from '@/lib/webhook-payload'
+import { deliverySummary, recentDeliveries, recordDelivery } from '@/lib/webhook-inbox'
 import {
   attributionWindowHours,
   daysBetween,
@@ -59,6 +60,16 @@ const LOG_SELECT = {
 
 export async function POST(req: NextRequest) {
   if (!isLeadWebhookAuthorized(req)) {
+    // Recorded before answering, so a refused delivery is still visible from our side. Without this,
+    // "nothing in the database" cannot be told apart from "the CRM never called".
+    recordDelivery({
+      hook: 'lead',
+      status: 401,
+      outcome: 'unauthorized',
+      reason: process.env.LEAD_WEBHOOK_SECRET
+        ? 'wrong or missing token'
+        : 'LEAD_WEBHOOK_SECRET is not set on the server, so this hook is closed',
+    })
     return NextResponse.json(
       {
         ok: false,
@@ -72,11 +83,19 @@ export async function POST(req: NextRequest) {
 
   const payload = await readWebhookPayload(req)
   if (!payload) {
+    recordDelivery({ hook: 'lead', status: 400, outcome: 'bad_payload', reason: 'could not read a record from the body' })
     return NextResponse.json({ ok: false, error: 'Could not read a lead record from the request body' }, { status: 400 })
   }
 
   const zohoId = leadRecordId(payload)
   if (!zohoId) {
+    recordDelivery({
+      hook: 'lead',
+      status: 400,
+      outcome: 'bad_payload',
+      reason: 'payload has no record id',
+      fields: payloadFields(payload),
+    })
     return NextResponse.json(
       {
         ok: false,
@@ -121,6 +140,8 @@ export async function POST(req: NextRequest) {
   }
 
   // ---- dry run: report the comparison, write nothing ------------------------
+  // Deliberately NOT recorded in the delivery log: that log answers "has the CRM called us", and a
+  // dry run is our own probe. Counting probes would make a never-contacted instance look busy.
   if (dryRun) {
     let attribution: ReturnType<typeof pickAttribution> = null
     if (existing && wouldChange) {
@@ -180,6 +201,21 @@ export async function POST(req: NextRequest) {
   const action = !existing ? 'created_lead' : outcome.changed ? 'stage_changed' : 'no_change'
   const score = lead?.engagementScore ?? 0
 
+  recordDelivery({
+    hook: 'lead',
+    status: 200,
+    outcome: 'accepted',
+    leadId: zohoId,
+    fields: payloadFields(payload),
+    detail:
+      outcome.changed
+        ? `${action}: ${previous ?? '(first seen)'} → ${incoming}` +
+          (outcome.attributedTo ? ` (attributed to ${outcome.attributedTo})` : ' (no nudge in the window)')
+        : action === 'created_lead'
+          ? 'created_lead: first sighting, no transition recorded'
+          : `no_change: already ${previous ?? 'unset'}`,
+  })
+
   return NextResponse.json({
     ...base,
     dryRun: false,
@@ -212,13 +248,15 @@ export async function POST(req: NextRequest) {
   })
 }
 
-/** GET documents the contract, so the URL can be checked from a browser without a payload. */
-export async function GET() {
+/** GET documents the contract AND reports recent deliveries, so arriving-but-refused is visible. */
+export async function GET(req: NextRequest) {
+  const limit = Math.min(Number(req.nextUrl.searchParams.get('deliveries') || 20), 50)
   return NextResponse.json({
     ok: true,
     purpose: 'Record a CRM stage change: send the lead and its NEW status, the app compares it with what it holds.',
     method: 'POST',
     auth: 'LEAD_WEBHOOK_SECRET as ?token=, x-webhook-secret, or Authorization: Bearer',
+    secretConfigured: Boolean(process.env.LEAD_WEBHOOK_SECRET),
     accepts: [
       'POST application/json',
       'POST application/x-www-form-urlencoded',
@@ -228,8 +266,16 @@ export async function GET() {
     optionalFields: ['every other field you want kept current — full name, email, mobile, company, business vertical, KYC counts'],
     dryRun: 'add ?dryRun=1 to see what the call would do without writing anything',
     attributionWindowHours: attributionWindowHours(),
+    /**
+     * Every inbound attempt, newest first — including the refused ones. This is how "nothing was
+     * recorded" is separated from "nothing arrived": `deliverySummary.total === 0` means the CRM has
+     * genuinely never called this instance.
+     */
+    deliverySummary: deliverySummary(),
+    recentDeliveries: recentDeliveries(limit),
     note:
       'Send only the NEW status. The comparison is done here against the stored value, so the CRM does ' +
-      'not need to know the old one. A repeat delivery for the same change records nothing.',
+      'not need to know the old one. A repeat delivery for the same change records nothing. The delivery ' +
+      'log is in-memory: it resets when the instance restarts.',
   })
 }

@@ -40,6 +40,7 @@ import { getStaticBaseUrl } from '@/lib/base-url'
 import { isLeadWebhookAuthorized } from '@/lib/cron-auth'
 import { explainWhatsAppError } from '@/lib/whatsapp-errors'
 import { leadRecordId, payloadFields, readWebhookPayload } from '@/lib/webhook-payload'
+import { deliverySummary, recentDeliveries, recordDelivery } from '@/lib/webhook-inbox'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
@@ -55,7 +56,13 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ key
 
   if (!isLeadWebhookAuthorized(req)) {
     // 401 even when the secret is unset — never a 200 with no action, which would look like a
-    // working integration while nothing ever sends.
+    // working integration while nothing ever sends. Recorded so a refusal is visible from our side.
+    recordDelivery({
+      hook: `nudge:${key}`,
+      status: 401,
+      outcome: 'unauthorized',
+      reason: process.env.LEAD_WEBHOOK_SECRET ? 'wrong or missing token' : 'LEAD_WEBHOOK_SECRET is not set on the server',
+    })
     return NextResponse.json(
       {
         ok: false,
@@ -69,6 +76,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ key
 
   const nudge = await db.nudge.findUnique({ where: { key } })
   if (!nudge) {
+    recordDelivery({ hook: `nudge:${key}`, status: 404, outcome: 'not_found', reason: 'no nudge with that key' })
     return NextResponse.json({ ok: false, error: `No nudge with key "${key}"` }, { status: 404 })
   }
   if (!nudge.enabled) {
@@ -192,10 +200,25 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ key
   })
 
   if (delivery.skipped) {
+    recordDelivery({
+      hook: `nudge:${key}`,
+      status: 200,
+      outcome: 'accepted',
+      leadId: zohoId,
+      detail: `skipped: ${delivery.skipped}`,
+    })
     return NextResponse.json({ ...base, action: 'skipped', reason: delivery.skipped })
   }
 
   await db.nudge.update({ where: { id: nudge.id }, data: { lastRunAt: new Date() } })
+
+  recordDelivery({
+    hook: `nudge:${key}`,
+    status: 200,
+    outcome: 'accepted',
+    leadId: zohoId,
+    detail: delivery.ok ? `sent via ${delivery.templateName ?? 'free-form'}` : `failed: ${delivery.error ?? 'unknown'}`,
+  })
 
   if (!delivery.ok) {
     return NextResponse.json({
@@ -217,7 +240,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ key
   })
 }
 
-/** GET documents the contract, so the URL can be checked from a browser without a payload. */
+/** GET documents the contract and reports recent deliveries, so arriving-but-refused is visible. */
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ key: string }> }) {
   const { key } = await params
   const nudge = await db.nudge.findUnique({ where: { key } })
@@ -230,6 +253,9 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ key
     enabled: nudge.enabled,
     template: nudge.whatsappTemplateName,
     filters: parseFilters(nudge.filters),
+    secretConfigured: Boolean(process.env.LEAD_WEBHOOK_SECRET),
+    deliverySummary: deliverySummary(),
+    recentDeliveries: recentDeliveries(20),
     // Reported so a misconfigured server is obvious from the URL alone.
     accepts: ['POST application/json', 'POST application/x-www-form-urlencoded', 'POST ?token=…'],
     auth: 'LEAD_WEBHOOK_SECRET as ?token=, x-webhook-secret header, or Authorization: Bearer',

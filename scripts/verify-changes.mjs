@@ -12,6 +12,7 @@ import { DEFAULT_NUDGES, ZOHO_CRITERIA, LEAD_STATUS, PAY_ACTIVATION_FEE_URL, WHA
 import { MYSQL_FLOW_KEYS, isMysqlFlowKey, partitionVerifyRows, windowOverlapMinutes, windowMinutesFor } from '../src/lib/mysql-nudges.ts'
 import { cadenceHoursOf, cadenceDue } from '../src/lib/cadence.ts'
 import { extractRecord, leadRecordId, leadStatusFrom, payloadFields } from '../src/lib/webhook-payload.ts'
+import { deliverySummary, recentDeliveries, recordDelivery } from '../src/lib/webhook-inbox.ts'
 import {
   attributionWindowHours,
   computeScore,
@@ -73,6 +74,8 @@ import {
 } from '../src/lib/meta-template-analytics.ts'
 
 let failures = 0
+/** Silence the webhook delivery log: the checks below record dozens of entries and would bury output. */
+process.env.WEBHOOK_INBOX_QUIET = 'true'
 /** Total assertions run. Printed in the summary so the count is never transcribed by hand. */
 let total = 0
 /** --quiet prints only failures and the summary; useful when iterating in a tight loop. */
@@ -970,6 +973,28 @@ check('hook: a missing status is null, not empty string', leadStatusFrom({ id: '
 check('hook: a blank status is null', leadStatusFrom({ Lead_Status: '  ' }), null)
 check('hook: the status is trimmed', leadStatusFrom({ Lead_Status: ' New ' }), 'New')
 check('hook: field names are listed for the error message', payloadFields({ b: 1, a: 2 }).join(','), 'a,b')
+
+// --- the inbound delivery log ------------------------------------------------
+// Both hooks answer 401/400 without writing anything, by design. That makes "nothing in the DB"
+// ambiguous between "the CRM never called" and "it called and we refused" — this log is the only
+// thing that separates them, so its behaviour is pinned.
+const inboxBefore = deliverySummary().total
+const d1 = recordDelivery({ hook: 'lead', status: 401, outcome: 'unauthorized', reason: 'wrong token' })
+check('inbox: a delivery is recorded', deliverySummary().total, inboxBefore + 1)
+check('inbox: it is timestamped', typeof d1.at, 'string')
+check('inbox: the outcome is counted', deliverySummary().byOutcome.unauthorized >= 1, true)
+recordDelivery({ hook: 'lead', status: 400, outcome: 'bad_payload', reason: 'no id', fields: ['Full_Name'] })
+recordDelivery({ hook: 'lead', status: 200, outcome: 'accepted', leadId: 'z1', detail: 'stage_changed: A → B' })
+check('inbox: totals add up', deliverySummary().total, inboxBefore + 3)
+check('inbox: the newest entry is first', recentDeliveries(3)[0].detail, 'stage_changed: A → B')
+check('inbox: accepted is counted', deliverySummary().byOutcome.accepted >= 1, true)
+check('inbox: bad_payload is counted', deliverySummary().byOutcome.bad_payload >= 1, true)
+check('inbox: the last timestamp is reported', typeof deliverySummary().lastAt, 'string')
+// Capped, so a flood cannot grow the buffer without bound.
+for (let i = 0; i < 60; i++) recordDelivery({ hook: 'lead', status: 200, outcome: 'accepted' })
+check('inbox: the buffer is capped at 50', recentDeliveries(100).length, 50)
+check('inbox: asking for more than the cap still returns the cap', recentDeliveries(999).length, 50)
+check('inbox: a limit of 0 still returns at least one', recentDeliveries(0).length, 1)
 
 // --- Zoho MCP tool selection and argument building ---------------------------
 // The real tool list from the live server. The bug this guards against: every tool name

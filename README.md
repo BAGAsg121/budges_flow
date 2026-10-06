@@ -1374,6 +1374,44 @@ worth recording.
 curl "https://<host>/api/hooks/lead?token=$LEAD_WEBHOOK_SECRET"
 ```
 
+### Telling "never arrived" from "arrived and refused"
+
+Both hooks answer `401` for a bad secret and `400` for a malformed payload **without writing
+anything** — a refused delivery must not touch lead data. That makes "nothing in the database"
+ambiguous, and the two causes need completely different fixes. So every inbound attempt is recorded
+in an in-memory log (no new table), readable from the same URL:
+
+```bash
+curl "https://<host>/api/hooks/lead?token=$LEAD_WEBHOOK_SECRET&deliveries=5"
+```
+
+```json
+{
+  "secretConfigured": true,
+  "deliverySummary": { "total": 3, "byOutcome": { "accepted": 2, "bad_payload": 1 }, "lastAt": "…" },
+  "recentDeliveries": [
+    { "at": "…", "status": 400, "outcome": "bad_payload", "reason": "payload has no record id", "fields": ["Full_Name"] }
+  ]
+}
+```
+
+Read it like this:
+
+| What you see | What it means |
+| --- | --- |
+| `deliverySummary.total: 0` | The CRM has **never called this instance**. Look at the Zoho workflow: is it *Active*, are **Instant Actions enabled**, is the trigger condition matching, and does Zoho's own webhook log show a call? |
+| `outcome: "unauthorized"` | It called, with the wrong or no token — check the `?token=` in the URL. |
+| `outcome: "bad_payload"` | It called without a usable record id. `fields` lists what it did send, which is exactly what the workflow's parameter list needs fixing against. |
+| `outcome: "accepted"` | It arrived and was processed; `detail` says what happened. |
+
+The log is **in-memory on purpose** — it is diagnostic, expected to be lost on a restart, and adding
+a table for it would be worse than the problem. An empty log after a redeploy is a fact about the
+process, not about the CRM. Every entry is also written to stdout as `[webhook] …`, so it appears in
+the host's logs.
+
+`dryRun` probes are deliberately **not** logged: that log answers "has the CRM called us", and our own
+probes would make a never-contacted instance look busy.
+
 `/api/hooks/` is in the middleware allowlist and the route authenticates itself, so this works
 unauthenticated from Zoho while staying closed to everyone else. Treat the URL as a credential.
 
