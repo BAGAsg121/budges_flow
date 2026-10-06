@@ -52,11 +52,62 @@ model Lead {
   lastSyncedAt           DateTime  @default(now())
   createdAt              DateTime  @default(now())
 
-  messageLogs MessageLog[]
+  // --- V2: engagement scoring and journey tracking -------------------------
+  // Added with scripts/add-v2-columns.mjs (additive ALTERs only).
+  /** 0..SCORE_MAX, recomputed from MessageLog history on every sync + cron. Reporting only. */
+  engagementScore        Int       @default(0)
+  scoreLastCalculatedAt  DateTime?
+  /** JSON: per-signal point totals, for the score breakdown panel. */
+  scoreBreakdown         String?   @db.Text
+  /** Date of the first SUCCESSFUL send ever — the clock for time-to-conversion. */
+  firstNudgeSentAt       DateTime?
+  /** When leadStatus last changed, so timeInPrevStageHours can be computed on the next change. */
+  lastStatusChangedAt    DateTime?
+  /** Set only when the lead reaches the converted stage: days from firstNudgeSentAt. */
+  totalDaysToConvert     Float?
+
+  stageHistory LeadStageHistory[]
+  messageLogs  MessageLog[]
 
   @@index([leadStatus])
   @@index([businessVertical])
+  @@index([engagementScore])
   @@map("nudge_lead")
+}
+
+/**
+ * V2 — one row per detected CRM stage transition for a lead.
+ *
+ * Written by the Zoho sync when a lead's Lead_Status differs from the stored one. Attribution is
+ * PROBABILISTIC, not causal: it records which nudge was last sent before the change, and nothing
+ * more. See src/lib/stage-attribution.ts for the rule and its window.
+ *
+ * Table created with scripts/create-stage-history-table.mjs (CREATE TABLE IF NOT EXISTS only).
+ */
+model LeadStageHistory {
+  id                      String      @id @default(cuid())
+  leadId                  String
+  lead                    Lead        @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  fromStatus              String?
+  toStatus                String
+  detectedAt              DateTime    @default(now())
+  /** The last nudge sent before this change, when one falls inside the attribution window. */
+  triggeredByNudgeId      String?
+  triggeredByNudge        Nudge?      @relation(fields: [triggeredByNudgeId], references: [id])
+  triggeredByMessageLogId String?
+  triggeredByMessageLog   MessageLog? @relation(fields: [triggeredByMessageLogId], references: [id])
+  /** Hours spent in fromStatus before transitioning. Null when there is no prior timestamp. */
+  timeInPrevStageHours    Float?
+  /** Hours between the attributed send and the detected change, for the impact report. */
+  hoursSinceNudge         Float?
+  /** Denormalised so the impact report needs no join: which message in the sequence. */
+  attributedMessageNumber Int?
+
+  @@index([leadId, detectedAt])
+  @@index([toStatus])
+  @@index([triggeredByNudgeId])
+  @@index([detectedAt])
+  @@map("nudge_lead_stage_history")
 }
 
 // A reusable nudge definition. channel decides how it is delivered:
@@ -87,6 +138,8 @@ model Nudge {
   updatedAt            DateTime  @updatedAt
 
   messageLogs MessageLog[]
+  /** V2: stage changes attributed to this nudge. */
+  stageHistory LeadStageHistory[]
 
   @@map("nudge_config")
 }
@@ -127,6 +180,9 @@ model MessageLog {
   ctaClickedAt     DateTime? // when the first click arrived
   engagementStatus String    @default("sent") // sent | opened | replied
   createdAt        DateTime  @default(now())
+
+  /** V2: stage changes attributed to this specific message. */
+  stageHistory LeadStageHistory[]
 
   @@index([leadId, nudgeId])
   @@index([nudgeId, createdAt])

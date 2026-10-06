@@ -12,6 +12,7 @@ import { ThemeToggle } from '@/components/app/theme-toggle'
 import { TABS, tabById, type TabId } from '@/components/app/nav'
 import { DashboardTab } from '@/components/app/dashboard-tab'
 import { LeadsTab } from '@/components/app/leads-tab'
+import { JourneyTab } from '@/components/app/journey-tab'
 import { NudgesTab } from '@/components/app/nudges-tab'
 import { TemplatesTab } from '@/components/app/templates-tab'
 import { LogsTab } from '@/components/app/logs-tab'
@@ -266,6 +267,7 @@ export default function Home() {
           <div className="mx-auto w-full max-w-7xl">
             {tab === 'dashboard' ? <DashboardTab refreshKey={refreshKey} /> : null}
             {tab === 'leads' ? <LeadsTab refreshKey={refreshKey} /> : null}
+            {tab === 'journey' ? <JourneyTab refreshKey={refreshKey} /> : null}
             {tab === 'nudges' ? (
               <NudgesTab
                 refreshKey={refreshKey}

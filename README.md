@@ -71,6 +71,79 @@ npm start                   # node .next/standalone/server.js  (PORT env, defaul
 
 ---
 
+## V2 — the lead journey and the engagement score
+
+V1 answered *what did we send*. V2 answers *did it work*, by recording where a lead was when we
+messaged it and where it went afterwards. Four moving parts:
+
+| Piece | What it does | Where |
+| --- | --- | --- |
+| Stage history | One row per detected CRM status transition, attributed to the last nudge before it | `nudge_lead_stage_history` |
+| Engagement score | 0–100 from opens, replies, CTA taps and stage changes | `journey.ts` (maths) + `score-leads.ts` (job) |
+| Journey drawer | Score breakdown, stage timeline, send history for one lead | Leads tab → click a row |
+| Journey tab | Stage funnel, time per stage, ranked nudge impact, score distribution | **Journey** tab |
+
+**The one thing to read before quoting any of it.** Attribution is the *last successful send before a
+change, within `ATTRIBUTION_WINDOW_HOURS` (default 72)*. It records what preceded a change, **not what
+caused it** — a lead may move stage because someone phoned them. Every API response carries
+`attributionIsProbabilistic: true` and every panel says so in words, because this data is the kind
+that gets screenshotted into a decision.
+
+Equally: **the score never decides who gets nudged.** Eligibility is still each nudge's own filters.
+Nothing in the send path reads `engagementScore`, deliberately.
+
+### Scoring model
+
+| Signal | Points | Notes |
+| --- | --- | --- |
+| Message sent (WhatsApp) | +2 each | **capped at +10** — being sent to repeatedly is not engagement |
+| Message sent (email) | +1 each | |
+| Opened / read | +5 each | one award per message opened, not per pixel hit |
+| Replied | +15 | once, however many replies |
+| CTA clicked | +20 | first tap |
+| CTA clicked 2+ times | +10 | bonus |
+| CRM status changed | +25 | a detected transition |
+
+Clamped to `SCORE_MAX` (100). Bands: **0–20 Cold · 21–45 Warming · 46–70 Engaged · 71–100 Hot**.
+Failed sends earn nothing — an attempt that reached nobody is not engagement. Scores are recalculated
+for the leads a sync touched, plus on the scheduler tick every `SCORE_RECALC_INTERVAL_MINUTES`.
+
+### The stage history ages from now
+
+A transition is recorded only when a sync sees a CRM status **different from the stored one**, so the
+table starts empty and fills as leads actually move. It cannot be backfilled — the previous statuses
+were never observed, and inventing them would fabricate a journey. The same restraint applies to
+`firstNudgeSentAt` (derived from real sends) and `totalDaysToConvert` (stamped only on reaching
+`CONVERTED_STATUSES`, and only when the first-nudge clock is known).
+
+```bash
+npm run db:add-v2-columns              # dry run — the 6 new Lead columns
+npm run db:add-v2-columns -- --apply
+npm run db:stage-history-table         # dry run — creates the ONE new table
+npm run db:stage-history-table -- --apply
+```
+
+Both are additive and idempotent: `ALTER TABLE ... ADD COLUMN` and `CREATE TABLE IF NOT EXISTS`, no
+DROP/MODIFY/RENAME, and neither touches any other table.
+
+### V2 API
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/leads/{id}/journey` | Score + breakdown, stage timeline with attribution, full send history |
+| `GET /api/leads/{id}/score` | Score and breakdown, recalculated on the spot so it cannot be stale |
+| `GET /api/reports/nudge-impact` | Per-nudge attributed conversions, split by message number |
+| `GET /api/reports/stage-flow` | Stage funnel, stage-pair transitions, average time per stage |
+| `POST /api/cron/score-leads` | Recalculate scores (`CRON_SECRET`); `{ "limit": 500 }` or `{ "all": true }` |
+
+`GET /api/leads` gained `?sort=score` / `?sort=score-asc` and `?band=hot` (whitelisted sort keys —
+an arbitrary `orderBy` from a query string is both a crash and a leak), and every lead now carries
+`engagementScore` + `scoreBand`.
+
+The impact report **excludes nudges below `minSendsForRanking` (20) from the ranking**: one send and
+one conversion is "100%" and means nothing. Stage changes with no qualifying nudge are reported as
+`organicChanges` rather than dropped.
+
 ## The interface
 
 A sidebar shell (a mobile drawer below `lg`, plus a swipeable tab strip) over five tabs:

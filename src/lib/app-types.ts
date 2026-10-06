@@ -35,6 +35,13 @@ export interface LeadDto {
   createdTime: string | null
   lastSyncedAt: string
   messagesSent: number
+  // --- V2 ---
+  engagementScore?: number
+  scoreBand?: 'cold' | 'warming' | 'engaged' | 'hot'
+  scoreLastCalculatedAt?: string | null
+  firstNudgeSentAt?: string | null
+  lastStatusChangedAt?: string | null
+  totalDaysToConvert?: number | null
 }
 
 export interface LogDto {

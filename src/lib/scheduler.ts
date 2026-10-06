@@ -12,6 +12,8 @@
 import { db } from '@/lib/db'
 import { runNudge, syncLeads, type RunSummary } from '@/lib/nudge-engine'
 import { beginMysqlSnapshot, endMysqlSnapshot } from '@/lib/mysql-nudges'
+import { recalculateScores, type ScoreRunResult } from '@/lib/score-leads'
+import { scoreRecalcIntervalMinutes } from '@/lib/journey'
 import { getStaticBaseUrl } from '@/lib/base-url'
 import { isImapConfigured, syncRepliesFromImap, type ImapSyncResult } from '@/lib/reply-tracker'
 import { nudgeSourceOf } from '@/lib/nudge-kind'
@@ -55,6 +57,9 @@ export interface SchedulerStatus {
   lastCycleTrigger: string | null
   lastResults: NudgeRunResult[]
   lastReplySync: ImapSyncResult | null
+  /** V2: engagement-score job state, so "is the score stale?" is answerable without the DB. */
+  lastScoreRunAt: string | null
+  lastScoreResult: ScoreRunResult | null
 }
 
 interface SchedulerState {
@@ -65,6 +70,9 @@ interface SchedulerState {
   lastCycleTrigger: string | null
   lastResults: NudgeRunResult[]
   lastReplySync: ImapSyncResult | null
+  /** V2: when the score job last ran, and what it produced. */
+  lastScoreRunAt: Date | null
+  lastScoreResult: ScoreRunResult | null
 }
 
 const globalForScheduler = globalThis as unknown as { __nudgeScheduler?: SchedulerState }
@@ -79,6 +87,8 @@ const state: SchedulerState =
     lastCycleTrigger: null,
     lastResults: [],
     lastReplySync: null,
+    lastScoreRunAt: null,
+    lastScoreResult: null,
   })
 
 export function isSchedulerEnabled(): boolean {
@@ -105,6 +115,8 @@ export function schedulerStatus(): SchedulerStatus {
     lastCycleTrigger: state.lastCycleTrigger,
     lastResults: state.lastResults,
     lastReplySync: state.lastReplySync,
+    lastScoreRunAt: state.lastScoreRunAt ? state.lastScoreRunAt.toISOString() : null,
+    lastScoreResult: state.lastScoreResult,
   }
 }
 
@@ -238,13 +250,44 @@ export async function pollReplies(): Promise<ImapSyncResult> {
   return result
 }
 
-/** One full cycle: nudges + reply polling. Overlapping cycles are skipped. */
-export async function runScheduledCycle(trigger = 'schedule'): Promise<SchedulerStatus> {
+/**
+ * V2 — recalculate engagement scores, but only every SCORE_RECALC_INTERVAL_MINUTES.
+ *
+ * In-memory last-run tracking is deliberate: the score job is idempotent and derivable, so losing
+ * the timestamp on a restart means one extra run, not wrong data. Persisting it would need a table
+ * for a number.
+ */
+async function maybeRecalculateScores(): Promise<void> {
+  const intervalMs = scoreRecalcIntervalMinutes() * 60 * 1000
+  if (state.lastScoreRunAt && Date.now() - state.lastScoreRunAt.getTime() < intervalMs) return
+
+  try {
+    const result = await recalculateScores({ limit: SCORE_BATCH })
+    state.lastScoreRunAt = new Date()
+    state.lastScoreResult = result
+    console.log(
+      `[score] recalculated ${result.leadsUpdated}/${result.leadsConsidered} lead(s): ` +
+        `${JSON.stringify(result.bands)}`
+    )
+  } catch (err) {
+    // Never fail the cycle for a reporting job.
+    console.error('[score] recalculation failed:', err instanceof Error ? err.message : err)
+  }
+}
+
+/** Bound per run so a large lead table cannot make one tick run past its timeout. */
+const SCORE_BATCH = 500
+
+/** One full cycle: nudges + reply polling. Overlapping cycles are skipped. */export async function runScheduledCycle(trigger = 'schedule'): Promise<SchedulerStatus> {
   if (state.running) return schedulerStatus()
   state.running = true
   try {
     state.lastResults = await runAllEnabledNudges()
     await pollReplies()
+    // V2: engagement scores, on their own interval rather than every tick. Scoring walks every
+    // lead, so running it every cycle would be pure waste — nothing about a score changes between
+    // sends, and the sync already refreshes the leads it touched.
+    await maybeRecalculateScores()
     state.runsCompleted++
     state.lastCycleAt = new Date()
     state.lastCycleTrigger = trigger

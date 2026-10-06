@@ -27,6 +27,8 @@ import { decideSend, type SendDecision, type SequenceLog } from '@/lib/sequence'
 import { ctaSendParams } from '@/lib/cta'
 import { ctaDestinationFor } from '@/lib/nudge-defaults'
 import { runGuard } from '@/lib/nudge-kind'
+import { upsertLeadWithJourney } from '@/lib/journey-sync'
+import { recalculateScores } from '@/lib/score-leads'
 import { splitByKycMatch, type KycCounts } from '@/lib/kyc-match'
 import type { Lead, Nudge } from '@prisma/client'
 
@@ -180,17 +182,25 @@ export async function selectEligibleLeads(nudgeId: string) {
   })
 }
 
-/** Upsert leads fetched from Zoho into the local DB. */
+/**
+ * Upsert leads fetched from Zoho into the local DB.
+ *
+ * Goes through upsertLeadWithJourney() rather than a plain upsert so V2 can see the PREVIOUS status
+ * and record a stage transition — an upsert discards it. Both sync paths share this so the journey
+ * is identical whichever Zoho route did the reading.
+ */
 export async function syncLeadsFromCriteria(criteria: string): Promise<number> {
   const { leads } = await searchAllLeads(criteria)
+  let changed = 0
+  const touched: string[] = []
   for (const z of leads) {
-    const data = mapZohoLead(z)
-    await db.lead.upsert({
-      where: { zohoId: data.zohoId },
-      create: data,
-      update: { ...data },
-    })
+    const outcome = await upsertLeadWithJourney(mapZohoLead(z))
+    touched.push(outcome.leadId)
+    if (outcome.changed) changed++
   }
+  if (changed) console.log(`[journey] ${changed} stage change(s) detected in this sync`)
+  // V2: scores are recalculated on every sync run, for exactly the leads this sync touched.
+  if (touched.length) await recalculateScores({ leadIds: touched })
   return leads.length
 }
 
@@ -228,6 +238,8 @@ export async function syncLeadsViaMcp(criteria: string): Promise<McpSyncResult> 
   let recordsRead = 0
   let pages = 0
   let truncated = false
+  let stageChanges = 0
+  const touched: string[] = []
 
   for (let page = 1; page <= MAX_MCP_PAGES; page++) {
     const result = await callZohoMcpTool(tool.name, page === 1 ? baseArgs : withPage(baseArgs, page))
@@ -242,11 +254,10 @@ export async function syncLeadsViaMcp(criteria: string): Promise<McpSyncResult> 
     for (const record of records) {
       const data = mapZohoLead(record as Parameters<typeof mapZohoLead>[0])
       if (!data.zohoId) continue // a record without an id cannot be upserted safely
-      await db.lead.upsert({
-        where: { zohoId: data.zohoId },
-        create: data,
-        update: { ...data },
-      })
+      // Journey-aware, so a stage change is recorded whichever Zoho route read the lead.
+      const outcome = await upsertLeadWithJourney(data)
+      touched.push(outcome.leadId)
+      if (outcome.changed) stageChanges++
       count++
     }
 
@@ -255,6 +266,9 @@ export async function syncLeadsViaMcp(criteria: string): Promise<McpSyncResult> 
     if (page === MAX_MCP_PAGES) truncated = true
   }
 
+  if (stageChanges) console.log(`[journey] ${stageChanges} stage change(s) detected in this sync`)
+  // V2: scores are recalculated on every sync run, for exactly the leads this sync touched.
+  if (touched.length) await recalculateScores({ leadIds: touched })
   return { count, tool: tool.name, args: baseArgs, recordsRead, pages, truncated }
 }
 

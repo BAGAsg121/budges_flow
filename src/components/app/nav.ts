@@ -1,6 +1,6 @@
-import { LayoutDashboard, Users, BellRing, FileText, ScrollText, ShieldAlert } from 'lucide-react'
+import { LayoutDashboard, Users, BellRing, FileText, ScrollText, ShieldAlert, Route } from 'lucide-react'
 
-export type TabId = 'dashboard' | 'leads' | 'nudges' | 'templates' | 'logs' | 'failures'
+export type TabId = 'dashboard' | 'leads' | 'journey' | 'nudges' | 'templates' | 'logs' | 'failures'
 
 export interface TabDef {
   id: TabId
@@ -25,7 +25,13 @@ export const TABS: TabDef[] = [
     id: 'leads',
     label: 'Leads',
     icon: Users,
-    description: 'EPS leads synced from Zoho CRM, with their status and KYC progress.',
+    description: 'EPS leads synced from Zoho CRM, with their engagement score, status and KYC progress.',
+  },
+  {
+    id: 'journey',
+    label: 'Journey',
+    icon: Route,
+    description: 'Where leads are, how long they spend in each stage, and which nudges preceded a move.',
   },
   {
     id: 'nudges',

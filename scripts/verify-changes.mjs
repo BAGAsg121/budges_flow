@@ -11,6 +11,17 @@ import { decideSend, sentLog } from '../src/lib/sequence.ts'
 import { DEFAULT_NUDGES, ZOHO_CRITERIA, LEAD_STATUS, PAY_ACTIVATION_FEE_URL, WHATSAPP_TEST_STATUS, MYSQL_FLOW_TEMPLATES, WA_SHEET_FLOW_TEMPLATES, ZOHO_FLOW_TEMPLATES, EPS_BUSINESS_VERTICAL, zohoDocumentsPendingCriteria, MYSQL_FLOW_LOOKBACK, CONSOLE_URL, zohoTodayIso, zohoTodayCriteria, zohoCriteriaSince, ZOHO_LEADS_CREATED_AFTER, ZOHO_TZ_OFFSET, zohoCriteriaBetween, zohoIstIso, zohoSyncOverlapMinutes } from '../src/lib/nudge-defaults.ts'
 import { MYSQL_FLOW_KEYS, isMysqlFlowKey, partitionVerifyRows, windowOverlapMinutes, windowMinutesFor } from '../src/lib/mysql-nudges.ts'
 import { cadenceHoursOf, cadenceDue } from '../src/lib/cadence.ts'
+import {
+  attributionWindowHours,
+  computeScore,
+  daysBetween,
+  isConvertedStatus,
+  pickAttribution,
+  scoreBand,
+  SCORE_BAND_LABEL,
+  SCORE_WEIGHTS,
+  timeInPrevStageHours,
+} from '../src/lib/journey.ts'
 import { buildWhatsAppParams as buildWhatsAppParamsRaw, missingSheetColumns as missingSheetColumnsRaw } from '../src/lib/whatsapp-params.ts'
 import { extractInboundText, appendInbound, INBOUND_KEEP } from '../src/lib/whatsapp-inbound.ts'
 import { explainWhatsAppError, isDeliveryCapError, isPermanentDeliveryFailure } from '../src/lib/whatsapp-errors.ts'
@@ -823,6 +834,106 @@ for (const key of ['documents_pending_wa', 'documents_submitted_review']) {
   check(`run: ${key} is runnable with force`, runGuard({ enabled: n?.enabled ?? false }, true).ok, true)
   check(`run: ${key} is fetch-driven (has a Zoho criteria to fetch with)`, Boolean(n?.zohoCriteria), true)
 }
+
+// --- V2: engagement scoring ---------------------------------------------------
+// The model is from the V2 document; each weight and each cap is pinned so a "tidy-up" of the
+// numbers cannot silently change what every stored score means.
+const jlog = (over = {}) => ({
+  id: 'log-1',
+  nudgeId: 'nudge-1',
+  channel: 'whatsapp',
+  messageNumber: 1,
+  sentOk: true,
+  sentAt: new Date('2026-10-01T10:00:00Z'),
+  opened: false,
+  replied: false,
+  ctaClicks: 0,
+  ctaClickedAt: null,
+  ...over,
+})
+
+check('score: nothing sent scores 0', computeScore([], 0).score, 0)
+check('score: nothing sent is Cold', computeScore([], 0).band, 'cold')
+check('score: one WhatsApp send is +2', computeScore([jlog()], 0).score, 2)
+check('score: one email send is +1', computeScore([jlog({ channel: 'email' })], 0).score, 1)
+// The WhatsApp send cap: being sent to repeatedly is not engagement.
+check('score: 5 WhatsApp sends hit the +10 cap', computeScore(Array.from({ length: 5 }, (_, i) => jlog({ id: `l${i}` })), 0).score, 10)
+check('score: 20 WhatsApp sends still cap at +10', computeScore(Array.from({ length: 20 }, (_, i) => jlog({ id: `l${i}` })), 0).score, 10)
+check('score: the cap is per-channel, email still adds', computeScore([...Array.from({ length: 20 }, (_, i) => jlog({ id: `w${i}` })), jlog({ id: 'e1', channel: 'email' })], 0).score, 11)
+check('score: an open is +5', computeScore([jlog({ opened: true })], 0).score, 7)
+check('score: two opens are +10', computeScore([jlog({ id: 'a', opened: true }), jlog({ id: 'b', opened: true })], 0).score, 14)
+check('score: a reply is +15, once', computeScore([jlog({ replied: true })], 0).score, 17)
+check('score: two replies still +15', computeScore([jlog({ id: 'a', replied: true }), jlog({ id: 'b', replied: true })], 0).score, 19)
+check('score: a CTA click is +20', computeScore([jlog({ ctaClicks: 1, ctaClickedAt: new Date() })], 0).score, 22)
+check('score: 2+ CTA taps add the +10 bonus', computeScore([jlog({ ctaClicks: 2, ctaClickedAt: new Date() })], 0).score, 32)
+check('score: a stage change is +25', computeScore([], 1).score, 25)
+check('score: no stage change is +0', computeScore([], 0).breakdown.statusChanged, 0)
+// A failed send reached nobody, so it earns nothing.
+check('score: a failed send earns nothing', computeScore([jlog({ sentOk: false })], 0).score, 0)
+check('score: a failed send is not counted', computeScore([jlog({ sentOk: false })], 0).counts.whatsappSent, 0)
+// Everything at once: 5 sends (hits the +10 send cap), all opened (+25), a reply (+15), a CTA
+// click (+20) with the repeat bonus (+10) and a stage change (+25) = 105 raw, clamped to 100.
+const maxed = [
+  jlog({ id: 'a', opened: true, replied: true, ctaClicks: 3, ctaClickedAt: new Date() }),
+  jlog({ id: 'b', opened: true }),
+  jlog({ id: 'c', opened: true }),
+  jlog({ id: 'd', opened: true }),
+  jlog({ id: 'e', opened: true }),
+]
+const everything = computeScore(maxed, 1)
+check('score: the raw total exceeds the cap', Object.values(everything.breakdown).reduce((a, b) => a + b, 0), 105)
+check('score: the total is clamped to the max', everything.score, 100)
+check('score: the clamp is reported', everything.capped, true)
+check('score: the breakdown still shows the raw points', everything.breakdown.ctaRepeatBonus, 10)
+check('score: a lowered max clamps lower', computeScore([], 1, { max: 20 }).score, 20)
+check('score: a raised max is honoured', computeScore([jlog({ opened: true, replied: true })], 0, { max: 500 }).score, 22)
+// The stored breakdown must round-trip: the drawer reads it as JSON.
+check('score: the breakdown serialises', typeof JSON.stringify(computeScore([jlog()], 0).breakdown), 'string')
+check('score: the breakdown has every signal', Object.keys(computeScore([], 0).breakdown).sort().join(','), 'ctaClicked,ctaRepeatBonus,emailSent,opened,replied,statusChanged,whatsappSent')
+
+// Bands — the thresholds are absolute, and the API's band FILTER must agree with them or
+// filtering by band would return a different set than the badges show.
+check('band: 0 is Cold', scoreBand(0), 'cold')
+check('band: 20 is Cold', scoreBand(20), 'cold')
+check('band: 21 is Warming', scoreBand(21), 'warming')
+check('band: 45 is Warming', scoreBand(45), 'warming')
+check('band: 46 is Engaged', scoreBand(46), 'engaged')
+check('band: 70 is Engaged', scoreBand(70), 'engaged')
+check('band: 71 is Hot', scoreBand(71), 'hot')
+check('band: 100 is Hot', scoreBand(100), 'hot')
+check('band: every band has a label', Object.keys(SCORE_BAND_LABEL).sort().join(','), 'cold,engaged,hot,warming')
+check('band: the weights match the document', JSON.stringify(SCORE_WEIGHTS), JSON.stringify({ whatsappSent: 2, whatsappSentCap: 10, emailSent: 1, opened: 5, replied: 15, ctaClicked: 20, ctaRepeatBonus: 10, ctaRepeatThreshold: 2, statusChanged: 25 }))
+
+// --- V2: attribution ----------------------------------------------------------
+const detected = new Date('2026-10-04T10:00:00Z')
+const within = jlog({ id: 'recent', sentAt: new Date('2026-10-03T10:00:00Z') }) // 24h before
+const outside = jlog({ id: 'old', sentAt: new Date('2026-09-20T10:00:00Z') }) // way outside
+check('attribution: the only recent send is credited', pickAttribution([within], detected, 72)?.messageLogId, 'recent')
+check('attribution: a send outside the window is not credited', pickAttribution([outside], detected, 72), null)
+check('attribution: no sends means nobody is credited', pickAttribution([], detected, 72), null)
+check('attribution: a failed send is never credited', pickAttribution([{ ...within, sentOk: false }], detected, 72), null)
+check('attribution: a send with no sentAt cannot be credited', pickAttribution([{ ...within, sentAt: null }], detected, 72), null)
+// The MOST RECENT qualifying send wins, not the first one found.
+const twoSends = [jlog({ id: 'far', sentAt: new Date('2026-10-01T10:00:00Z') }), jlog({ id: 'near', sentAt: new Date('2026-10-04T06:00:00Z') })]
+check('attribution: the most recent send wins', pickAttribution(twoSends, detected, 72)?.messageLogId, 'near')
+check('attribution: hours since the send is measured', pickAttribution([within], detected, 72)?.hoursSinceNudge, 24)
+check('attribution: the message number is carried for the report', pickAttribution([jlog({ id: 'm3', messageNumber: 3, sentAt: new Date('2026-10-04T09:00:00Z') })], detected, 72)?.messageNumber, 3)
+// A send AFTER the change cannot have caused it.
+check('attribution: a later send is not credited', pickAttribution([jlog({ id: 'later', sentAt: new Date('2026-10-05T10:00:00Z') })], detected, 72), null)
+// The window is a parameter, so the env default is testable separately.
+check('attribution: a wider window credits an older send', pickAttribution([outside], detected, 24 * 60)?.messageLogId, 'old')
+check('attribution: the default window is 72h', attributionWindowHours(), 72)
+
+// --- V2: time maths -----------------------------------------------------------
+check('time: hours in the previous stage', timeInPrevStageHours(new Date('2026-10-01T10:00:00Z'), detected), 72)
+check('time: no prior timestamp means null, not zero', timeInPrevStageHours(null, detected), null)
+check('time: a backwards clock yields null rather than a negative', timeInPrevStageHours(new Date('2026-10-05T10:00:00Z'), detected), null)
+check('time: days between two instants', daysBetween(new Date('2026-10-01T10:00:00Z'), new Date('2026-10-09T10:00:00Z')), 8)
+check('time: days with no first nudge is null', daysBetween(null, detected), null)
+check('days: a change before the first nudge is null, not negative', daysBetween(new Date('2026-10-05T10:00:00Z'), detected), null)
+check('converted: the default converted status is Closed Won', isConvertedStatus('Closed Won'), true)
+check('converted: a non-converted status is false', isConvertedStatus('Agreement Signed'), false)
+check('converted: null is false', isConvertedStatus(null), false)
 
 // --- Zoho MCP tool selection and argument building ---------------------------
 // The real tool list from the live server. The bug this guards against: every tool name
