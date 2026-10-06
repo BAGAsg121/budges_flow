@@ -1298,7 +1298,88 @@ npm run wa:repoint -- --apply
 npm run wa:templates -- --create-missing   # submits the UTILITY templates for review
 ```
 
-## CRM lead webhook (push a lead the moment it qualifies)
+## CRM webhooks
+
+Two hooks, both under `/api/hooks/` (exempt from Basic auth in `src/middleware.ts` because a CRM
+cannot answer an HTTP Basic prompt — each authenticates itself with `LEAD_WEBHOOK_SECRET` and **fails
+closed** when that is unset).
+
+| URL | Use it for |
+| --- | --- |
+| `POST /api/hooks/lead?token=…` | **Record a stage change.** Zoho fires this whenever a lead moves status. |
+| `POST /api/hooks/nudge/{key}?token=…` | **Trigger one nudge** for a lead that just qualified. |
+
+Both accept the same body shapes — a flat record, `{ "Leads": { … } }`, `{ "data": [ … ] }`,
+form-encoded fields, or the fields as query parameters — through one shared reader
+(`src/lib/webhook-payload.ts`), because the failure mode of getting this wrong is identical in both
+cases and invisible: a 200 with no action, so the CRM records a successful delivery while nothing
+happened.
+
+### `POST /api/hooks/lead` — stage changes
+
+**Send only the NEW status.** The comparison is done here, against what is already stored, so the CRM
+does not need to know the old value. Minimum useful payload:
+
+```json
+{ "id": "<zoho record id>", "Lead_Status": "Agreement Signed" }
+```
+
+Add any other fields you want kept current (name, email, mobile, company, business vertical, KYC
+counts) — they are written through the same mapping the sync uses. The record id is required: it is
+the only key the comparison can be made on.
+
+What it does, in order: looks up the stored status → if the incoming status is different, records a
+`LeadStageHistory` row and attributes it to the last successful nudge within
+`ATTRIBUTION_WINDOW_HOURS` → stamps `lastStatusChangedAt` → recalculates that lead's score.
+
+It **answers with the comparison**, so the Zoho log is worth reading:
+
+```json
+{
+  "ok": true,
+  "action": "stage_changed",
+  "fromStatus": "Documents Pending",
+  "toStatus": "Agreement Signed",
+  "attributedTo": "documents_pending_wa",
+  "hoursSinceNudge": 4.2,
+  "timeInPrevStageHours": 26.5,
+  "score": 25,
+  "scoreBandLabel": "Warming",
+  "summary": "Documents Pending → Agreement Signed · attributed to documents_pending_wa"
+}
+```
+
+`action` is one of `created_lead` (first sighting — no transition is recorded, because there is no
+"from"), `stage_changed`, or `no_change`.
+
+> **A repeat delivery records nothing.** Sending the same status twice creates one history row, not
+> two — so a Zoho retry cannot inflate the journey data. Verified live.
+
+> **`?dryRun=1` reports what the call would do and writes nothing.** Use it to confirm a workflow is
+> sending the right fields before letting it touch the journey: it returns `would_record_stage_change`
+> / `would_update_only` / `would_create_lead` plus the attribution it would apply.
+
+> **With no status field the lead is updated and NO transition is recorded** — which looks like the
+> webhook working while the journey stays empty. The response carries a `warning` when that happens,
+> rather than passing silently.
+
+**Setting it up in Zoho CRM.** Workflow → *Instant Action* → *Webhook* on Leads, triggered on
+"Lead Status changes", method POST, URL `https://<host>/api/hooks/lead?token=<LEAD_WEBHOOK_SECRET>`,
+and pass the record id plus the status (`Lead_Status`) and whatever else you want synced. Because the
+comparison happens here, you can trigger it on **every** status change and let the app decide what is
+worth recording.
+
+```bash
+# check the contract without sending anything
+curl "https://<host>/api/hooks/lead?token=$LEAD_WEBHOOK_SECRET"
+```
+
+`/api/hooks/` is in the middleware allowlist and the route authenticates itself, so this works
+unauthenticated from Zoho while staying closed to everyone else. Treat the URL as a credential.
+
+
+
+### `POST /api/hooks/nudge/{key}` — trigger a nudge
 
 The scheduled sweep and the **Run** button pull from the CRM on a timer. A CRM workflow webhook does
 the opposite: Zoho tells this app about a lead the instant it meets the criteria.
@@ -1410,7 +1491,8 @@ kind of change.
 | `GET/POST /api/track/email` | shared secret | Inbound reply webhook |
 | `POST /api/cron/run` | shared secret | Run one full cycle now |
 | `GET/POST /api/cron/replies` | shared secret | Poll the mailbox for replies only |
-| `GET/POST /api/hooks/nudge/{key}` | shared secret | **CRM lead webhook** — `GET` returns the contract, `POST` upserts one lead, applies the nudge's filters and sends |
+| `GET/POST /api/hooks/nudge/{key}` | shared secret | Trigger a nudge — `GET` returns the contract, `POST` upserts one lead, applies the nudge's filters and sends |
+| `GET/POST /api/hooks/lead` | shared secret | **Record a stage change** — `POST` the lead + its new status; the app compares with what it holds and records the transition |
 
 Shared-secret callers pass `x-cron-secret` / `x-webhook-secret`, `Authorization: Bearer <secret>`,
 or `?secret=`. The CRM webhook uses `LEAD_WEBHOOK_SECRET` and accepts `?token=` instead of `?secret=`.

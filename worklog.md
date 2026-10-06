@@ -1109,3 +1109,25 @@ Stage Summary:
 - Open, unchanged: production MySQL is still unreachable from Render, so the six database-driven WhatsApp flows cannot run there yet.
 
 ---
+
+Task ID: 43
+Agent: Main agent (DeepSeek Harness)
+Task: Add a webhook so a CRM condition can push a lead plus its NEW status, and the app works out what changed by comparing it with the data it already holds.
+
+Work Log:
+- THE COMPARISON ALREADY EXISTED; this exposes it. `upsertLeadWithJourney()` (Task 42) already looks up the stored status, decides whether it moved, records the transition with attribution and stamps the timestamps. The new `POST /api/hooks/lead` is the door onto that, so the CRM can drive it in real time instead of waiting for the next sweep — and the CRM only has to send the NEW status, because the old one is already here.
+- THE SHARED PAYLOAD READER WAS EXTRACTED FIRST, not copied. `/api/hooks/nudge/{key}` already parsed the Zoho envelope shapes privately; a second copy is exactly how one endpoint starts silently rejecting a shape the other accepts, and the failure is invisible in both cases (a 200 with no action, so the CRM logs a successful delivery). `src/lib/webhook-payload.ts` now owns `extractRecord`, `readWebhookPayload`, `leadRecordId`, `leadStatusFrom` and `payloadFields`, and the nudge hook was repointed at it — 25 assertions pin the envelope shapes, the id aliases and the status aliases.
+- TWO MISTAKES MADE AND FIXED WHILE DOING IT. First, I edited the nudge route with a PowerShell `Get-Content`/`Set-Content` round-trip, which mangled its UTF-8 (every em-dash became mojibake); caught it by reading the result, restored the file from git, and redid the edit with the proper file tool. Second, I left a dead `if (!statusFromPayload)` block that only reassigned a field to itself, and an unused import — both removed before running anything.
+- IDEMPOTENT BY CONSTRUCTION, which matters because Zoho retries. A repeat delivery for the same change produces `no_change` and records nothing, so a retry cannot inflate the journey data. Proven live: two identical deliveries, one history row.
+- `?dryRun=1` WRITES NOTHING and reports the comparison, including the attribution it would apply. It exists because the alternative way to find out whether a Zoho workflow is sending the right fields is to let it corrupt the journey data — and because a new webhook is exactly when someone wants to test without consequences.
+- THE MISSING-STATUS CASE IS CALLED OUT, NOT SWALLOWED. If the payload has no status the lead is still updated and NO transition is recorded — which looks identical to the webhook working while the journey stays empty. The response carries an explicit `warning` for it, and the GET contract lists the two required fields.
+- TESTED LIVE, WITH EXACT RESTORATION. 401 with no/wrong token; 400 without an id, listing the fields actually received; `dryRun` on the same status → `would_update_only`; `dryRun` on a changed status → `would_record_stage_change` while the history count stayed 0 and the stored status was untouched; a real write with the SAME status → `no_change` and nothing recorded; a real write with a CHANGED status → `action: stage_changed`, a history row `Documents Pending → Agreement Signed`, attributed to nobody (correct — that lead has no successful send, so the change is organic), and its score went 0 → 25 from the `statusChanged` signal alone. The repeat delivery then returned `no_change` with the row count unchanged.
+  * The one fabricated row was DELETED and the lead's `leadStatus` and `lastStatusChangedAt` restored to their exact prior values, then re-read to confirm: status back, timestamp back, history count back to 0. Deleting a row this test created is restoring state, not destroying data — and leaving a fake transition in the journey would have been worse, because it would show up in the reports as a real move.
+- verify now 828 assertions. tsc clean, eslint clean. README gained a "CRM webhooks" section covering both hooks, the minimum payload, the response shape, the `dryRun` and idempotency notes, and the Zoho workflow setup.
+
+Stage Summary:
+- `POST /api/hooks/lead?token=<LEAD_WEBHOOK_SECRET>` records a stage change from the lead plus its new status, and answers with the comparison: what it was, what it is, which nudge it is attributed to, and the lead's new score.
+- Both CRM hooks now read bodies through one shared module, so they cannot drift apart in what they accept.
+- The journey data is still genuinely empty (0 rows): stage history fills only when the CRM actually moves a lead. Nothing was left fabricated by the testing.
+
+---

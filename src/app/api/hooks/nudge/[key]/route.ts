@@ -39,86 +39,16 @@ import { splitByKycMatch } from '@/lib/kyc-match'
 import { getStaticBaseUrl } from '@/lib/base-url'
 import { isLeadWebhookAuthorized } from '@/lib/cron-auth'
 import { explainWhatsAppError } from '@/lib/whatsapp-errors'
+import { leadRecordId, payloadFields, readWebhookPayload } from '@/lib/webhook-payload'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
 
 /**
- * Read a Zoho record out of whatever envelope the webhook used.
- *
- * Returns null when no record-like object can be found, which the caller turns into a 400. A
- * silent 200 here would be the worst outcome: the CRM marks the webhook delivered and the lead is
- * never nudged, with nothing anywhere saying so.
+ * The payload reading that used to live here moved to @/lib/webhook-payload, shared with
+ * /api/hooks/lead. Two copies of "which Zoho body shapes do we accept" is how one endpoint starts
+ * silently rejecting a shape the other accepts — and the failure is invisible in both cases.
  */
-function extractRecord(body: unknown): Record<string, unknown> | null {
-  if (body === null || typeof body !== 'object') return null
-
-  if (Array.isArray(body)) {
-    return body.length ? extractRecord(body[0]) : null
-  }
-
-  const obj = body as Record<string, unknown>
-
-  // Wrapped shapes first: Zoho sends { "Leads": { … } } for a module webhook.
-  for (const key of ['Leads', 'leads', 'data', 'record', 'lead']) {
-    const inner = obj[key]
-    if (inner && typeof inner === 'object') return extractRecord(inner)
-  }
-
-  // A flat form post arrives as { field: string | string[] }. Collapse single-element arrays so
-  // "Mobile: ['9876543210']" behaves like "Mobile: '9876543210'".
-  const flat: Record<string, unknown> = {}
-  for (const [k, v] of Object.entries(obj)) {
-    flat[k] = Array.isArray(v) && v.length === 1 ? v[0] : v
-  }
-  return Object.keys(flat).length ? flat : null
-}
-
-/** Accept JSON, form-encoded, or query parameters — whichever the CRM chose. */
-async function readPayload(req: NextRequest): Promise<Record<string, unknown> | null> {
-  const contentType = (req.headers.get('content-type') || '').toLowerCase()
-
-  if (contentType.includes('application/json')) {
-    try {
-      return extractRecord(await req.json())
-    } catch {
-      return null
-    }
-  }
-
-  if (contentType.includes('form-urlencoded') || contentType.includes('multipart/form-data')) {
-    try {
-      const form = await req.formData()
-      const obj: Record<string, unknown> = {}
-      for (const [k, v] of form.entries()) obj[k] = typeof v === 'string' ? v : undefined
-      return extractRecord(obj)
-    } catch {
-      return null
-    }
-  }
-
-  // No/unknown content type: try JSON, then form, then fall back to the query string. Being
-  // permissive is right here because the alternative is a lead that is never nudged.
-  const raw = await req.text().catch(() => '')
-  if (raw.trim()) {
-    try {
-      const parsed = extractRecord(JSON.parse(raw))
-      if (parsed) return parsed
-    } catch {
-      const params = new URLSearchParams(raw)
-      const obj: Record<string, unknown> = {}
-      for (const [k, v] of params.entries()) obj[k] = v
-      const extracted = extractRecord(obj)
-      if (extracted) return extracted
-    }
-  }
-
-  const fromQuery: Record<string, unknown> = {}
-  req.nextUrl.searchParams.forEach((v, k) => {
-    if (k !== 'token') fromQuery[k] = v
-  })
-  return Object.keys(fromQuery).length ? fromQuery : null
-}
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ key: string }> }) {
   const { key } = await params
@@ -154,7 +84,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ key
     )
   }
 
-  const payload = await readPayload(req)
+  const payload = await readWebhookPayload(req)
   if (!payload) {
     return NextResponse.json(
       { ok: false, error: 'Could not read a lead record from the request body' },
@@ -164,7 +94,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ key
 
   // Zoho's record id is the only reliable key. Without it we would have to match on email/phone,
   // which is how one lead's send history ends up attributed to another.
-  const zohoId = String(payload.id ?? payload.Id ?? payload.ID ?? '').trim()
+  const zohoId = leadRecordId(payload)
   if (!zohoId) {
     return NextResponse.json(
       {
@@ -172,7 +102,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ key
         error:
           'The payload has no lead id. Configure the CRM webhook to send the record id — sends are ' +
           'keyed on it, and without it a repeat delivery cannot be recognised.',
-        receivedFields: Object.keys(payload),
+        receivedFields: payloadFields(payload),
       },
       { status: 400 }
     )

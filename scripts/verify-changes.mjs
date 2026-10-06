@@ -11,6 +11,7 @@ import { decideSend, sentLog } from '../src/lib/sequence.ts'
 import { DEFAULT_NUDGES, ZOHO_CRITERIA, LEAD_STATUS, PAY_ACTIVATION_FEE_URL, WHATSAPP_TEST_STATUS, MYSQL_FLOW_TEMPLATES, WA_SHEET_FLOW_TEMPLATES, ZOHO_FLOW_TEMPLATES, EPS_BUSINESS_VERTICAL, zohoDocumentsPendingCriteria, MYSQL_FLOW_LOOKBACK, CONSOLE_URL, zohoTodayIso, zohoTodayCriteria, zohoCriteriaSince, ZOHO_LEADS_CREATED_AFTER, ZOHO_TZ_OFFSET, zohoCriteriaBetween, zohoIstIso, zohoSyncOverlapMinutes } from '../src/lib/nudge-defaults.ts'
 import { MYSQL_FLOW_KEYS, isMysqlFlowKey, partitionVerifyRows, windowOverlapMinutes, windowMinutesFor } from '../src/lib/mysql-nudges.ts'
 import { cadenceHoursOf, cadenceDue } from '../src/lib/cadence.ts'
+import { extractRecord, leadRecordId, leadStatusFrom, payloadFields } from '../src/lib/webhook-payload.ts'
 import {
   attributionWindowHours,
   computeScore,
@@ -934,6 +935,41 @@ check('days: a change before the first nudge is null, not negative', daysBetween
 check('converted: the default converted status is Closed Won', isConvertedStatus('Closed Won'), true)
 check('converted: a non-converted status is false', isConvertedStatus('Agreement Signed'), false)
 check('converted: null is false', isConvertedStatus(null), false)
+
+// --- CRM webhook payload reading (shared by both hooks) ----------------------
+// A webhook that 200s while doing nothing is the worst failure mode here: the CRM records the
+// delivery as successful and nothing surfaces. So every envelope shape Zoho can send is pinned.
+check('hook: a flat record is read', extractRecord({ id: 'a', Lead_Status: 'X' })?.id, 'a')
+check('hook: the Leads envelope is unwrapped', extractRecord({ Leads: { id: 'b' } })?.id, 'b')
+check('hook: lowercase leads is unwrapped', extractRecord({ leads: { id: 'c' } })?.id, 'c')
+check('hook: a data array is unwrapped', extractRecord({ data: [{ id: 'd' }] })?.id, 'd')
+check('hook: a bare array is unwrapped', extractRecord([{ id: 'e' }])?.id, 'e')
+check('hook: the record envelope is unwrapped', extractRecord({ record: { id: 'f' } })?.id, 'f')
+check('hook: an empty array is null, not a crash', extractRecord([]), null)
+check('hook: a string body is null', extractRecord('nope'), null)
+check('hook: null is null', extractRecord(null), null)
+check('hook: an empty object is null', extractRecord({}), null)
+// A form post delivers single-element arrays; "Mobile: ['9876543210']" must behave like a string.
+check('hook: a single-element array field is collapsed', extractRecord({ id: ['g'], Mobile: ['98765'] })?.Mobile, '98765')
+check('hook: a multi-element array is left alone', Array.isArray(extractRecord({ Tags: ['a', 'b'] })?.Tags), true)
+
+// The record id is the only key the whole journey hangs on.
+check('hook: the id is found', leadRecordId({ id: 'z1' }), 'z1')
+check('hook: Id is accepted', leadRecordId({ Id: 'z2' }), 'z2')
+check('hook: ID is accepted', leadRecordId({ ID: 'z3' }), 'z3')
+check('hook: a numeric id is stringified', leadRecordId({ id: 4242 }), '4242')
+check('hook: a missing id is empty, never the literal "undefined"', leadRecordId({ Full_Name: 'x' }), '')
+check('hook: a blank id is empty', leadRecordId({ id: '   ' }), '')
+check('hook: the id is trimmed', leadRecordId({ id: ' z9 ' }), 'z9')
+
+// The status field, tolerating the spellings a hand-built workflow produces.
+check('hook: Lead_Status is read', leadStatusFrom({ Lead_Status: 'Documents Pending' }), 'Documents Pending')
+check('hook: lead_status is accepted', leadStatusFrom({ lead_status: 'Agreement Signed' }), 'Agreement Signed')
+check('hook: Status is accepted', leadStatusFrom({ Status: 'New' }), 'New')
+check('hook: a missing status is null, not empty string', leadStatusFrom({ id: 'x' }), null)
+check('hook: a blank status is null', leadStatusFrom({ Lead_Status: '  ' }), null)
+check('hook: the status is trimmed', leadStatusFrom({ Lead_Status: ' New ' }), 'New')
+check('hook: field names are listed for the error message', payloadFields({ b: 1, a: 2 }).join(','), 'a,b')
 
 // --- Zoho MCP tool selection and argument building ---------------------------
 // The real tool list from the live server. The bug this guards against: every tool name
