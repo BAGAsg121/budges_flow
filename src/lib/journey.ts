@@ -221,6 +221,116 @@ export function pickAttribution(
   }
 }
 
+/* ───────────────────────── attribution confidence ───────────────────────── */
+
+/**
+ * How strongly the evidence points at a nudge — NOT a probability that it caused the change.
+ *
+ * The document is explicit that attribution is probabilistic, and "which nudge was last sent" alone
+ * is a weak claim: a lead can move stage for reasons we never see. This turns that weak claim into a
+ * *described* one, so the UI can say "strong / moderate / weak" with the reasons, instead of showing
+ * a bare nudge name that reads like a proven cause.
+ *
+ * Three factors, each bounded, and each reported so the number can be argued with:
+ *   • Proximity  — how soon after the send the change happened. A change 20 minutes later is far
+ *                  more plausibly connected than one two days later.
+ *   • Engagement — whether the recipient actually DID something with that nudge (replied > clicked >
+ *                  opened > merely received). A nudge nobody opened is a poor explanation.
+ *   • Uniqueness — how many nudges landed in the window. One is a clear candidate; five in three days
+ *                  means we cannot tell which, if any, mattered.
+ *
+ * A `weak` result is a real answer, not a failure: it says "something else probably did this".
+ */
+export type ConfidenceBand = 'weak' | 'moderate' | 'strong'
+
+export interface ConfidenceFactor {
+  label: string
+  points: number
+  max: number
+  detail: string
+}
+
+export interface AttributionConfidence {
+  score: number
+  band: ConfidenceBand
+  factors: ConfidenceFactor[]
+}
+
+const BANDS: Array<{ min: number; band: ConfidenceBand }> = [
+  { min: 60, band: 'strong' },
+  { min: 30, band: 'moderate' },
+  { min: 0, band: 'weak' },
+]
+
+export function confidenceBand(score: number): ConfidenceBand {
+  return BANDS.find((b) => score >= b.min)?.band ?? 'weak'
+}
+
+export const CONFIDENCE_LABEL: Record<ConfidenceBand, string> = {
+  weak: 'Weak',
+  moderate: 'Moderate',
+  strong: 'Strong',
+}
+
+/**
+ * Score one attributed nudge.
+ *
+ * `nudgesInWindow` is how many successful sends landed inside the attribution window before the
+ * change — the denominator that keeps a busy lead from looking well-explained by any single message.
+ */
+export function attributionConfidence(
+  log: { opened: boolean; replied: boolean; ctaClicks: number; ctaClickedAt: Date | null; channel?: string },
+  hoursSinceNudge: number,
+  nudgesInWindow: number
+): AttributionConfidence {
+  const factors: ConfidenceFactor[] = []
+
+  // Proximity — max 45.
+  let proximity = 0
+  if (hoursSinceNudge <= 1) proximity = 45
+  else if (hoursSinceNudge <= 6) proximity = 35
+  else if (hoursSinceNudge <= 24) proximity = 25
+  else if (hoursSinceNudge <= 48) proximity = 15
+  else proximity = 8
+  factors.push({
+    label: 'Proximity',
+    points: proximity,
+    max: 45,
+    detail: `${Math.round(hoursSinceNudge * 10) / 10}h between the send and the change`,
+  })
+
+  // Engagement — max 35. A reply is the strongest signal we have that the message was read and acted on.
+  let engagement = 0
+  let engagementDetail = 'sent only — nothing came back'
+  const clicked = log.ctaClicks > 0 || log.ctaClickedAt !== null
+  if (log.replied) {
+    engagement = 35
+    engagementDetail = 'the lead replied to this nudge'
+  } else if (clicked) {
+    engagement = 25
+    engagementDetail = 'the lead tapped the CTA in this nudge'
+  } else if (log.opened) {
+    engagement = 15
+    engagementDetail = 'the lead opened or read this nudge'
+  }
+  factors.push({ label: 'Engagement', points: engagement, max: 35, detail: engagementDetail })
+
+  // Uniqueness — max 20. One candidate is clean; several means we cannot single one out.
+  let uniqueness = 20
+  let uniquenessDetail = 'this was the only nudge in the window'
+  if (nudgesInWindow === 2) {
+    uniqueness = 12
+    uniquenessDetail = '2 nudges fell inside the window'
+  } else if (nudgesInWindow >= 3) {
+    uniqueness = 6
+    uniquenessDetail = `${nudgesInWindow} nudges fell inside the window — any of them could be responsible`
+  }
+  factors.push({ label: 'Uniqueness', points: uniqueness, max: 20, detail: uniquenessDetail })
+
+  const score = Math.min(100, factors.reduce((n, f) => n + f.points, 0))
+  return { score, band: confidenceBand(score), factors }
+}
+
 /* ─────────────────────────────── time maths ─────────────────────────────── */
 
 /**

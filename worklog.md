@@ -1176,3 +1176,30 @@ Stage Summary:
 - Side effect worth knowing: the V2 stage history now contains its first two genuine transitions.
 
 ---
+
+Task ID: 46
+Agent: Main agent (DeepSeek Harness)
+Task: Make the Journey board's transitions clickable, showing which lead moved, how long it took, what nudges were sent and at what intervals, and a percentage for whether the nudges can be credited — accumulating into a lifecycle view per lead.
+
+Work Log:
+- CLICKING A TRANSITION NOW OPENS THE LEAD'S FULL LIFECYCLE on that transition. The stage-flow report returns the individual rows (not just the aggregate counts) with the lead id, so a click opens the existing drawer with the clicked transition highlighted. The drawer already showed the lead's complete history, so "if the lead changes status again, the journey accumulates in the same place" was already true of the data — what was missing was the route from a transition to it.
+- EACH TRANSITION NOW CARRIES ITS OWN EVIDENCE, instead of a bare nudge name:
+  * every nudge sent inside the attribution window before the change, newest first, each with **how long before** the change it went out and what came back (opened / replied / CTA ×n), with the credited one marked;
+  * the span from the oldest of those nudges to the moment of change, so the interval is visible rather than inferred;
+  * the time spent in the previous stage.
+- BUILT AN ATTRIBUTION CONFIDENCE SCORE, because "which nudge was last sent" is a weak claim being displayed as though it were a finding. The score DESCRIBES the weakness with its working shown — three bounded factors: **Proximity** (max 45, a ladder from ≤1h down to >48h), **Engagement** (max 35: replied 35 > CTA 25 > opened 15 > sent-only 0), and **Uniqueness** (max 20: one nudge in the window 20, two 12, three or more 6). Bands: ≥60 Strong, 30–59 Moderate, <30 Weak.
+  * The Uniqueness factor is the one that earns its keep: the same opened nudge 12 hours later scores Strong on its own but only Moderate when four other nudges landed in the same window — which is exactly the situation where a bare "attributed to X" would overclaim.
+  * It is labelled a HEURISTIC, in the panel and in the code, and a Weak result is presented as a real answer ("something else probably did this") rather than as a failure to measure.
+- BATCHED THE CONFIDENCE COMPUTATION in the report: the transitions are fetched, then every message log for those leads in ONE query. Computing it per transition would have been one query per row, which is the same mistake the score job already had to be fixed for.
+- THE LIVE DATA PROVES THE HONEST CASE RATHER THAN THE FLATTERING ONE. There are now **3** recorded transitions (`TEST SHLOK GOSWAMI` Onboarding Started → Documents Pending, and `MEGHRAJ SINGH CHAUHAN` and `PRADEEP C` Agreement Signed → Closed Won). All three report **0 nudges in the window, un-attributed, no confidence score** — because no nudge had been sent to any of them within 72h. The board says so explicitly rather than crediting the last thing we happened to send, which is the whole point of the feature.
+  * `timeInPrevStageHours` is also `—` on all three, correctly: these are the leads' FIRST observed changes, so there is no prior timestamp to measure from. It will populate from the second change onward.
+- The confidence maths has no positive live example yet (nothing is attributed), so it is pinned by 27 assertions instead: every step of each ladder, the band boundaries at 59/60 and 29/30, that the factors sum to the score and never exceed their maxima, and the case where a busy window drops an otherwise-Strong claim a band.
+- Two self-inflicted bugs caught: the drawer's `capped` flag was on `data.score` not `data.lead` (fixed earlier), and the new stage-flow handler needed `NextRequest` for the `transitions` limit — tsc caught both immediately, which is why the typecheck runs before anything is claimed.
+- verify now 976. tsc clean, eslint clean. README documents how to read the board, the confidence table with its thresholds, and that `un-attributed` is the honest reading rather than missing data.
+
+Stage Summary:
+- A transition now tells the whole story: which lead, which stages, how long it took, every nudge sent beforehand with its interval, and how much of the credit that nudge can take.
+- The lifecycle accumulates per lead automatically — the drawer shows every transition that lead has ever had, with the new ones appended as they are detected.
+- The confidence score is a described heuristic, not a causal claim, and it currently reports the un-attributed truth for all three recorded transitions.
+
+---

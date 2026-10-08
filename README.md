@@ -71,6 +71,42 @@ npm start                   # node .next/standalone/server.js  (PORT env, defaul
 
 ---
 
+### Reading the Journey board
+
+**Recorded transitions** lists every detected stage change, newest first. Click one and the lead's
+whole lifecycle opens on that transition:
+
+1. **Which lead, from where to where, and how long it took** — plus the time it spent in the previous
+   stage. That last number is `—` for a lead's *first* observed change, because there is no prior
+   timestamp to measure from; it fills in for every change after that.
+2. **Every nudge sent in the window before the change**, newest first, each with how long before the
+   change it went out, and what came back (`opened` / `replied` / `CTA ×n`). The credited one is
+   marked. The line under the list shows the span from the oldest of them to the moment of change.
+3. **How much of the credit that nudge can take** — a confidence score with its working shown.
+
+#### What the confidence score means (and does not)
+
+"Which nudge was last sent" is a weak claim on its own. The score **describes** how weak, so the board
+can say *weak, and here is why* instead of printing a nudge name that reads like a proven cause.
+
+| Factor | Max | Reasoning |
+| --- | --- | --- |
+| Proximity | 45 | ≤1h **45** · ≤6h **35** · ≤24h **25** · ≤48h **15** · else **8** |
+| Engagement | 35 | replied **35** · CTA tapped **25** · opened/read **15** · sent only **0** |
+| Uniqueness | 20 | the only nudge in the window **20** · two **12** · three or more **6** |
+
+Bands: **≥60 Strong · 30–59 Moderate · <30 Weak.** A `Weak` result is a real answer, not a failure —
+it says *something else probably did this*.
+
+> It is a **heuristic, not proof**. A lead can move stage for reasons we never see, and a high score
+> means "this nudge is a plausible explanation", never "this nudge caused it". The panel says so in
+> place, and every API response carries `attributionIsProbabilistic: true`.
+
+**A transition with no nudge in the window shows `un-attributed`, and that is the honest reading** —
+nothing we did preceded it. The three transitions recorded at the time of writing are all in that
+state, because no nudge had been sent to those leads within 72h. This is the feature working, not
+missing data.
+
 ## V2 — the lead journey and the engagement score
 
 V1 answered *what did we send*. V2 answers *did it work*, by recording where a lead was when we

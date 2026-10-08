@@ -14,8 +14,11 @@ import { cadenceHoursOf, cadenceDue } from '../src/lib/cadence.ts'
 import { extractRecord, leadRecordId, leadStatusFrom, payloadFields } from '../src/lib/webhook-payload.ts'
 import { deliverySummary, recentDeliveries, recordDelivery } from '../src/lib/webhook-inbox.ts'
 import {
+  attributionConfidence,
   attributionWindowHours,
   computeScore,
+  confidenceBand,
+  CONFIDENCE_LABEL,
   daysBetween,
   isConvertedStatus,
   pickAttribution,
@@ -1071,6 +1074,47 @@ check('sandbox: closed-won filter matches the same status', JSON.stringify(sandb
 
 // The real Zoho picklist values, so a typo in the criteria is caught here rather than in production.
 check('sandbox: the KYC picklist values are the real ones', JSON.stringify(KYC_UPLOAD_STATUS_VALUES), JSON.stringify(['-None-', 'Partial Done', 'All Done', 'Re-upload Requested', 'Accepted']))
+
+// --- attribution confidence ---------------------------------------------------
+// "Which nudge was last sent" is a weak claim on its own. This score DESCRIBES how weak, so the UI
+// can say "weak, and here is why" instead of showing a nudge name that reads like a proven cause.
+const confLog = (over = {}) => ({ opened: false, replied: false, ctaClicks: 0, ctaClickedAt: null, ...over })
+
+// Proximity ladder.
+check('confidence: a reply 30m later is max proximity', attributionConfidence(confLog({ replied: true }), 0.5, 1).score, 45 + 35 + 20)
+check('confidence: that is a strong claim', attributionConfidence(confLog({ replied: true }), 0.5, 1).band, 'strong')
+check('confidence: 12h proximity scores 25', attributionConfidence(confLog(), 12, 1).factors[0].points, 25)
+check('confidence: 30h proximity scores 15', attributionConfidence(confLog(), 30, 1).factors[0].points, 15)
+check('confidence: 60h proximity scores 8', attributionConfidence(confLog(), 60, 1).factors[0].points, 8)
+// Engagement ladder: reply > click > open > nothing.
+check('confidence: a reply is worth 35', attributionConfidence(confLog({ replied: true }), 60, 1).factors[1].points, 35)
+check('confidence: a CTA click is worth 25', attributionConfidence(confLog({ ctaClicks: 1, ctaClickedAt: new Date() }), 60, 1).factors[1].points, 25)
+check('confidence: an open is worth 15', attributionConfidence(confLog({ opened: true }), 60, 1).factors[1].points, 15)
+check('confidence: no engagement is worth 0', attributionConfidence(confLog(), 60, 1).factors[1].points, 0)
+check('confidence: a reply outranks a click', attributionConfidence(confLog({ replied: true, ctaClicks: 2, ctaClickedAt: new Date() }), 60, 1).factors[1].points, 35)
+// Uniqueness: the more nudges competing to explain the change, the less any one of them explains.
+check('confidence: one nudge in the window scores 20', attributionConfidence(confLog(), 60, 1).factors[2].points, 20)
+check('confidence: two nudges score 12', attributionConfidence(confLog(), 60, 2).factors[2].points, 12)
+check('confidence: three nudges score 6', attributionConfidence(confLog(), 60, 3).factors[2].points, 6)
+check('confidence: ten nudges still score 6', attributionConfidence(confLog(), 60, 10).factors[2].points, 6)
+// A busy window weakens an otherwise identical claim — the point of having the factor at all.
+check('confidence: the same nudge is weaker when 4 others landed too', attributionConfidence(confLog({ opened: true }), 12, 5).score, 25 + 15 + 6)
+check('confidence: and that drops it a band', attributionConfidence(confLog({ opened: true }), 12, 5).band, 'moderate')
+check('confidence: the same message alone would be strong', attributionConfidence(confLog({ opened: true }), 12, 1).band, 'strong')
+// Bands.
+check('confidence: 60 is strong', confidenceBand(60), 'strong')
+check('confidence: 59 is moderate', confidenceBand(59), 'moderate')
+check('confidence: 30 is moderate', confidenceBand(30), 'moderate')
+check('confidence: 29 is weak', confidenceBand(29), 'weak')
+check('confidence: 0 is weak', confidenceBand(0), 'weak')
+check('confidence: every band has a label', Object.keys(CONFIDENCE_LABEL).sort().join(','), 'moderate,strong,weak')
+// The factors always sum to the score, and never exceed the cap.
+const conf = attributionConfidence(confLog({ replied: true }), 0.2, 1)
+check('confidence: the factors are the score', conf.score, conf.factors.reduce((n, f) => n + f.points, 0))
+check('confidence: three factors are reported', conf.factors.length, 3)
+check('confidence: each factor states its maximum', conf.factors.every((f) => f.max > 0 && f.points <= f.max), true)
+check('confidence: each factor explains itself in words', conf.factors.every((f) => f.detail.length > 5), true)
+check('confidence: the score never exceeds 100', attributionConfidence(confLog({ replied: true }), 0, 1).score, 100)
 
 // --- Zoho MCP tool selection and argument building ---------------------------
 // The real tool list from the live server. The bug this guards against: every tool name

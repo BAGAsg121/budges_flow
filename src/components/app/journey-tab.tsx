@@ -19,9 +19,10 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
-import { RefreshCw, TrendingUp, GitBranch, Clock } from 'lucide-react'
+import { RefreshCw, TrendingUp, GitBranch, Clock, ChevronRight } from 'lucide-react'
 import { ScoreBadge, bandDot } from '@/components/app/score-badge'
-import { SCORE_BAND_LABEL, type ScoreBand } from '@/lib/journey'
+import { LeadJourneyDrawer } from '@/components/app/lead-journey-drawer'
+import { CONFIDENCE_LABEL, SCORE_BAND_LABEL, type ConfidenceBand, type ScoreBand } from '@/lib/journey'
 import { cn } from '@/lib/utils'
 
 interface ImpactRow {
@@ -46,10 +47,28 @@ interface ImpactPayload {
 
 interface FlowPayload {
   ok: boolean
+  recentTransitions: TransitionRow[]
   currentStages: { status: string; leads: number }[]
   transitions: { from: string; to: string; leads: number; avgHoursInFromStage: number | null }[]
   avgHoursInStage: { status: string; avgHours: number | null; transitions: number }[]
   note: string
+}
+
+/** A recorded transition, as the report returns it — with enough to open the lead's story. */
+interface TransitionRow {
+  id: string
+  leadId: string
+  leadName: string
+  fromStatus: string | null
+  toStatus: string
+  detectedAt: string
+  timeInPrevStageHours: number | null
+  attributedNudgeKey: string | null
+  attributedChannel: string | null
+  hoursSinceNudge: number | null
+  confidenceScore: number | null
+  confidenceBand: string | null
+  nudgesBeforeCount: number
 }
 
 const BANDS: ScoreBand[] = ['cold', 'warming', 'engaged', 'hot']
@@ -59,6 +78,9 @@ export function JourneyTab({ refreshKey }: { refreshKey: number }) {
   const [flow, setFlow] = useState<FlowPayload | null>(null)
   const [bands, setBands] = useState<Record<string, number> | null>(null)
   const [loading, setLoading] = useState(true)
+  /** Which lead's lifecycle drawer is open, and which transition to highlight in it. */
+  const [openLeadId, setOpenLeadId] = useState<string | null>(null)
+  const [focusTransitionId, setFocusTransitionId] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -196,6 +218,94 @@ export function JourneyTab({ refreshKey }: { refreshKey: number }) {
         </Card>
       </div>
 
+      {/* --- recorded transitions: click one to open the lead's whole story --------- */}
+      <Card>
+        <CardContent className="p-4 sm:p-5 space-y-3">
+          <div className="flex flex-wrap items-end justify-between gap-2">
+            <div>
+              <h4 className="panel-title">Recorded transitions</h4>
+              <p className="field-hint">
+                Newest first. Click any one to open that lead&apos;s full lifecycle — every nudge it received,
+                when, and how strongly each can be credited for the move.
+              </p>
+            </div>
+          </div>
+
+          {!flow?.recentTransitions?.length ? (
+            <p className="text-xs text-muted-foreground">
+              No transitions recorded yet. The history starts from the first sync that sees a lead change
+              stage — it cannot show moves that happened before it was watching.
+            </p>
+          ) : (
+            <div className="space-y-1">
+              {flow.recentTransitions.map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => {
+                    setOpenLeadId(t.leadId)
+                    setFocusTransitionId(t.id)
+                  }}
+                  className="flex w-full flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-border px-2.5 py-2 text-left text-xs transition-colors hover:border-primary/50 hover:bg-primary/5"
+                >
+                  <span className="font-medium">{t.leadName}</span>
+                  {t.confidenceScore !== null ? (
+                    <Badge
+                      variant="outline"
+                      className={cn(
+                        'h-5 px-1.5 text-[10px] font-normal',
+                        t.confidenceBand === 'strong' && 'border-success/40 bg-success/10 text-success',
+                        t.confidenceBand === 'moderate' && 'border-info/40 bg-info/10 text-info',
+                        t.confidenceBand === 'weak' && 'border-warning/40 bg-warning/10 text-warning'
+                      )}
+                    >
+                      {t.confidenceBand ? CONFIDENCE_LABEL[t.confidenceBand as ConfidenceBand] : '—'} ·{' '}
+                      {t.confidenceScore}%
+                    </Badge>
+                  ) : (
+                    <Badge variant="outline" className="h-5 px-1.5 text-[10px] font-normal text-muted-foreground">
+                      un-attributed
+                    </Badge>
+                  )}
+                  <span className="text-muted-foreground">
+                    {t.fromStatus ?? '(first seen)'} → <b className="text-foreground">{t.toStatus}</b>
+                  </span>
+                  <span className="text-muted-foreground">·</span>
+                  <span className="text-muted-foreground">
+                    {new Date(t.detectedAt).toLocaleString(undefined, {
+                      day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
+                    })}
+                  </span>
+                  {t.timeInPrevStageHours !== null ? (
+                    <span className="text-muted-foreground">
+                      · took{' '}
+                      {t.timeInPrevStageHours < 48
+                        ? `${Math.round(t.timeInPrevStageHours * 10) / 10}h`
+                        : `${Math.round((t.timeInPrevStageHours / 24) * 10) / 10}d`}
+                    </span>
+                  ) : null}
+                  <span className="ml-auto flex items-center gap-1.5 text-muted-foreground">
+                    {t.nudgesBeforeCount > 0 ? (
+                      <span>
+                        {t.nudgesBeforeCount} nudge{t.nudgesBeforeCount === 1 ? '' : 's'} before
+                      </span>
+                    ) : (
+                      <span>no nudge in window</span>
+                    )}
+                    {t.attributedNudgeKey ? (
+                      <Badge variant="outline" className="h-5 px-1.5 text-[10px] font-normal">
+                        {t.attributedNudgeKey}
+                      </Badge>
+                    ) : null}
+                    <ChevronRight className="h-3.5 w-3.5" />
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
       {/* --- stage transitions --------------------------------------------------- */}
       <Card>
         <CardContent className="p-4 sm:p-5 space-y-3">
@@ -318,6 +428,16 @@ export function JourneyTab({ refreshKey }: { refreshKey: number }) {
         The engagement score and all attribution are <b>reporting signals only</b>. They never change who is nudged —
         eligibility stays with each nudge&apos;s own filters.
       </p>
+
+      {/* Opened by clicking a recorded transition above, on that transition. */}
+      <LeadJourneyDrawer
+        leadId={openLeadId}
+        focusTransitionId={focusTransitionId}
+        onClose={() => {
+          setOpenLeadId(null)
+          setFocusTransitionId(null)
+        }}
+      />
     </div>
   )
 }
