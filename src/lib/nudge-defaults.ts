@@ -538,7 +538,8 @@ export const KYC_UPLOAD_STATUS_VALUES = [
   'Accepted',
 ] as const
 
-export interface SandboxNudgeSpec {  key: string
+export interface SandboxNudgeSpec {
+  key: string
   /** Shown after "WhatsApp · Sandbox ·". */
   title: string
   description: string
@@ -546,7 +547,23 @@ export interface SandboxNudgeSpec {  key: string
   criteria: string
   /** Local filter clauses that mirror the criteria — without these the nudge reaches every lead. */
   filters: Record<string, unknown>
+  /**
+   * The approved template. These are the names Meta auto-generated from the template TEXT rather
+   * than tidy ones, because that is what is actually on the WABA — a name mismatch fails every send
+   * with 132001.
+   */
   templateName: string
+  /**
+   * Body variable sources, in the order the template declares them.
+   *
+   * NOT optional decoration: sending zero parameters to a template that declares one fails EVERY
+   * send with **132000** ("Number of parameters does not match the expected number of params").
+   * That is exactly what happened when these templates were first attached — the seed declared
+   * `{ body: [] }` while every template here has at least one `{{1}}`.
+   */
+  bodyVars: string[]
+  /** True when the template's URL button carries its own `{{1}}`. All of these do. */
+  hasButton: boolean
   body: string
   /** Verified against the live CRM when this was written, for the operator's benefit. */
   liveMatchEstimate: number
@@ -561,7 +578,10 @@ export const SANDBOX_WHATSAPP_NUDGES: Record<string, SandboxNudgeSpec> = {
       'Useful for chasing abandoned website applications while they are still warm.',
     criteria: `((Business_vertical:equals:${EPS_BUSINESS_VERTICAL})and(Eko_Code:equals:null)and(Created_Time:greater_than:{{monthsAgo:2}}))`,
     filters: { ekoCodePresent: false, createdWithinDays: 60 },
-    templateName: 'sandbox_old_website_lead',
+    templateName: 'old_website_leads__from_eko_co_in_',
+    // "Hi {{1}} 👋 …" → the lead's name.
+    bodyVars: ['first_name'],
+    hasButton: true,
     body:
       'Hi 👋 We noticed you started your Eko partner signup but it looks like it was not completed.\n\n' +
       'Your application is still pending on our side. Please continue from where you left off so we can ' +
@@ -578,7 +598,12 @@ export const SANDBOX_WHATSAPP_NUDGES: Record<string, SandboxNudgeSpec> = {
     // signAgreement: false matches ONLY an explicit false — a lead whose field we were never told
     // about is not "unsigned", and must not be nudged as though it were.
     filters: { ekoCodePresent: true, signAgreement: false },
-    templateName: 'sandbox_sign_agreement_pending',
+    templateName: 'eko_code_is_present_but_sign_agreement_is_pending_',
+    // "Hi {{1}}, good news: your Eko Code {{2}} is ready!" → name, then the actual code.
+    // eko_code is added to buildLeadVars for exactly this; without it {{2}} would render as "-"
+    // and tell the customer their Eko Code is a dash.
+    bodyVars: ['first_name', 'eko_code'],
+    hasButton: true,
     body:
       'Hi 👋 Your Eko Code has been issued and your account is almost ready.\n\n' +
       'The only step pending is signing your Eko partner agreement. Please complete the e-signature so ' +
@@ -593,7 +618,9 @@ export const SANDBOX_WHATSAPP_NUDGES: Record<string, SandboxNudgeSpec> = {
       'credentials until one is captured, so the WhatsApp nudge asks for it.',
     criteria: `((Business_vertical:equals:${EPS_BUSINESS_VERTICAL})and(Email:equals:null))`,
     filters: { emailMissing: true },
-    templateName: 'sandbox_email_missing',
+    templateName: 'email_missing',
+    bodyVars: ['first_name'],
+    hasButton: true,
     body:
       'Hi 👋 We do not have an email address on record for your Eko partner application.\n\n' +
       'Please share a valid email ID with us — your onboarding updates and production credentials are ' +
@@ -609,7 +636,9 @@ export const SANDBOX_WHATSAPP_NUDGES: Record<string, SandboxNudgeSpec> = {
     criteria: `((Business_vertical:equals:${EPS_BUSINESS_VERTICAL})and(KYC_Documents_Upload:equals:Accepted))`,
     // Zoho's picklist value verbatim — a space or a different case matches nothing.
     filters: { kycUploadStatus: ['Accepted'] },
-    templateName: 'sandbox_documents_accepted',
+    templateName: 'once_all_documents_are_completed_and_approved___esign_your_document_',
+    bodyVars: ['first_name'],
+    hasButton: true,
     body:
       'Hi 👋 Good news — all the documents you submitted have been verified and accepted.\n\n' +
       'The last step is to e-sign your document to complete your onboarding.',
@@ -623,7 +652,9 @@ export const SANDBOX_WHATSAPP_NUDGES: Record<string, SandboxNudgeSpec> = {
       'waiting on our verification.',
     criteria: `((Business_vertical:equals:${EPS_BUSINESS_VERTICAL})and(KYC_Documents_Upload:equals:All Done))`,
     filters: { kycUploadStatus: ['All Done'] },
-    templateName: 'sandbox_documents_under_review',
+    templateName: 'once_all_docs_are_submitted_but_not_approved___under_review',
+    bodyVars: ['first_name'],
+    hasButton: true,
     body:
       'Hi 👋 We have received all the documents you submitted and they are currently under review.\n\n' +
       'We will update you as soon as the verification is complete.',
@@ -637,7 +668,11 @@ export const SANDBOX_WHATSAPP_NUDGES: Record<string, SandboxNudgeSpec> = {
       'are on the way, which is the question they ask next.',
     criteria: `((Business_vertical:equals:${EPS_BUSINESS_VERTICAL})and(Lead_Status:equals:${LEAD_STATUS.CLOSED_WON}))`,
     filters: { includeStatuses: [LEAD_STATUS.CLOSED_WON] },
-    templateName: 'sandbox_closed_won_live_credentials',
+    // The template that exists for this one, which is NOT what the seed originally guessed — the
+    // original placeholder name was never created, so this nudge pointed at nothing.
+    templateName: 'lead_status____closed_won__tell_the_cus_they_will_recieve_live_credntials_in_under_30_minutes',
+    bodyVars: ['first_name'],
+    hasButton: true,
     body:
       'Hi 👋 Congratulations — your Eko partner account is now live!\n\n' +
       'Your live production credentials will be shared with you within 30 minutes.',
@@ -994,9 +1029,12 @@ export const DEFAULT_NUDGES: NudgeSeed[] = [
     bodyTemplate: s.body,
     whatsappTemplateName: s.templateName,
     whatsappLanguage: WHATSAPP_TEMPLATE_LANGUAGE_DEFAULT,
-    // None of these templates declares a button, so no button parameter is ever sent — sending one
-    // to a template without a button is a parameter-count mismatch, which Meta rejects.
-    whatsappParams: json({ body: [] }),
+    // The body sources and the button parameter are BOTH required, and both come from the template's
+    // real declaration — a template with one {{1}} and a URL button needs exactly
+    // { body: [...1 source], button: [mobile] }. Getting this wrong is error 132000, every send.
+    whatsappParams: json(
+      s.hasButton ? { body: s.bodyVars, button: ['mobile_digits'] } : { body: s.bodyVars }
+    ),
     // Once per lead: these are stage notifications, not reminders. Repeating one would tell the same
     // person the same thing twice.
     maxEmailsPerLead: 1,

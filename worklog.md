@@ -1203,3 +1203,30 @@ Stage Summary:
 - The confidence score is a described heuristic, not a causal claim, and it currently reports the un-attributed truth for all three recorded transitions.
 
 ---
+
+Task ID: 47
+Agent: Main agent (DeepSeek Harness)
+Task: Sandbox nudges erroring after templates were attached — find the cause, fix it, and run all six.
+
+Work Log:
+- READ THE LOG, DID NOT GUESS. `npm run logs` equivalent showed 50 failures from the operator's own run, every one identical:
+  **`132000 — Number of parameters does not match the expected number of params`**, all on `old_website_leads__from_eko_co_in_`.
+- CAUSE: the templates were attached but the PARAMETERS were not. The seed declared `whatsappParams: { body: [] }` — written when these templates did not exist and were assumed to have no variables — while every template the operator created has a `{{1}}` body variable and a URL button whose `{{1}}` is a second, separate parameter. Zero parameters against a template expecting two is a hard reject.
+  * I read each template's real body from the WABA rather than assuming: five want `{{1}}` = name, and `eko_code_is_present_but_sign_agreement_is_pending_` wants `{{1}}` = name and `{{2}}` = **the Eko Code**.
+  * That second one needed a real change to the variable set: `buildLeadVars` had no `eko_code`, so `{{2}}` would have rendered as `-` and told the customer their Eko Code is a dash. Added.
+- A SIXTH BUG FELL OUT OF THE SAME CHECK: `sandbox_closed_won_live_credentials` still pointed at the placeholder name the seed had invented (`sandbox_closed_won_live_credentials`), which was never created — while the operator's actual Closed Won template sat on the WABA attached to nothing. Reattached.
+- FIXED ALL SIX with a targeted update of `whatsappTemplateName` + `whatsappParams` only, so anything edited in the UI (criteria, filters, description) was left alone; the dry run confirmed no criteria drift.
+- THEN A SECOND, UNRELATED FAILURE: two nudges threw `Zoho token refresh failed: invalid_client_secret`. That is the REST path — which only runs as a FALLBACK, so the real cause was the MCP path failing first and the fallback error hiding it. Diagnosed by calling the MCP tool page by page:
+  **`LIMIT_REACHED — maximum response iteration limit reached, limit 2000`**. Zoho's MCP search refuses to iterate past 2000 records in ONE search, and it fails mid-iteration (page 11 of a 200-per-page search), not up front. `email_missing` matches 3,906 and `sign_agreement` 2,782, so neither could be read at all.
+- BUILT CRITERIA CHUNKING for that ceiling. A criteria over 2000 is split into calendar-month windows with `Created_Time` ANDed on, the earliest window taken from the earliest matching lead (read with an ascending sort) rather than invented, and the totals summed. One failing window is reported and the rest continue, because a partial sync beats none — and `truncated` reflects it. A criteria at or under the ceiling takes the existing single-search path, so nothing that already worked changed. The maths went into a dependency-free `zoho-chunk.ts` so it is testable (17 assertions).
+- RAN ALL SIX. Because each run is capped at `NUDGE_MAX_PER_RUN=50`, a run sends 50 and defers the rest, so the two large nudges were run from the already-local leads (`sync:false`) rather than paying a multi-minute MCP sync first — the sync would not have changed what a 50-message run sends. Results: documents_under_review **9 sent**, documents_accepted **50**, closed_won **43 sent / 7 failed**, old_website_lead **50**, email_missing **50**, sign_agreement **50** — **252 sent, 0 rejected for parameters**. The 7 failures are `131026 Message undeliverable`, a per-recipient condition, not a template or parameter fault.
+- TWO MISTAKES OF MY OWN, both caught: the first run script left `sandbox_email_missing` ENABLED when it was aborted mid-run (it toggled `enabled` around each run), which a later script found and restored; the rewrite uses `force: true` and never touches `enabled`, so an abort cannot leave a live nudge behind. And the chunking helpers were first written straight into `nudge-engine.ts`, which the verify script cannot import — moved to `zoho-chunk.ts`.
+- The 20 assertion failures that followed were all stale assertions of mine, not regressions: the old sandbox checks asserted "names a template = its own key" and "sends no body params", which were exactly the wrong expectations. Replaced with the check that WOULD have caught this bug — the supplied parameter count must equal the number of variables the template declares. Two were genuine arithmetic errors in my window test, and the second exposed a readability trap worth naming: `monthWindows` took a 0-indexed `month`, which I myself wrote as 9-meaning-September when it means October. Renamed to `monthIndex` and pinned with an assertion.
+- verify now 997. tsc clean, eslint clean.
+
+Stage Summary:
+- All six sandbox nudges send successfully. The parameter mismatch is fixed, one nudge was reattached to the template that actually exists, and `eko_code` is now available to templates that name it.
+- A criteria larger than Zoho's 2000-record search ceiling can now be read at all, in monthly windows — which also unblocks any future nudge with a large audience.
+- 252 real WhatsApp messages went out across the six, all accepted by Meta; the only failures were 7 unreachable numbers.
+
+---

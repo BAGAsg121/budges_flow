@@ -12,6 +12,7 @@ import { DEFAULT_NUDGES, ZOHO_CRITERIA, LEAD_STATUS, PAY_ACTIVATION_FEE_URL, WHA
 import { MYSQL_FLOW_KEYS, isMysqlFlowKey, partitionVerifyRows, windowOverlapMinutes, windowMinutesFor } from '../src/lib/mysql-nudges.ts'
 import { cadenceHoursOf, cadenceDue } from '../src/lib/cadence.ts'
 import { extractRecord, leadRecordId, leadStatusFrom, payloadFields } from '../src/lib/webhook-payload.ts'
+import { MCP_SEARCH_LIMIT, monthWindows, withCreatedWindow } from '../src/lib/zoho-chunk.ts'
 import { deliverySummary, recentDeliveries, recordDelivery } from '../src/lib/webhook-inbox.ts'
 import {
   attributionConfidence,
@@ -1044,9 +1045,16 @@ for (const key of SANDBOX_KEYS) {
   // What must never happen is one SURVIVING expansion, because Zoho would then be sent the literal
   // text and match nothing.
   check(`sandbox: ${key} expands cleanly`, hasUnexpandedPlaceholder(expandZohoCriteria(n?.zohoCriteria ?? '', now)), false)
-  check(`sandbox: ${key} names a template`, n?.whatsappTemplateName, key)
-  check(`sandbox: ${key} sends no body params`, JSON.stringify(JSON.parse(n?.whatsappParams ?? '{}')), JSON.stringify({ body: [] }))
-  check(`sandbox: ${key} sends no button params (its template has no button)`, JSON.parse(n?.whatsappParams ?? '{}').button, undefined)
+  check(`sandbox: ${key} names its real approved template`, n?.whatsappTemplateName, SANDBOX_WHATSAPP_NUDGES[key].templateName)
+  // THE ASSERTION THAT WOULD HAVE CAUGHT THE 132000 FAILURES. Every one of these templates declares
+  // at least one {{1}} body variable and a URL button with its own {{1}}, so the nudge must supply
+  // exactly that many parameters of each kind. The seed originally declared `{ body: [] }`, which
+  // failed every single send with "Number of parameters does not match".
+  const wa = JSON.parse(n?.whatsappParams ?? '{}')
+  const spec = SANDBOX_WHATSAPP_NUDGES[key]
+  check(`sandbox: ${key} supplies one body param per template variable`, wa.body?.length ?? 0, spec.bodyVars.length)
+  check(`sandbox: ${key} declares the right body sources`, JSON.stringify(wa.body), JSON.stringify(spec.bodyVars))
+  check(`sandbox: ${key} supplies the button param its URL button needs`, JSON.stringify(wa.button), spec.hasButton ? JSON.stringify(['mobile_digits']) : undefined)
   check(`sandbox: ${key} is once per lead`, `${n?.maxEmailsPerLead}/${n?.followUpDays}`, '1/0')
   check(`sandbox: ${key} carries its template copy for later creation`, (n?.bodyTemplate ?? '').length > 40, true)
 }
@@ -1115,6 +1123,32 @@ check('confidence: three factors are reported', conf.factors.length, 3)
 check('confidence: each factor states its maximum', conf.factors.every((f) => f.max > 0 && f.points <= f.max), true)
 check('confidence: each factor explains itself in words', conf.factors.every((f) => f.detail.length > 5), true)
 check('confidence: the score never exceeds 100', attributionConfidence(confLog({ replied: true }), 0, 1).score, 100)
+
+// --- Zoho MCP search chunking (the 2000-record ceiling) -----------------------
+// Zoho's MCP search fails with LIMIT_REACHED once a single search passes 2000 records, regardless of
+// paging — so a criteria larger than that cannot be read at all without splitting it. These pin the
+// split, because a wrong window silently drops (or duplicates) whole months of leads.
+check('chunk: the MCP search ceiling is the documented 2000', MCP_SEARCH_LIMIT, 2000)
+// monthIndex is 0-based (August = 7), matching getUTCMonth().
+const mw = monthWindows({ year: 2026, monthIndex: 7 }, new Date('2026-10-15T00:00:00Z'))
+check('chunk: Aug..Oct15 splits into Aug, Sep and a clipped Oct', mw.length, 3)
+check('chunk: the first window starts at the given month', mw[0].from.toISOString().slice(0, 10), '2026-08-01')
+check('chunk: the first window ends where the second starts', mw[0].to.getTime(), mw[1].from.getTime())
+check('chunk: windows never overlap or leave a gap', mw.every((w, i) => i === 0 || w.from.getTime() === mw[i - 1].to.getTime()), true)
+check('chunk: the last window ends at the upper bound', mw[mw.length - 1].to.toISOString(), '2026-10-15T00:00:00.000Z')
+check('chunk: no window is empty', mw.every((w) => w.to.getTime() > w.from.getTime()), true)
+check('chunk: a single-month range still yields one window', monthWindows({ year: 2026, monthIndex: 8 }, new Date('2026-09-20T00:00:00Z')).length, 1)
+check('chunk: a range already past yields nothing', monthWindows({ year: 2026, monthIndex: 10 }, new Date('2026-01-01T00:00:00Z')).length, 0)
+// The 0-based trap, pinned: monthIndex 9 is October, and asking for Sep..Sep is one window.
+check('chunk: monthIndex 9 is October, not September', monthWindows({ year: 2026, monthIndex: 9 }, new Date('2026-09-30T00:00:00Z')).length, 0)
+// The split must be bounded, or a bad start date spins forever.
+check('chunk: a very old start is capped, not infinite', monthWindows({ year: 1990, monthIndex: 0 }, new Date('2026-01-01T00:00:00Z')).length <= 240, true)
+// The window is ANDed on with balanced parentheses and the CRM's own offset.
+const wc = withCreatedWindow('((Business_vertical:equals:EPS)and(Email:equals:null))', new Date('2026-08-01T00:00:00Z'), new Date('2026-09-01T00:00:00Z'))
+check('chunk: the window keeps the base criteria intact', wc.includes('(Business_vertical:equals:EPS)and(Email:equals:null)'), true)
+check('chunk: the window lower bound is the CRM offset, never a Z', wc.includes('Created_Time:greater_than:2026-08-01T05:30:00+05:30'), true)
+check('chunk: the window upper bound is exclusive', wc.includes('Created_Time:less_than:2026-09-01T05:30:00+05:30'), true)
+check('chunk: parentheses balance', (wc.match(/\(/g) ?? []).length, (wc.match(/\)/g) ?? []).length)
 
 // --- Zoho MCP tool selection and argument building ---------------------------
 // The real tool list from the live server. The bug this guards against: every tool name

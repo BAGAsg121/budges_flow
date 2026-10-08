@@ -25,7 +25,8 @@ import { buildWhatsAppParams } from '@/lib/whatsapp-params'
 import { isDeliveryCapError, capBackoffHours } from '@/lib/whatsapp-errors'
 import { decideSend, type SendDecision, type SequenceLog } from '@/lib/sequence'
 import { ctaSendParams } from '@/lib/cta'
-import { ctaDestinationFor, expandZohoCriteria } from '@/lib/nudge-defaults'
+import { ctaDestinationFor, expandZohoCriteria, zohoIstIso } from '@/lib/nudge-defaults'
+import { MCP_SEARCH_LIMIT, monthWindows, withCreatedWindow } from '@/lib/zoho-chunk'
 import { runGuard } from '@/lib/nudge-kind'
 import { upsertLeadWithJourney } from '@/lib/journey-sync'
 import { recalculateScores } from '@/lib/score-leads'
@@ -281,48 +282,140 @@ export async function syncLeadsViaMcp(criteria: string): Promise<McpSyncResult> 
     )
   }
 
+  // Shared upsert: journey-aware so a stage change is recorded whichever route read the lead, and
+  // batched scoring at the end rather than per lead.
+  const touched: string[] = []
+  let stageChanges = 0
+  const upsert = async (data: ReturnType<typeof mapZohoLead>) => {
+    const outcome = await upsertLeadWithJourney(data)
+    touched.push(outcome.leadId)
+    if (outcome.changed) stageChanges++
+    return outcome.changed
+  }
+
+  const chunked = await syncLeadsViaMcpChunked(criteria, upsert)
+
+  if (stageChanges) console.log(`[journey] ${stageChanges} stage change(s) detected in this sync`)
+  if (touched.length) await recalculateScores({ leadIds: touched })
+
+  return {
+    count: chunked.count,
+    tool: tool.name,
+    args: buildLeadsToolArgs(tool, criteria, LEAD_FIELDS),
+    recordsRead: chunked.count,
+    pages: chunked.windows,
+    // A window that failed means the sync is genuinely partial, and says so.
+    truncated: chunked.failedWindows.length > 0,
+  }
+}
+
+/** How many records a criteria matches, via the MCP count tool (cheap: no records transferred). */
+export async function mcpRecordCount(criteria: string): Promise<number | null> {
+  try {
+    const res = await callZohoMcpTool('ZohoCRM_getRecordCount', {
+      // `moduleApiName`, NOT `module` — with the wrong name the tool returns ok=true and an error
+      // string inside the payload, which reads like success.
+      path_variables: { moduleApiName: 'Leads' },
+      query_params: { criteria },
+    })
+    if (!res.ok) return null
+    const raw = JSON.stringify(res.json ?? res.text)
+    const n = raw.match(/"count"\s*:\s*(\d+)/)?.[1]
+    return n ? Number(n) : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Read a criteria that may exceed Zoho's per-search cap, by splitting it into month windows.
+ *
+ * A criteria at or under the cap takes the ordinary path, so nothing changes for the flows that
+ * already work. Over it, the search is repeated per month with the window ANDed on, and the totals
+ * are summed. One failing window is reported rather than aborting the rest — a partial sync is far
+ * more useful than none, and `failedWindows` says exactly what is missing.
+ */
+async function syncLeadsViaMcpChunked(
+  criteria: string,
+  upsert: (data: ReturnType<typeof mapZohoLead>) => Promise<boolean>
+): Promise<{ count: number; windows: number; failedWindows: string[] }> {
+  const total = await mcpRecordCount(criteria)
+  if (total === null || total <= MCP_SEARCH_LIMIT) {
+    // Unknown count: try it in one go rather than refusing to sync.
+    const res = await syncLeadsViaMcpInto(criteria, upsert)
+    return { count: res.count, windows: 1, failedWindows: [] }
+  }
+
+  // The earliest matching lead decides where the windows start.
+  const tools = await listZohoMcpTools()
+  const tool = pickLeadsTool(tools)
+  if (!tool) throw new Error('No Leads-reading tool found on the Zoho MCP server.')
+  const baseArgs = buildLeadsToolArgs(tool, criteria, LEAD_FIELDS)
+  const first = await callZohoMcpTool(tool.name, {
+    ...baseArgs,
+    query_params: { ...(baseArgs.query_params as Record<string, unknown>), sort_by: 'Created_Time', sort_order: 'asc' },
+  })
+  const firstRecord = first.ok ? extractRecords(first.json ?? first.text)[0] : undefined
+  const earliest = firstRecord?.Created_Time ? new Date(String(firstRecord.Created_Time)) : null
+  if (!earliest || Number.isNaN(earliest.getTime())) {
+    throw new Error(
+      `Criteria matches ${total} leads, over Zoho's ${MCP_SEARCH_LIMIT}-record search limit, and the ` +
+        `earliest Created_Time could not be read to split it into windows.`
+    )
+  }
+
+  const windows = monthWindows({ year: earliest.getUTCFullYear(), monthIndex: earliest.getUTCMonth() }, new Date())
+  console.log(
+    `[sync] criteria matches ${total} leads — over Zoho's ${MCP_SEARCH_LIMIT} search limit; ` +
+      `reading it in ${windows.length} monthly window(s) from ${earliest.toISOString().slice(0, 10)}`
+  )
+
+  let count = 0
+  const failedWindows: string[] = []
+  for (const w of windows) {
+    try {
+      const res = await syncLeadsViaMcpInto(withCreatedWindow(criteria, w.from, w.to), upsert)
+      count += res.count
+    } catch (err) {
+      const label = `${w.from.toISOString().slice(0, 10)}…${w.to.toISOString().slice(0, 10)}`
+      failedWindows.push(`${label}: ${err instanceof Error ? err.message : String(err)}`)
+      console.error(`[sync] window ${label} failed:`, err instanceof Error ? err.message : err)
+    }
+  }
+  return { count, windows: windows.length, failedWindows }
+}
+
+/** Page guard for ONE search: 25 × 200 = 5000, above Zoho's 2000 ceiling so it is never the limit. */
+const MAX_MCP_PAGES = 25
+
+/** The inner single-search pagination, shared by the plain and chunked paths. */
+async function syncLeadsViaMcpInto(
+  criteria: string,
+  upsert: (data: ReturnType<typeof mapZohoLead>) => Promise<boolean>
+): Promise<{ count: number }> {
+  const tools = await listZohoMcpTools()
+  const tool = pickLeadsTool(tools)
+  if (!tool) throw new Error('No Leads-reading tool found on the Zoho MCP server.')
   const baseArgs = buildLeadsToolArgs(tool, criteria, LEAD_FIELDS)
 
   let count = 0
-  let recordsRead = 0
-  let pages = 0
-  let truncated = false
-  let stageChanges = 0
-  const touched: string[] = []
-
   for (let page = 1; page <= MAX_MCP_PAGES; page++) {
     const result = await callZohoMcpTool(tool.name, page === 1 ? baseArgs : withPage(baseArgs, page))
     if (!result.ok) {
       throw new Error(`MCP tool "${tool.name}" failed: ${result.error || result.text || 'no detail'}`)
     }
-
     const records = extractRecords(result.json ?? result.text)
-    recordsRead += records.length
-    pages = page
-
     for (const record of records) {
       const data = mapZohoLead(record as Parameters<typeof mapZohoLead>[0])
-      if (!data.zohoId) continue // a record without an id cannot be upserted safely
-      // Journey-aware, so a stage change is recorded whichever Zoho route read the lead.
-      const outcome = await upsertLeadWithJourney(data)
-      touched.push(outcome.leadId)
-      if (outcome.changed) stageChanges++
+      if (!data.zohoId) continue
+      await upsert(data)
       count++
     }
-
     const paging = extractPagingInfo(result.json ?? result.text)
     if (!paging.moreRecords || records.length === 0) break
-    if (page === MAX_MCP_PAGES) truncated = true
   }
-
-  if (stageChanges) console.log(`[journey] ${stageChanges} stage change(s) detected in this sync`)
-  // V2: scores are recalculated on every sync run, for exactly the leads this sync touched.
-  if (touched.length) await recalculateScores({ leadIds: touched })
-  return { count, tool: tool.name, args: baseArgs, recordsRead, pages, truncated }
+  return { count }
 }
-
-/** ~25 pages × 200 = 5000 leads, far beyond any window this app syncs. */
-const MAX_MCP_PAGES = 25
 
 export interface SyncOutcome {
   synced: number
@@ -385,6 +478,7 @@ function buildLeadVars(lead: {
   leadStatus: string | null
   kycDocumentUploadCount: number | null
   kycDocumentsExpectedCount: number | null
+  ekoCode: string | null
   businessVertical: string | null
   city: string | null
   ownerName: string | null
@@ -399,6 +493,10 @@ function buildLeadVars(lead: {
     lead_status: lead.leadStatus,
     kyc_document_upload_count: lead.kycDocumentUploadCount,
     kyc_documents_expected_count: lead.kycDocumentsExpectedCount,
+    // Needed by the sandbox sign-agreement template, which names the code in its body ("your Eko
+    // Code {{2}} is ready"). Without it the parameter falls back to "-" and the message tells the
+    // customer their code is a dash.
+    eko_code: lead.ekoCode,
     business_vertical: lead.businessVertical,
     city: lead.city,
     owner_name: lead.ownerName,
