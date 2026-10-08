@@ -17,6 +17,7 @@ import { PrismaClient } from '@prisma/client'
 import { DEFAULT_NUDGES, LEAD_STATUS, KYC_COMPLETE_AT, ZOHO_CRITERIA } from '../src/lib/nudge-defaults.ts'
 import { collectMysqlRecipients, isMysqlFlowKey } from '../src/lib/mysql-nudges.ts'
 import { splitByKycMatch } from '../src/lib/kyc-match.ts'
+import { previewNudge } from '../src/lib/nudge-engine.ts'
 import { closeSbPool } from '../src/lib/sb-db.ts'
 
 const db = new PrismaClient()
@@ -101,47 +102,19 @@ for (const n of all) {
     console.log(`  ${n.key.padEnd(30)} manual / sheet-driven — no lead targeting`)
     continue
   }
-  // Channel-aware contact requirement, mirroring buildWhere(): email nudges need an
-  // address, WhatsApp nudges need a phone (the test lead has no email on purpose).
-  const and = []
-  if (n.channel === 'email') and.push({ email: { not: null } })
-  else and.push({ OR: [{ mobile: { not: null } }, { phone: { not: null } }] })
-
-  const where = {}
-  if (f.includeStatuses?.length) where.leadStatus = { in: f.includeStatuses }
-  else if (f.excludeStatuses?.length) where.leadStatus = { notIn: f.excludeStatuses }
-  if (f.businessVertical) where.businessVertical = f.businessVertical
-  if (f.maxKycCount !== undefined) {
-    // A missing KYC value counts as 0 ("nothing uploaded yet"), so NULL is included
-    // alongside `<= max`.
-    and.push({ OR: [{ kycDocumentUploadCount: { lte: f.maxKycCount } }, { kycDocumentUploadCount: null }] })
-  } else if (f.minKycCount !== undefined) {
-    and.push({ kycDocumentUploadCount: { gte: f.minKycCount } })
-  }
-  if (and.length) where.AND = and
-
-  // The count rule (equals / less_than) compares two columns of the same row, so a COUNT query
-  // cannot express it — and reporting the pre-rule number would overstate the audience badly.
-  // Measured example: the Documents Pending cohort is 40 leads, but only 1 satisfies "counts equal"
-  // and 13 satisfy "upload < expected". So fetch the cohort and apply the SAME predicate the send
-  // path uses.
-  const cohort = await db.lead.findMany({ where })
-  const { kept, rejected } = splitByKycMatch(cohort, f)
-
-  const who = n.channel === 'email' ? 'with an email' : 'with a phone'
-  const rule = f.kycCountRule || (f.kycMatchesExpected ? 'equals' : null)
-  const ruleText = rule === 'less_than' ? ' · upload < expected' : rule === 'equals' ? ' · upload = expected' : ''
-  const refusalText = rejected.length
-    ? ` (of ${cohort.length} in the pool; ${Object.entries(
-        rejected.reduce((m, r) => ({ ...m, [r.reason]: (m[r.reason] ?? 0) + 1 }), {})
-      )
-        .map(([k, v]) => `${k}×${v}`)
-        .join(', ')})`
+  // The REAL selection path. This preview used to re-implement buildWhere(), and it silently stopped
+  // agreeing with the send path the moment a filter field was added: the sandbox nudges filter on
+  // ekoCode / signAgreement / kycUploadStatus / createdWithinDays, none of which the copy knew
+  // about, so it reported ~1,819 leads where the nudge would message a handful. previewNudge() is
+  // the same code a run uses, so the number cannot drift again.
+  const preview = await previewNudge(n.id)
+  const reasons = preview.wouldSkip.reduce((m, s) => m.set(s.reason, (m.get(s.reason) ?? 0) + 1), new Map())
+  const reasonText = reasons.size
+    ? `  · skipped ${[...reasons].map(([r, c]) => `${r}×${c}`).join(', ')}`
     : ''
   console.log(
-    `  ${n.key.padEnd(30)} ${String(kept.length).padStart(4)} lead(s) ${who}  ` +
-      `${f.includeStatuses ? '· ' + f.includeStatuses.join(', ') : ''}` +
-      `${f.maxKycCount !== undefined ? ` · KYC <= ${f.maxKycCount} or unset` : ''}${ruleText}${refusalText}`
+    `  ${n.key.padEnd(30)} ${String(preview.wouldSend.length).padStart(4)} would send of ` +
+      `${preview.leadsConsidered} considered${reasonText}`
   )
 }
 

@@ -14,6 +14,7 @@ import { runNudge, syncLeads, type RunSummary } from '@/lib/nudge-engine'
 import { beginMysqlSnapshot, endMysqlSnapshot } from '@/lib/mysql-nudges'
 import { recalculateScores, type ScoreRunResult } from '@/lib/score-leads'
 import { scoreRecalcIntervalMinutes } from '@/lib/journey'
+import { expandZohoCriteria } from '@/lib/nudge-defaults'
 import { getStaticBaseUrl } from '@/lib/base-url'
 import { isImapConfigured, syncRepliesFromImap, type ImapSyncResult } from '@/lib/reply-tracker'
 import { nudgeSourceOf } from '@/lib/nudge-kind'
@@ -166,8 +167,13 @@ export async function runAllEnabledNudges(opts?: { sync?: boolean; limit?: numbe
   // criteria are reported as errored and skipped, exactly as they were when the sync was per-nudge.
   const syncOutcome = new Map<string, { count: number; via: 'mcp' | 'api' } | { error: string }>()
   if (sync) {
+    // Expanded once per cycle with a SHARED `now`, so two nudges whose criteria differ only in a
+    // relative placeholder expand to identical strings and share one sync instead of two.
     const criterias = new Set(
-      nudges.map((n) => (n.zohoCriteria || '').trim()).filter((c) => c.length > 0)
+      nudges
+        .map((n) => (n.zohoCriteria || '').trim())
+        .filter((c) => c.length > 0)
+        .map((c) => expandZohoCriteria(c, now))
     )
     for (const criteria of criterias) {
       try {
@@ -192,7 +198,9 @@ export async function runAllEnabledNudges(opts?: { sync?: boolean; limit?: numbe
   beginMysqlSnapshot()
   try {
     for (const nudge of nudges) {
-      const criteria = (nudge.zohoCriteria || '').trim()
+      // Expanded with the same `now` used to build the map above, so the lookup key matches.
+      const raw = (nudge.zohoCriteria || '').trim()
+      const criteria = raw ? expandZohoCriteria(raw, now) : ''
       const synced = criteria ? syncOutcome.get(criteria) : undefined
 
       if (synced && 'error' in synced) {

@@ -144,6 +144,50 @@ The impact report **excludes nudges below `minSendsForRanking` (20) from the ran
 one conversion is "100%" and means nothing. Stage changes with no qualifying nudge are reported as
 `organicChanges` rather than dropped.
 
+### Sandbox WhatsApp nudges
+
+Six CRM-driven WhatsApp nudges, tagged `category: "sandbox_whatsapp"` and grouped by the **Sandbox
+WhatsApp** filter on the Nudges tab. They read the CRM through the Zoho **MCP** server like any other
+Zoho nudge: Run (or the scheduler) syncs the criteria, then the local filters decide who is messaged.
+
+| Nudge | Criterion | Matches when written |
+| --- | --- | --- |
+| `sandbox_old_website_lead` | EPS, `Eko_Code` empty, created < 2 months | 573 |
+| `sandbox_sign_agreement_pending` | EPS, `Eko_Code` present, `Sign_Agreement` false | 2,782 |
+| `sandbox_email_missing` | EPS, `Email` empty | 3,906 |
+| `sandbox_documents_accepted` | EPS, `KYC_Documents_Upload` = `Accepted` | 121 |
+| `sandbox_documents_under_review` | EPS, `KYC_Documents_Upload` = `All Done` | 8 |
+| `sandbox_closed_won_live_credentials` | EPS, `Lead_Status` = `Closed Won` | 288 |
+
+*(Control: all EPS leads at the time of writing — 13,637. These audiences are large; each nudge is
+once-per-lead, but enabling one is a real send to hundreds or thousands of people.)*
+
+> **The templates are not created yet, and these nudges ship DISABLED.** Each one names the template
+> it will use and carries its copy, so `npm run wa:templates -- --create-missing` can submit it later.
+> Enabling one before that fails every send with `132001`. `npm run readiness` reports it as a blocker
+> rather than letting you find out from the logs.
+
+> **`Sign_Agreement` is a tri-state here.** `filters.signAgreement: false` matches only an explicit
+> `false` — a lead whose field the CRM never told us about is stored as NULL and is **not** treated as
+> unsigned. Otherwise a sparse payload could trigger "your agreement is pending" on someone who never
+> signed anything because they never got that far.
+
+> **The criteria and the local filters must agree.** Zoho decides what is *fetched*; the filters decide
+> who is *messaged*. Both halves are written out and asserted per nudge, because a criterion with no
+> matching filter falls back to "every synced lead" — which is exactly what happened when the seed
+> script's own preview didn't know the new fields and reported ~1,819 leads instead of a handful. That
+> preview now calls the real `previewNudge()`, so it cannot drift again.
+
+`createdWithinDays` and `{{monthsAgo:N}}` exist because a stored criteria is a **string**: a literal
+ISO date would age, and "not older than two months" would quietly become "two months from whenever
+someone configured it". The placeholder is expanded at sync time, with the CRM's `+05:30` offset —
+Zoho rejects a `…Z` suffix on a datetime.
+
+```bash
+npm run db:add-sandbox-columns            # dry run — signAgreement + kycDocumentsUploadStatus
+npm run db:add-sandbox-columns -- --apply
+```
+
 ## The interface
 
 A sidebar shell (a mobile drawer below `lg`, plus a swipeable tab strip) over five tabs:

@@ -76,6 +76,10 @@ export interface ZohoLead {
   Lead_Status?: string
   Created_Time?: string
   Eko_Code?: string
+  /** Boolean: whether the partner agreement has been signed. */
+  Sign_Agreement?: boolean | string
+  /** Picklist: "-None-" | "Partial Done" | "All Done" | "Re-upload Requested" | "Accepted". */
+  KYC_Documents_Upload?: string | null
   KYC_Document_Upload_Count?: number | string
   /** "KYC Documents Expected Count" — how many documents this lead is expected to upload. */
   KYC_Documents_Expected_Count?: number | string
@@ -109,6 +113,8 @@ export const LEAD_FIELDS = [
   'Lead_Status',
   'Created_Time',
   'Eko_Code',
+  'Sign_Agreement',
+  'KYC_Documents_Upload',
   'KYC_Document_Upload_Count',
   'KYC_Documents_Expected_Count',
   'KYC_Document_Reject_Count',
@@ -223,6 +229,22 @@ function parseCount(value: unknown): number | null {
   return Number.isFinite(n) ? Math.trunc(n) : null
 }
 
+/**
+ * A Zoho boolean.
+ *
+ * Returns null — not false — when the field was absent, because "the CRM did not tell us" and "the
+ * agreement is not signed" are different facts. A nudge that targets unsigned agreements must not
+ * treat a missing field as unsigned, or a sparse webhook payload alone could trigger it.
+ */
+export function parseBool(value: unknown): boolean | null {
+  if (value === null || value === undefined || value === '') return null
+  if (typeof value === 'boolean') return value
+  const s = String(value).trim().toLowerCase()
+  if (['true', '1', 'yes'].includes(s)) return true
+  if (['false', '0', 'no'].includes(s)) return false
+  return null
+}
+
 /** Map a raw Zoho lead into our Lead table columns (upsert shape). */
 export function mapZohoLead(z: ZohoLead) {
   const ownerName =
@@ -245,6 +267,10 @@ export function mapZohoLead(z: ZohoLead) {
     // meaningful when the expectation is known (see src/lib/kyc-match.ts).
     kycDocumentsExpectedCount: parseCount(z.KYC_Documents_Expected_Count),
     ekoCode: z.Eko_Code?.trim() || null,
+    // A Zoho boolean arrives as a real boolean; anything else (a string "true") is coerced, and an
+    // absent field stays NULL rather than becoming `false` — "not told" is not "not signed".
+    signAgreement: parseBool(z.Sign_Agreement),
+    kycDocumentsUploadStatus: z.KYC_Documents_Upload == null ? null : String(z.KYC_Documents_Upload).trim() || null,
     ownerName,
     city: z.City?.trim() || null,
     state: z.States?.trim() || null,

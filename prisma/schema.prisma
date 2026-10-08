@@ -43,6 +43,14 @@ model Lead {
   // with kycDocumentUploadCount; NULL means "expectation unknown" and never counts as a match.
   kycDocumentsExpectedCount Int?
   ekoCode                String?
+  /**
+   * Zoho Sign_Agreement, a boolean. NULL means the CRM did not tell us — deliberately distinct from
+   * false, so "agreement pending" nudges cannot fire on a lead whose field we never received.
+   * Added with scripts/add-sandbox-columns.mjs (additive ALTER only).
+   */
+  signAgreement          Boolean?
+  /** Zoho KYC_Documents_Upload picklist: "-None-" | "Partial Done" | "All Done" | "Re-upload Requested" | "Accepted". */
+  kycDocumentsUploadStatus String?
   ownerName              String?
   city                   String?
   state                  String?

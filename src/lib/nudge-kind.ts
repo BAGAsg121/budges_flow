@@ -56,6 +56,33 @@ export const SHEET_DEDUP_RULE =
   'Every row in the sheet is sent, even to someone this nudge has messaged before. ' +
   'The only de-duplication is within one run: a repeated number or email is collapsed to a single send.'
 
+export type NudgeCategory = 'sandbox_whatsapp' | 'standard'
+
+/** How each category is shown. One source, so the badge and the filter cannot disagree. */
+export const NUDGE_CATEGORY_LABEL: Record<NudgeCategory, string> = {
+  sandbox_whatsapp: 'Sandbox WhatsApp',
+  standard: 'Standard',
+}
+
+/**
+ * Which group a nudge belongs to.
+ *
+ * Rides in the existing `filters` JSON rather than a new column — the same trick `source: 'mysql'`
+ * uses, and it keeps the schema untouched. An unrecognised value falls back to `standard` so a typo
+ * groups a nudge oddly rather than making it disappear from the UI.
+ */
+export function nudgeCategoryOf(n: NudgeLike): NudgeCategory {
+  try {
+    const f = JSON.parse(n.filters || '{}') as { category?: unknown }
+    return f.category === 'sandbox_whatsapp' ? 'sandbox_whatsapp' : 'standard'
+  } catch {
+    return 'standard'
+  }
+}
+
+/** The category a seed should be tagged with. */
+export const SANDBOX_WHATSAPP_CATEGORY = 'sandbox_whatsapp'
+
 /** Does this nudge consult past sends before sending again? False for sheet nudges. */
 export function skipsAlreadyMessaged(n: NudgeLike): boolean {
   return nudgeSourceOf(n) !== 'sheet'

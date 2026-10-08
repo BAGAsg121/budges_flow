@@ -1151,3 +1151,28 @@ Stage Summary:
 - Nothing has been received from Zoho yet. The remaining work is in the CRM's workflow configuration, and the log (once this change is deployed) will say whether a call arrives at all.
 
 ---
+
+Task ID: 45
+Agent: Main agent (DeepSeek Harness)
+Task: Build six CRM-driven WhatsApp nudges tagged as a "sandbox whatsapp" category. No Meta templates yet — just the flows.
+
+Work Log:
+- FOUND THE FIELD NAMES AND PICKLIST VALUES BEFORE WRITING ANYTHING, because a criterion against a field that does not exist returns zero rows and Zoho does not complain. Read the Leads metadata through MCP: `Eko_Code` (text), `Sign_Agreement` (boolean), `KYC_Documents_Upload` (picklist, values `-None- / Partial Done / All Done / Re-upload Requested / Accepted`), `Email`. The picklist values are now a constant so a typo is caught by a test rather than by a nudge that silently matches nobody.
+- **I NEARLY SHIPPED A FALSE VERIFICATION.** My first criteria check used `path_variables: { module: 'Leads' }` on the record-count tool and printed `ok=true` for all six — but that flag only means the MCP call succeeded. The payload actually said *"Mandatory path variable moduleApiName is not present"*, so nothing had been verified at all. With the correct `moduleApiName` the real counts came back: 573 / 2,782 / 3,906 / 121 / 8 / 288 against a 13,637 EPS control. Worth recording because the wrong conclusion looked exactly like a right one.
+- THE CRITERIA ALONE WOULD HAVE BEEN DANGEROUS. Zoho decides what is FETCHED; the nudge then selects from the LOCAL table. With no local filter, `buildWhere` falls back to "every synced lead" — an "email missing" nudge would have messaged all ~1,800 leads we hold, not the ~400 without an email. So each nudge carries a local filter mirroring its criterion (`ekoCodePresent`, `emailMissing`, `signAgreement`, `kycUploadStatus`, `createdWithinDays`) and both halves are asserted per nudge.
+  * That needed two new Lead columns (`Sign_Agreement`, `KYC_Documents_Upload`) or the local filters could not be expressed at all — additive ALTERs, `scripts/add-sandbox-columns.mjs`, applied.
+  * `Sign_Agreement` is deliberately TRI-STATE: NULL means "the CRM did not tell us", which is not the same as "not signed", so a sparse payload cannot trigger an "agreement pending" nudge.
+- `{{monthsAgo:N}}` BECAUSE A STORED CRITERIA IS A STRING. "Not older than two months" cannot be a literal ISO date — it would age, and quietly become "two months from whenever this was configured". The placeholder is expanded at sync time with the CRM's `+05:30` offset (Zoho rejects a `…Z` suffix). Expansion is applied in `runNudge` AND in the scheduler's hoisted per-cycle sync, where all criteria expand against one shared `now` so two nudges with the same relative window still share a single sync — and the map lookup key had to be expanded too, which I initially forgot and caught while reading the code back.
+- THE SEED SCRIPT'S PREVIEW WAS LYING AND IS NOW GONE. It re-implemented `buildWhere` by hand, so it knew nothing about the new filter fields: it reported **1,819 leads** for four of the six sandbox nudges where the nudge would message a handful. Replaced with a call to the real `previewNudge()` — the same code a run uses — which required adding the alias loader to the `seed:nudges` script. Correct numbers immediately: 461/524 for old-website-lead, 397/398 for email-missing, 115/116 for closed-won.
+- EDITED A FILE WITH POWERSHELL AGAIN AND CORRUPTED ITS UTF-8 AGAIN (every em-dash became mojibake). Same mistake as Task 43, same detection — reading the result — and the same fix: restore from git, redo with the file tool. It is now twice; the rule is that `Get-Content`/`Set-Content` must not be used to modify source files in this repo.
+- VERIFIED ONE FLOW END TO END RATHER THAN ALL SIX, deliberately. `sandbox_documents_under_review` was chosen because it is the smallest criterion that exercises a NEW field: criteria expanded cleanly, MCP synced 8 leads in 6.1s, the local filter selected **8 of 8** — exactly the "All Done" cohort — and `kycDocumentsUploadStatus` populated as `All Done=8`. The other five were left unsynced because their criteria match 121–3,906 leads, which is a large write to `nudge_lead` and (once enabled) a large send; that is the operator's call, not a side effect of testing.
+- **V2's JOURNEY DATA IS NO LONGER EMPTY.** That sync detected **2 real stage transitions** — MEGHRAJ SINGH CHAUHAN and PRADEEP C, both `Agreement Signed → Closed Won`, both recorded as `organic` (no successful send inside the 72h window). That is the attribution being honest: it could have credited a nudge and did not.
+- UI: a **Sandbox WhatsApp** badge on the card and a category filter (All / Sandbox WhatsApp / Standard) with live counts. Category rides in `filters.category` — no schema change — through one `nudgeCategoryOf()` helper so the badge and the filter cannot disagree.
+- 109 new assertions (criteria↔filter pairing per nudge, the placeholder maths, the category helper, the real picklist values). verify now 948. tsc clean, eslint clean.
+
+Stage Summary:
+- Six sandbox WhatsApp nudges exist, disabled, tagged, grouped in the UI, each with its criteria, its mirroring local filters, its template name and its copy — ready for templates to be created later.
+- One flow is proven end to end against the live CRM through MCP; the other five need a first sync, and their audience sizes are large enough that the operator should choose when.
+- Side effect worth knowing: the V2 stage history now contains its first two genuine transitions.
+
+---

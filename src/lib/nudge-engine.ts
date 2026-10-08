@@ -25,7 +25,7 @@ import { buildWhatsAppParams } from '@/lib/whatsapp-params'
 import { isDeliveryCapError, capBackoffHours } from '@/lib/whatsapp-errors'
 import { decideSend, type SendDecision, type SequenceLog } from '@/lib/sequence'
 import { ctaSendParams } from '@/lib/cta'
-import { ctaDestinationFor } from '@/lib/nudge-defaults'
+import { ctaDestinationFor, expandZohoCriteria } from '@/lib/nudge-defaults'
 import { runGuard } from '@/lib/nudge-kind'
 import { upsertLeadWithJourney } from '@/lib/journey-sync'
 import { recalculateScores } from '@/lib/score-leads'
@@ -66,6 +66,37 @@ export interface NudgeFilters {
    * src/lib/kyc-match.ts for why a null/zero expected count must never count as a match.
    */
   kycMatchesExpected?: boolean
+  /** Compare two columns of the same row: applied post-query, not in buildWhere. */
+  kycCountRule?: 'equals' | 'less_than'
+  /** Legacy spelling for `kycCountRule: 'equals'`. */
+  kycCountRuleLegacy?: boolean
+
+  // --- fields the sandbox nudges filter on -----------------------------------
+  /**
+   * Whether the lead has an Eko Code. `false` means "must be missing".
+   *
+   * Needed locally because the Zoho criteria only decides what gets FETCHED; the nudge selects from
+   * the local table, and without this an "old website lead" nudge would fall back to every synced
+   * lead. `undefined` leaves the field alone.
+   */
+  ekoCodePresent?: boolean
+  /** `true` = must have NO email. Distinct from requireEmail, which applies to the email channel. */
+  emailMissing?: boolean
+  /**
+   * The exact value Zoho's Sign_Agreement must have. NULL never matches either value — a lead whose
+   * field we were never told about is not "unsigned".
+   */
+  signAgreement?: boolean
+  /** KYC_Documents_Upload must be one of these, e.g. ['Accepted'] or ['All Done']. */
+  kycUploadStatus?: string[]
+  /**
+   * Only leads created within the last N days. Dynamic on purpose: a stored ISO date would age, so
+   * "not older than two months" would quietly become "not older than two months from whenever this
+   * was configured".
+   */
+  createdWithinDays?: number
+  /** Groups nudges in the UI. No schema change — it rides in the existing filters JSON. */
+  category?: string
 }
 
 export interface RunSkipped {
@@ -146,6 +177,24 @@ function buildWhere(filters: NudgeFilters, channel: Channel) {
   // kycMatchesExpected deliberately has no clause here: it compares the row's OWN two count
   // columns, which is not expressible in a Prisma where. It is applied in memory (see
   // applyRowPredicates) so that runNudge, previewNudge and the CRM webhook agree exactly.
+
+  // --- sandbox-nudge fields ---------------------------------------------------
+  if (filters.ekoCodePresent === true) and.push({ ekoCode: { not: null } })
+  else if (filters.ekoCodePresent === false) {
+    // An empty string is "no code" just as much as NULL — a blank cell in the CRM is not a code.
+    and.push({ OR: [{ ekoCode: null }, { ekoCode: '' }] })
+  }
+  if (filters.emailMissing === true) and.push({ OR: [{ email: null }, { email: '' }] })
+  // Exact boolean match. `signAgreement: false` does NOT match NULL, which is the point: a lead
+  // whose field we were never told about must not be treated as unsigned.
+  if (typeof filters.signAgreement === 'boolean') where.signAgreement = filters.signAgreement
+  if (filters.kycUploadStatus?.length) {
+    where.kycDocumentsUploadStatus = { in: filters.kycUploadStatus }
+  }
+  if (typeof filters.createdWithinDays === 'number' && filters.createdWithinDays > 0) {
+    const since = new Date(Date.now() - filters.createdWithinDays * 24 * 60 * 60 * 1000)
+    where.createdTime = { gte: since }
+  }
 
   if (filters.createdAfter) {
     const d = new Date(filters.createdAfter)
@@ -716,7 +765,9 @@ export async function runNudge(
   // (`invalid_client_secret`) every nudge run failed to sync at all, even though MCP was fine.
   // One sync path, MCP-first, everywhere.
   if (opts.sync && nudge.zohoCriteria && nudge.zohoCriteria.trim()) {
-    const outcome = await syncLeads(nudge.zohoCriteria.trim())
+    // Expanded here: a stored criteria may carry {{monthsAgo:N}}, which Zoho would reject (or match
+    // nothing against) if it were sent verbatim.
+    const outcome = await syncLeads(expandZohoCriteria(nudge.zohoCriteria.trim()))
     summary.syncedFromZoho = outcome.synced
     summary.syncedVia = outcome.via
   }

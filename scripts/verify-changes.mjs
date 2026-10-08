@@ -34,7 +34,8 @@ import { explainMailError, isRetryableMailError } from '../src/lib/mail-errors.t
 import { isRetryableWhatsAppError } from '../src/lib/whatsapp-errors.ts'
 import { buildSheetVars, normaliseMobileDigits, pickSheetEmail, pickSheetMobile, planSheetSends } from '../src/lib/sheet-vars.ts'
 import { buildDailySeries, seriesIsEmpty, istDayKey } from '../src/lib/engagement-stats.ts'
-import { nudgeSourceOf, capAppliesTo, isManualSheetNudge, runGuard } from '../src/lib/nudge-kind.ts'
+import { nudgeSourceOf, capAppliesTo, isManualSheetNudge, runGuard, nudgeCategoryOf, NUDGE_CATEGORY_LABEL } from '../src/lib/nudge-kind.ts'
+import { expandZohoCriteria, hasUnexpandedPlaceholder, SANDBOX_WHATSAPP_NUDGES, KYC_UPLOAD_STATUS_VALUES } from '../src/lib/nudge-defaults.ts'
 import { buildXlsx, buildZip, crc32, columnLetter, sanitiseSheetName } from '../src/lib/xlsx.ts'
 import { istDay, istDateTime, istRangeToUtc, istDaysAgo, toCsv, exportStatus, logToExportRow, buildBreakdown, EXPORT_COLUMNS, EXPORT_WIDTHS } from '../src/lib/export-format.ts'
 import { readZip, validateXlsx } from './lib/read-zip.mjs'
@@ -229,7 +230,7 @@ check('whatsapp_sample targets exactly one status', filtersOf('whatsapp_sample')
 checkTrue('whatsapp_sample asks for a phone', filtersOf('whatsapp_sample').requirePhone === true)
 check('whatsapp_sample is capped at 1 message/lead', wa.maxEmailsPerLead, 1)
 checkTrue('whatsapp_sample body renders first_name', renderTemplate(wa.bodyTemplate, { first_name: 'Asha' }).includes('Hi Asha'))
-check('whatsapp nudges: sample + legacy doc twin + 6 MySQL flows + 3 sheet + 1 CRM status', DEFAULT_NUDGES.filter((n) => n.channel === 'whatsapp').length, 12)
+check('whatsapp nudges: sample + legacy doc twin + 6 MySQL + 3 sheet + 1 CRM status + 6 sandbox', DEFAULT_NUDGES.filter((n) => n.channel === 'whatsapp').length, 18)
 const waDocs = byKey['documents_pending_wa']
 check('documents_pending_wa template language is en_US (not en)', waDocs.whatsappLanguage, 'en_US')
 check('documents_pending_wa supplies 3 params for its 3 variables', JSON.parse(waDocs.whatsappParams).length, countTemplateVars(waDocs.bodyTemplate))
@@ -724,7 +725,8 @@ const syncLeadsBody = engineSource.slice(
 )
 check('syncLeads is where the REST fallback lives', restHelperCalls(syncLeadsBody), 2)
 check('no REST-only sync call exists outside syncLeads', restHelperCalls(engineSource) - restHelperCalls(syncLeadsBody), 0)
-check('the engine also calls the MCP-first sync where it syncs a run', /syncLeads\(nudge\.zohoCriteria\.trim\(\)\)/.test(engineSource), true)
+check('the engine also calls the MCP-first sync where it syncs a run', /syncLeads\(expandZohoCriteria\(nudge\.zohoCriteria/.test(engineSource), true)
+check('the engine expands relative placeholders before syncing', /expandZohoCriteria/.test(engineSource), true)
 check('runNudge no longer syncs via the REST-only helper', /syncLeadsFromCriteria\(nudge\.zohoCriteria/.test(engineSource), false)
 check('the run summary reports which path synced', /syncedVia/.test(engineSource), true)
 
@@ -995,6 +997,80 @@ for (let i = 0; i < 60; i++) recordDelivery({ hook: 'lead', status: 200, outcome
 check('inbox: the buffer is capped at 50', recentDeliveries(100).length, 50)
 check('inbox: asking for more than the cap still returns the cap', recentDeliveries(999).length, 50)
 check('inbox: a limit of 0 still returns at least one', recentDeliveries(0).length, 1)
+
+// --- sandbox WhatsApp nudges: category, criteria placeholders, seeds ----------
+// A tag rides in filters.category (no schema change) and groups these six in the UI.
+check('category: an untagged nudge is standard', nudgeCategoryOf({ filters: '{}' }), 'standard')
+check('category: sandbox_whatsapp is read', nudgeCategoryOf({ filters: '{"category":"sandbox_whatsapp"}' }), 'sandbox_whatsapp')
+check('category: unparseable filters fall back to standard', nudgeCategoryOf({ filters: '{oops' }), 'standard')
+check('category: an unknown value falls back to standard', nudgeCategoryOf({ filters: '{"category":"nonsense"}' }), 'standard')
+check('category: every category has a label', Object.keys(NUDGE_CATEGORY_LABEL).sort().join(','), 'sandbox_whatsapp,standard')
+
+// {{monthsAgo:N}} — a stored criteria is a string, so a literal ISO date would age.
+const now = new Date('2026-10-06T12:00:00Z')
+check('placeholder: monthsAgo is expanded', expandZohoCriteria('(x:greater_than:{{monthsAgo:2}})', now), '(x:greater_than:2026-08-06T17:30:00+05:30)')
+check('placeholder: expansion uses the CRM offset, never a Z', /\+05:30$/.test(expandZohoCriteria('{{monthsAgo:1}}', now)), true)
+check('placeholder: no placeholder survives expansion', hasUnexpandedPlaceholder(expandZohoCriteria('a{{monthsAgo:3}}b', now)), false)
+check('placeholder: an unexpanded one is detected', hasUnexpandedPlaceholder('(x:greater_than:{{monthsAgo:2}})'), true)
+check('placeholder: a criteria without one is unaffected', expandZohoCriteria('(Business_vertical:equals:EPS)', now), '(Business_vertical:equals:EPS)')
+check('placeholder: several are all expanded', expandZohoCriteria('{{monthsAgo:1}}|{{monthsAgo:2}}', now), '2026-09-06T17:30:00+05:30|2026-08-06T17:30:00+05:30')
+
+// The six sandbox nudges, and the pairing between each criterion and its local filter. If these
+// diverge the nudge messages the wrong people — that is the whole risk of "criteria fetches, filters
+// send", so both halves are pinned for every one.
+const SANDBOX_KEYS = [
+  'sandbox_old_website_lead',
+  'sandbox_sign_agreement_pending',
+  'sandbox_email_missing',
+  'sandbox_documents_accepted',
+  'sandbox_documents_under_review',
+  'sandbox_closed_won_live_credentials',
+]
+check('sandbox: six nudges are defined', Object.keys(SANDBOX_WHATSAPP_NUDGES).length, 6)
+for (const key of SANDBOX_KEYS) {
+  const n = DEFAULT_NUDGES.find((x) => x.key === key)
+  const f = JSON.parse(n?.filters ?? '{}')
+  check(`sandbox: ${key} exists`, Boolean(n), true)
+  check(`sandbox: ${key} is tagged sandbox_whatsapp`, f.category, 'sandbox_whatsapp')
+  check(`sandbox: ${key} is a WhatsApp nudge`, n?.channel, 'whatsapp')
+  check(`sandbox: ${key} ships DISABLED (its template does not exist yet)`, n?.enabled, false)
+  check(`sandbox: ${key} is scoped to EPS`, f.businessVertical, EPS_BUSINESS_VERTICAL)
+  check(`sandbox: ${key} requires a phone`, f.requirePhone, true)
+  check(`sandbox: ${key} has a criteria to fetch with`, Boolean(n?.zohoCriteria), true)
+  // A STORED criteria may legitimately carry {{monthsAgo:N}} — that is the point of the placeholder.
+  // What must never happen is one SURVIVING expansion, because Zoho would then be sent the literal
+  // text and match nothing.
+  check(`sandbox: ${key} expands cleanly`, hasUnexpandedPlaceholder(expandZohoCriteria(n?.zohoCriteria ?? '', now)), false)
+  check(`sandbox: ${key} names a template`, n?.whatsappTemplateName, key)
+  check(`sandbox: ${key} sends no body params`, JSON.stringify(JSON.parse(n?.whatsappParams ?? '{}')), JSON.stringify({ body: [] }))
+  check(`sandbox: ${key} sends no button params (its template has no button)`, JSON.parse(n?.whatsappParams ?? '{}').button, undefined)
+  check(`sandbox: ${key} is once per lead`, `${n?.maxEmailsPerLead}/${n?.followUpDays}`, '1/0')
+  check(`sandbox: ${key} carries its template copy for later creation`, (n?.bodyTemplate ?? '').length > 40, true)
+}
+
+// Criteria ↔ filter agreement, one assertion per nudge. This is the pair that must not drift.
+const sandboxFilters = (key) => JSON.parse(DEFAULT_NUDGES.find((n) => n.key === key)?.filters ?? '{}')
+const sandboxCriteria = (key) => DEFAULT_NUDGES.find((n) => n.key === key)?.zohoCriteria ?? ''
+check('sandbox: old-website-lead criteria checks Eko_Code is null', /\(Eko_Code:equals:null\)/.test(sandboxCriteria('sandbox_old_website_lead')), true)
+check('sandbox: old-website-lead filter requires no Eko Code', sandboxFilters('sandbox_old_website_lead').ekoCodePresent, false)
+check('sandbox: old-website-lead criteria is bounded to 2 months', /Created_Time:greater_than:\{\{monthsAgo:2\}\}/.test(sandboxCriteria('sandbox_old_website_lead')), true)
+check('sandbox: old-website-lead filter bounds creation locally too', sandboxFilters('sandbox_old_website_lead').createdWithinDays, 60)
+check('sandbox: sign-agreement criteria requires an Eko Code', /\(Eko_Code:not_equal:null\)/.test(sandboxCriteria('sandbox_sign_agreement_pending')), true)
+check('sandbox: sign-agreement criteria checks Sign_Agreement false', /\(Sign_Agreement:equals:false\)/.test(sandboxCriteria('sandbox_sign_agreement_pending')), true)
+check('sandbox: sign-agreement filter needs an Eko Code', sandboxFilters('sandbox_sign_agreement_pending').ekoCodePresent, true)
+check('sandbox: sign-agreement filter matches ONLY explicit false', sandboxFilters('sandbox_sign_agreement_pending').signAgreement, false)
+check('sandbox: email-missing criteria checks Email is null', /\(Email:equals:null\)/.test(sandboxCriteria('sandbox_email_missing')), true)
+check('sandbox: email-missing filter is explicit', sandboxFilters('sandbox_email_missing').emailMissing, true)
+check('sandbox: docs-accepted criteria uses the exact picklist value', /\(KYC_Documents_Upload:equals:Accepted\)/.test(sandboxCriteria('sandbox_documents_accepted')), true)
+check('sandbox: docs-accepted filter matches that value', JSON.stringify(sandboxFilters('sandbox_documents_accepted').kycUploadStatus), JSON.stringify(['Accepted']))
+check('sandbox: under-review criteria uses the exact picklist value', /\(KYC_Documents_Upload:equals:All Done\)/.test(sandboxCriteria('sandbox_documents_under_review')), true)
+check('sandbox: under-review filter matches that value', JSON.stringify(sandboxFilters('sandbox_documents_under_review').kycUploadStatus), JSON.stringify(['All Done']))
+check('sandbox: only the time-bounded criterion carries a placeholder', SANDBOX_KEYS.filter((k) => hasUnexpandedPlaceholder(sandboxCriteria(k))).join(','), 'sandbox_old_website_lead')
+check('sandbox: closed-won criteria uses the real status string', /\(Lead_Status:equals:Closed Won\)/.test(sandboxCriteria('sandbox_closed_won_live_credentials')), true)
+check('sandbox: closed-won filter matches the same status', JSON.stringify(sandboxFilters('sandbox_closed_won_live_credentials').includeStatuses), JSON.stringify([LEAD_STATUS.CLOSED_WON]))
+
+// The real Zoho picklist values, so a typo in the criteria is caught here rather than in production.
+check('sandbox: the KYC picklist values are the real ones', JSON.stringify(KYC_UPLOAD_STATUS_VALUES), JSON.stringify(['-None-', 'Partial Done', 'All Done', 'Re-upload Requested', 'Accepted']))
 
 // --- Zoho MCP tool selection and argument building ---------------------------
 // The real tool list from the live server. The bug this guards against: every tool name

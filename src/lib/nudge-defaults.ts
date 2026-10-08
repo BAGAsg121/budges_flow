@@ -15,6 +15,7 @@
  */
 
 import { CTA_TEMPLATE_SUFFIX, baseTemplateName, ctaTrackBaseUrl, isTrackedTemplate } from './cta.ts'
+import { SANDBOX_WHATSAPP_CATEGORY } from './nudge-kind.ts'
 
 /** CRM status values, exactly as Zoho stores them. */export const LEAD_STATUS = {
   ONBOARDING_STARTED: 'Onboarding Started',
@@ -24,6 +25,8 @@ import { CTA_TEMPLATE_SUFFIX, baseTemplateName, ctaTrackBaseUrl, isTrackedTempla
   QUALIFIED: 'Qualified',
   NEW: 'New',
   UNQUALIFIED_JUNK: 'Unqualified (Junk)',
+  /** The converted stage. Used by the Closed Won nudge and by totalDaysToConvert. */
+  CLOSED_WON: 'Closed Won',
 } as const
 
 /** The business vertical every nudge in this app targets. */
@@ -113,6 +116,37 @@ export const KYC_COMPLETE_AT = 11
  * nudge targets ONLY this status, so it can never message a real lead by accident.
  */
 export const WHATSAPP_TEST_STATUS = 'WhatsApp Test'
+
+/**
+ * Expand the relative placeholders a stored criteria may contain.
+ *
+ * A nudge's criteria is a STRING in the database, so it cannot express "the last two months" — a
+ * literal ISO date would age, and "not older than two months" would quietly become "not older than
+ * two months from whenever someone configured it". The stored criteria therefore carries
+ * `{{monthsAgo:N}}` and this turns it into a real Zoho datetime at sync time.
+ *
+ * Deliberately a single, explicit substitution rather than a template language: it is greppable in
+ * the database, obvious in a criteria string, and testable.
+ *
+ * The result uses the CRM's own +05:30 offset, because Zoho compares the criteria literally and
+ * rejects a `…Z` suffix on a datetime.
+ */
+export function expandZohoCriteria(criteria: string, now: Date = new Date()): string {
+  return criteria.replace(/\{\{monthsAgo:(\d+)\}\}/g, (_match, n: string) => {
+    const months = Number(n)
+    const d = new Date(now.getTime())
+    d.setMonth(d.getMonth() - months)
+    return zohoIstIso(d)
+  })
+}
+
+/**
+ * True when a criteria still has an unexpanded placeholder — used by the readiness check, because a
+ * criteria that was never expanded would be sent to Zoho verbatim and match nothing.
+ */
+export function hasUnexpandedPlaceholder(criteria: string): boolean {
+  return /\{\{[a-zA-Z]+:\d+\}\}/.test(criteria)
+}
 
 export const ZOHO_CRITERIA = zohoCriteriaSince(ZOHO_LEADS_CREATED_AFTER)
 
@@ -472,6 +506,146 @@ export const ZOHO_FLOW_TEMPLATES: Record<string, WaSheetFlowTemplate> = {
 }
 
 // ---------------------------------------------------------------------------
+// Sandbox WhatsApp nudges (V2 category)
+//
+// A labelled group of CRM-driven WhatsApp nudges, tagged `category: "sandbox_whatsapp"` in their
+// filters so the UI can badge and filter them without a schema change. They read the CRM through the
+// MCP server like any other Zoho nudge: Run (or the scheduler) syncs the criteria, then the LOCAL
+// filters decide who is messaged — and both have to express the same condition, or the nudge falls
+// back to every synced lead.
+//
+// TEMPLATES ARE DELIBERATELY NOT CREATED YET. Each nudge names the template it WILL use and carries
+// its copy as `bodyTemplate` (so `wa:templates --create-missing` can submit it later, with no button
+// since none of these has a CTA). They ship DISABLED: enabling one today would fail every send with
+// 132001 because the template does not exist on the WABA yet. `npm run readiness` says so explicitly.
+//
+// Criteria note: `{{monthsAgo:N}}` is expanded at sync time (see expandZohoCriteria) because a stored
+// criteria is a string and a literal date would age.
+// ---------------------------------------------------------------------------
+
+/**
+ * The real values of Zoho's KYC_Documents_Upload picklist, read from the CRM's field metadata.
+ *
+ * Kept here so a criteria written against a value that does not exist is caught by a test rather
+ * than by a nudge that silently matches nobody. Zoho accepts an unknown picklist value in a search
+ * without complaining — it just returns zero rows.
+ */
+export const KYC_UPLOAD_STATUS_VALUES = [
+  '-None-',
+  'Partial Done',
+  'All Done',
+  'Re-upload Requested',
+  'Accepted',
+] as const
+
+export interface SandboxNudgeSpec {  key: string
+  /** Shown after "WhatsApp · Sandbox ·". */
+  title: string
+  description: string
+  /** Zoho search criteria. May contain {{monthsAgo:N}}. */
+  criteria: string
+  /** Local filter clauses that mirror the criteria — without these the nudge reaches every lead. */
+  filters: Record<string, unknown>
+  templateName: string
+  body: string
+  /** Verified against the live CRM when this was written, for the operator's benefit. */
+  liveMatchEstimate: number
+}
+
+export const SANDBOX_WHATSAPP_NUDGES: Record<string, SandboxNudgeSpec> = {
+  sandbox_old_website_lead: {
+    key: 'sandbox_old_website_lead',
+    title: 'Old website lead — signup not completed',
+    description:
+      'EPS leads who started a partner signup but never received an Eko Code, created within the last two months. ' +
+      'Useful for chasing abandoned website applications while they are still warm.',
+    criteria: `((Business_vertical:equals:${EPS_BUSINESS_VERTICAL})and(Eko_Code:equals:null)and(Created_Time:greater_than:{{monthsAgo:2}}))`,
+    filters: { ekoCodePresent: false, createdWithinDays: 60 },
+    templateName: 'sandbox_old_website_lead',
+    body:
+      'Hi 👋 We noticed you started your Eko partner signup but it looks like it was not completed.\n\n' +
+      'Your application is still pending on our side. Please continue from where you left off so we can ' +
+      'get your account activated.',
+    liveMatchEstimate: 573,
+  },
+  sandbox_sign_agreement_pending: {
+    key: 'sandbox_sign_agreement_pending',
+    title: 'Eko Code issued — agreement signature pending',
+    description:
+      'EPS leads who already have an Eko Code but whose Sign Agreement checkbox is still unticked. ' +
+      'The account cannot be activated until the agreement is signed.',
+    criteria: `((Business_vertical:equals:${EPS_BUSINESS_VERTICAL})and(Eko_Code:not_equal:null)and(Sign_Agreement:equals:false))`,
+    // signAgreement: false matches ONLY an explicit false — a lead whose field we were never told
+    // about is not "unsigned", and must not be nudged as though it were.
+    filters: { ekoCodePresent: true, signAgreement: false },
+    templateName: 'sandbox_sign_agreement_pending',
+    body:
+      'Hi 👋 Your Eko Code has been issued and your account is almost ready.\n\n' +
+      'The only step pending is signing your Eko partner agreement. Please complete the e-signature so ' +
+      'we can activate your account.',
+    liveMatchEstimate: 2782,
+  },
+  sandbox_email_missing: {
+    key: 'sandbox_email_missing',
+    title: 'Email address missing on the application',
+    description:
+      'EPS leads with no email address on record. They cannot receive onboarding updates or production ' +
+      'credentials until one is captured, so the WhatsApp nudge asks for it.',
+    criteria: `((Business_vertical:equals:${EPS_BUSINESS_VERTICAL})and(Email:equals:null))`,
+    filters: { emailMissing: true },
+    templateName: 'sandbox_email_missing',
+    body:
+      'Hi 👋 We do not have an email address on record for your Eko partner application.\n\n' +
+      'Please share a valid email ID with us — your onboarding updates and production credentials are ' +
+      'sent there.',
+    liveMatchEstimate: 3906,
+  },
+  sandbox_documents_accepted: {
+    key: 'sandbox_documents_accepted',
+    title: 'Documents approved — e-sign next',
+    description:
+      'EPS leads whose KYC Documents Upload Status is "Accepted", i.e. every document has been checked ' +
+      'and approved. The remaining step is e-signing the document.',
+    criteria: `((Business_vertical:equals:${EPS_BUSINESS_VERTICAL})and(KYC_Documents_Upload:equals:Accepted))`,
+    // Zoho's picklist value verbatim — a space or a different case matches nothing.
+    filters: { kycUploadStatus: ['Accepted'] },
+    templateName: 'sandbox_documents_accepted',
+    body:
+      'Hi 👋 Good news — all the documents you submitted have been verified and accepted.\n\n' +
+      'The last step is to e-sign your document to complete your onboarding.',
+    liveMatchEstimate: 121,
+  },
+  sandbox_documents_under_review: {
+    key: 'sandbox_documents_under_review',
+    title: 'Documents submitted — under review',
+    description:
+      'EPS leads whose KYC Documents Upload Status is "All Done": everything has been submitted and is ' +
+      'waiting on our verification.',
+    criteria: `((Business_vertical:equals:${EPS_BUSINESS_VERTICAL})and(KYC_Documents_Upload:equals:All Done))`,
+    filters: { kycUploadStatus: ['All Done'] },
+    templateName: 'sandbox_documents_under_review',
+    body:
+      'Hi 👋 We have received all the documents you submitted and they are currently under review.\n\n' +
+      'We will update you as soon as the verification is complete.',
+    liveMatchEstimate: 8,
+  },
+  sandbox_closed_won_live_credentials: {
+    key: 'sandbox_closed_won_live_credentials',
+    title: 'Closed Won — live credentials coming',
+    description:
+      'EPS leads whose status has just reached Closed Won. Tells them their live production credentials ' +
+      'are on the way, which is the question they ask next.',
+    criteria: `((Business_vertical:equals:${EPS_BUSINESS_VERTICAL})and(Lead_Status:equals:${LEAD_STATUS.CLOSED_WON}))`,
+    filters: { includeStatuses: [LEAD_STATUS.CLOSED_WON] },
+    templateName: 'sandbox_closed_won_live_credentials',
+    body:
+      'Hi 👋 Congratulations — your Eko partner account is now live!\n\n' +
+      'Your live production credentials will be shared with you within 30 minutes.',
+    liveMatchEstimate: 288,
+  },
+}
+
+// ---------------------------------------------------------------------------
 // Email templates
 // ---------------------------------------------------------------------------
 
@@ -788,6 +962,43 @@ export const DEFAULT_NUDGES: NudgeSeed[] = [
     whatsappParams: json(t.buttonText && t.buttonUrl ? { body: [], button: ['mobile_digits'] } : { body: [] }),
     // Once per lead: it is a one-off status notification, not a reminder sequence. Re-sending it
     // would tell someone "we are reviewing your documents" again for no reason.
+    maxEmailsPerLead: 1,
+    followUpDays: 0,
+  })),
+
+  // -------------------------------------------------------------------------
+  // Sandbox WhatsApp nudges — see SANDBOX_WHATSAPP_NUDGES above.
+  // -------------------------------------------------------------------------
+  ...Object.values(SANDBOX_WHATSAPP_NUDGES).map((s): NudgeSeed => ({
+    key: s.key,
+    name: `WhatsApp · Sandbox · ${s.title}`,
+    description:
+      `${s.description} ` +
+      `CRM-driven WhatsApp nudge, read through the Zoho MCP server. Criteria: ${s.criteria} — the local ` +
+      `filters mirror it, because Zoho decides what is FETCHED and the filters decide who is MESSAGED. ` +
+      `Template "${s.templateName}" has NOT been created on the WABA yet: create and approve it ` +
+      `(Templates tab, or npm run wa:templates -- --create-missing) before enabling this nudge, or every ` +
+      `send fails with 132001. When this was written the criteria matched roughly ` +
+      `${s.liveMatchEstimate} lead(s) in the live CRM.`,
+    enabled: false,
+    channel: 'whatsapp',
+    zohoCriteria: s.criteria,
+    filters: json({
+      category: SANDBOX_WHATSAPP_CATEGORY,
+      // WhatsApp cannot deliver without a phone, so every one of these requires one regardless of
+      // whichever criterion picked the lead.
+      requirePhone: true,
+      businessVertical: EPS_BUSINESS_VERTICAL,
+      ...s.filters,
+    }),
+    bodyTemplate: s.body,
+    whatsappTemplateName: s.templateName,
+    whatsappLanguage: WHATSAPP_TEMPLATE_LANGUAGE_DEFAULT,
+    // None of these templates declares a button, so no button parameter is ever sent — sending one
+    // to a template without a button is a parameter-count mismatch, which Meta rejects.
+    whatsappParams: json({ body: [] }),
+    // Once per lead: these are stage notifications, not reminders. Repeating one would tell the same
+    // person the same thing twice.
     maxEmailsPerLead: 1,
     followUpDays: 0,
   })),

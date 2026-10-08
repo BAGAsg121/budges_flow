@@ -20,7 +20,9 @@ import {
 } from '@/components/ui/alert-dialog'
 import { useToast } from '@/hooks/use-toast'
 import type { NudgeChannel, NudgeDto, PreviewDto, RunSummaryDto } from '@/lib/app-types'
-import { capAppliesTo, nudgeSourceOf, SHEET_DEDUP_RULE } from '@/lib/nudge-kind'
+import { capAppliesTo, nudgeSourceOf, nudgeCategoryOf, NUDGE_CATEGORY_LABEL, SHEET_DEDUP_RULE } from '@/lib/nudge-kind'
+import { cn } from '@/lib/utils'
+import { FlaskConical } from 'lucide-react'
 
 const TEMPLATE_VARS =
   '{{first_name}}, {{full_name}}, {{email}}, {{company}}, {{lead_status}}, {{kyc_document_upload_count}}, {{owner_name}}, {{city}}, {{message_number}}, {{today}}'
@@ -153,6 +155,9 @@ export function NudgesTab({
     failedEntries: { email: string; error: string }[];
     skippedEntries: { lead: string; email: string | null; reason: string; detail?: string }[];
   } | null>(null)
+
+  /** V2: which category of nudge to show. Rides in filters.category, no schema change. */
+  const [categoryFilter, setCategoryFilter] = useState<'all' | 'sandbox_whatsapp' | 'standard'>('all')
 
   const load = useCallback(async () => {
     try {
@@ -391,6 +396,35 @@ export function NudgesTab({
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
+          {/* Category filter. The sandbox group is a distinct set of flows — CRM-driven WhatsApp
+              stage notifications whose templates are not created yet — so being able to see them
+              alone matters more than a tidy single list. */}
+          <div className="flex rounded-lg border border-border p-0.5">
+            {([
+              ['all', 'All'],
+              ['sandbox_whatsapp', 'Sandbox WhatsApp'],
+              ['standard', 'Standard'],
+            ] as const).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => setCategoryFilter(value)}
+                className={cn(
+                  'rounded-md px-2.5 py-1 text-xs font-medium transition-colors',
+                  categoryFilter === value
+                    ? 'bg-primary text-primary-foreground'
+                    : 'text-muted-foreground hover:text-foreground'
+                )}
+              >
+                {label}
+                <span className="ml-1 tabular-nums opacity-70">
+                  {value === 'all'
+                    ? nudges.length
+                    : nudges.filter((n) => nudgeCategoryOf(n) === value).length}
+                </span>
+              </button>
+            ))}
+          </div>
           {activeCount > 0 ? (
             <Button variant="outline" size="sm" onClick={() => setAllEnabled(false)} disabled={bulkBusy}>
               {bulkBusy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Pause className="h-4 w-4 mr-1" />}
@@ -414,8 +448,11 @@ export function NudgesTab({
         <Card><CardContent className="p-8 text-center text-sm text-muted-foreground">No nudges yet — create one.</CardContent></Card>
       ) : (
         <div className="grid gap-4 lg:grid-cols-2">
-          {nudges.map((n) => {
+          {nudges
+            .filter((n) => categoryFilter === 'all' || nudgeCategoryOf(n) === categoryFilter)
+            .map((n) => {
             const source = nudgeSourceOf(n)
+            const category = nudgeCategoryOf(n)
             return (
             <Card key={n.id}>
               <CardContent className="p-4 sm:p-6 space-y-4">
@@ -424,6 +461,11 @@ export function NudgesTab({
                     <div className="flex items-center gap-2 flex-wrap">
                       <h4 className="font-medium truncate">{n.name}</h4>
                       <ChannelBadge channel={n.channel} />
+                      {category === 'sandbox_whatsapp' && (
+                        <Badge className="gap-1 bg-warning text-warning-foreground hover:bg-warning">
+                          <FlaskConical className="h-3 w-3" /> {NUDGE_CATEGORY_LABEL.sandbox_whatsapp}
+                        </Badge>
+                      )}
                       {source === 'mysql' && (
                         <Badge variant="outline" className="gap-1">
                           <Database className="h-3 w-3" /> MySQL / DB
