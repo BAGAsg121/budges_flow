@@ -1230,3 +1230,27 @@ Stage Summary:
 - 252 real WhatsApp messages went out across the six, all accepted by Meta; the only failures were 7 unreachable numbers.
 
 ---
+
+Task ID: 48
+Agent: Main agent (DeepSeek Harness)
+Task: Add a sandbox nudge for leads whose name is still the placeholder, and create its template with the console CTA.
+
+Work Log:
+- VERIFIED THE OPERATOR'S PHRASING AGAINST THE CRM, which changed the implementation twice.
+  * Zoho has NO `contains` operator in a criteria string — `Full_Name:contains:FIRST NAME` is rejected with `INVALID_QUERY, invalid operator found, api_name Full_Name, operator contains`. So "name contains FIRST NAME Last Name" had to become an exact `equals`, and the local filter had to match exactly rather than approximating with a substring: `First_Name:starts_with` reaches **366** leads in 2 months where `Full_Name:equals` reaches **260**, and the two sets only partially overlap.
+  * The operator clarified: 2 months (not 3), and the FIELD VALUE is `First Name Last Name` — so `Full_Name:equals:FIRST NAME LAST NAME`, and `Full_Name` is the field holding it (`Last_Name` holds only `LAST NAME`).
+- **THE COHORT HAS NO `Mobile` AT ALL — every one of the 260 has a `Phone`.** Confirmed by counting: `Mobile:not_equal:null` → 0, `Phone:not_equal:null` → 260. The send path already falls back `mobile || phone`, so these deliver — but a nudge written against `Mobile` alone would have matched 260 leads and messaged nobody, and nothing in the logs would have said why. Worth knowing for every future nudge built on this data.
+- DESIGNED THE TEMPLATE WITH NO BODY VARIABLE, deliberately. Every other sandbox template opens "Hi {{1}}", which for this cohort renders as **"Hi FIRST NAME"** — the placeholder IS the name, so personalising it produces a message that looks broken. It greets nobody by name and the copy simply asks them to finish onboarding.
+- CREATED THE TEMPLATE ON META, as asked: `sandbox_complete_your_onboarding`, UTILITY, 0 body variables, URL button **"Complete Onboarding" → `https://eps.eko.in/console?mobile={{1}}`**. Status PENDING, so the nudge stays disabled — enabling it now would fail every send with 132001.
+- THE CREATION PATH NEEDED A REAL FIX, caught by a new assertion rather than by another failed send. `templateSpecFor()` in the template script knew only the MySQL, sheet and Zoho registries, so a sandbox template would have been submitted with NO button while its nudge sends a button parameter — the exact 132000 mismatch that broke the previous six. It now reads `SANDBOX_WHATSAPP_NUDGES`, and every sandbox spec carries `buttonText` + `buttonUrl` (added for all seven, read off the WABA for the six that already existed) so a rebuild cannot produce a button-less template.
+- Added a `fullNameEquals` local filter, exact by design, because the local filter must say the same thing the criterion says — the whole reason the previous six needed the same treatment.
+- VERIFIED THE FLOW without sending: criteria expanded (`{{monthsAgo:2}}` → `2026-08-08T17:16:17+05:30`), MCP synced 262 leads, and **preview returned 260 would send of 260 considered** — exactly Zoho's cohort, with the `Phone` fallback carrying the number. Not run: the template is PENDING, so a run today fails every send.
+  * Noted while measuring: that sync took 93 seconds for 262 leads (~350ms each) because every lead costs a read, an upsert and a journey check. The chunked syncs of 3–4k leads are correspondingly slow, which is why the large nudges were run from local data.
+- 20 new assertions, including that no sandbox criterion uses an unsupported operator, that the criteria and its local filter agree, and that every sandbox spec with a button declares the label and URL needed to create it. verify now 1045. tsc clean, eslint clean.
+
+Stage Summary:
+- `sandbox_placeholder_name_onboarding` exists, tagged and grouped with the other sandbox nudges, matching 260 leads and correctly disabled.
+- Its template `sandbox_complete_your_onboarding` is on the WABA as PENDING with the console CTA; enable the nudge once Meta approves it.
+- The placeholder cohort is contactable only via `Phone`, which the pipeline already handles.
+
+---

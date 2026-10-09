@@ -91,6 +91,14 @@ export interface NudgeFilters {
   /** KYC_Documents_Upload must be one of these, e.g. ['Accepted'] or ['All Done']. */
   kycUploadStatus?: string[]
   /**
+   * The lead's full name must be EXACTLY this.
+   *
+   * Zoho has no `contains` operator (it rejects the criteria with `INVALID_QUERY, invalid operator
+   * found`), so a "name is still the placeholder" nudge has to use `equals` on `Full_Name`, and the
+   * local filter must match that exactly rather than approximating it with a substring.
+   */
+  fullNameEquals?: string
+  /**
    * Only leads created within the last N days. Dynamic on purpose: a stored ISO date would age, so
    * "not older than two months" would quietly become "not older than two months from whenever this
    * was configured".
@@ -192,6 +200,9 @@ function buildWhere(filters: NudgeFilters, channel: Channel) {
   if (filters.kycUploadStatus?.length) {
     where.kycDocumentsUploadStatus = { in: filters.kycUploadStatus }
   }
+  // Exact match, mirroring Zoho's `equals`. A substring match here would nudge leads whose name
+  // merely CONTAINS the placeholder ("FIRST NAME SANJAY"), which is a different cohort.
+  if (filters.fullNameEquals) where.fullName = filters.fullNameEquals
   if (typeof filters.createdWithinDays === 'number' && filters.createdWithinDays > 0) {
     const since = new Date(Date.now() - filters.createdWithinDays * 24 * 60 * 60 * 1000)
     where.createdTime = { gte: since }

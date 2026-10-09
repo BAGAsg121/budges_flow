@@ -564,6 +564,13 @@ export interface SandboxNudgeSpec {
   bodyVars: string[]
   /** True when the template's URL button carries its own `{{1}}`. All of these do. */
   hasButton: boolean
+  /**
+   * The button's label and URL, so `wa:templates --create-missing` can submit the template WITH its
+   * CTA. Without this the creation path falls back to "no button", and the nudge would then send a
+   * button parameter to a template that has none — a parameter-count mismatch.
+   */
+  buttonText?: string
+  buttonUrl?: string
   body: string
   /** Verified against the live CRM when this was written, for the operator's benefit. */
   liveMatchEstimate: number
@@ -582,6 +589,8 @@ export const SANDBOX_WHATSAPP_NUDGES: Record<string, SandboxNudgeSpec> = {
     // "Hi {{1}} 👋 …" → the lead's name.
     bodyVars: ['first_name'],
     hasButton: true,
+    buttonText: 'Click Now',
+    buttonUrl: `${CONSOLE_URL}?mobile={{1}}`,
     body:
       'Hi 👋 We noticed you started your Eko partner signup but it looks like it was not completed.\n\n' +
       'Your application is still pending on our side. Please continue from where you left off so we can ' +
@@ -604,6 +613,8 @@ export const SANDBOX_WHATSAPP_NUDGES: Record<string, SandboxNudgeSpec> = {
     // and tell the customer their Eko Code is a dash.
     bodyVars: ['first_name', 'eko_code'],
     hasButton: true,
+    buttonText: 'Click Now',
+    buttonUrl: `${CONSOLE_URL}?mobile={{1}}`,
     body:
       'Hi 👋 Your Eko Code has been issued and your account is almost ready.\n\n' +
       'The only step pending is signing your Eko partner agreement. Please complete the e-signature so ' +
@@ -621,6 +632,8 @@ export const SANDBOX_WHATSAPP_NUDGES: Record<string, SandboxNudgeSpec> = {
     templateName: 'email_missing',
     bodyVars: ['first_name'],
     hasButton: true,
+    buttonText: 'Proceed Now',
+    buttonUrl: `${CONSOLE_URL}?mobile={{1}}`,
     body:
       'Hi 👋 We do not have an email address on record for your Eko partner application.\n\n' +
       'Please share a valid email ID with us — your onboarding updates and production credentials are ' +
@@ -639,6 +652,8 @@ export const SANDBOX_WHATSAPP_NUDGES: Record<string, SandboxNudgeSpec> = {
     templateName: 'once_all_documents_are_completed_and_approved___esign_your_document_',
     bodyVars: ['first_name'],
     hasButton: true,
+    buttonText: 'Proceed to E-Sign',
+    buttonUrl: `${CONSOLE_URL}?mobile={{1}}`,
     body:
       'Hi 👋 Good news — all the documents you submitted have been verified and accepted.\n\n' +
       'The last step is to e-sign your document to complete your onboarding.',
@@ -655,10 +670,43 @@ export const SANDBOX_WHATSAPP_NUDGES: Record<string, SandboxNudgeSpec> = {
     templateName: 'once_all_docs_are_submitted_but_not_approved___under_review',
     bodyVars: ['first_name'],
     hasButton: true,
+    buttonText: 'Check Status',
+    buttonUrl: `${CONSOLE_URL}?mobile={{1}}`,
     body:
       'Hi 👋 We have received all the documents you submitted and they are currently under review.\n\n' +
       'We will update you as soon as the verification is complete.',
     liveMatchEstimate: 8,
+  },
+  sandbox_placeholder_name_onboarding: {
+    key: 'sandbox_placeholder_name_onboarding',
+    title: 'Placeholder name — onboarding not completed',
+    description:
+      'EPS leads created in the last two months whose name field is still the literal placeholder ' +
+      '"FIRST NAME LAST NAME" — i.e. the signup was abandoned before the name was ever filled in. ' +
+      'Asks them to complete onboarding.',
+    criteria: `((Business_vertical:equals:${EPS_BUSINESS_VERTICAL})and(Full_Name:equals:FIRST NAME LAST NAME)and(Created_Time:greater_than:{{monthsAgo:2}}))`,
+    // Zoho decides what is FETCHED; these decide who is MESSAGED, and they must say the same thing.
+    // `fullNameEquals`, not a substring: "FIRST NAME SANJAY" is a different cohort, and matching on
+    // a substring here would reach 366 leads instead of 260.
+    filters: { fullNameEquals: 'FIRST NAME LAST NAME', createdWithinDays: 60 },
+    templateName: 'sandbox_complete_your_onboarding',
+    /**
+     * NO body variables, deliberately.
+     *
+     * Every other template here opens with "Hi {{1}}", which would render as "Hi FIRST NAME" for
+     * exactly this cohort — the placeholder IS the name. A message that greets someone by their
+     * unfilled placeholder looks broken, so this one greets nobody by name.
+     */
+    bodyVars: [],
+    hasButton: true,
+    buttonText: 'Complete Onboarding',
+    buttonUrl: `${CONSOLE_URL}?mobile={{1}}`,
+    body:
+      'Hi 👋 Your Eko partner onboarding is not complete yet.\n\n' +
+      'Your application was started but the remaining details are still pending, so your account ' +
+      'cannot be activated. Please pick up where you left off in the EPS console — it only takes a ' +
+      'few minutes.',
+    liveMatchEstimate: 260,
   },
   sandbox_closed_won_live_credentials: {
     key: 'sandbox_closed_won_live_credentials',
@@ -673,6 +721,8 @@ export const SANDBOX_WHATSAPP_NUDGES: Record<string, SandboxNudgeSpec> = {
     templateName: 'lead_status____closed_won__tell_the_cus_they_will_recieve_live_credntials_in_under_30_minutes',
     bodyVars: ['first_name'],
     hasButton: true,
+    buttonText: 'Check Your Status',
+    buttonUrl: `${CONSOLE_URL}?mobile={{1}}`,
     body:
       'Hi 👋 Congratulations — your Eko partner account is now live!\n\n' +
       'Your live production credentials will be shared with you within 30 minutes.',

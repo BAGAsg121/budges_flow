@@ -234,7 +234,7 @@ check('whatsapp_sample targets exactly one status', filtersOf('whatsapp_sample')
 checkTrue('whatsapp_sample asks for a phone', filtersOf('whatsapp_sample').requirePhone === true)
 check('whatsapp_sample is capped at 1 message/lead', wa.maxEmailsPerLead, 1)
 checkTrue('whatsapp_sample body renders first_name', renderTemplate(wa.bodyTemplate, { first_name: 'Asha' }).includes('Hi Asha'))
-check('whatsapp nudges: sample + legacy doc twin + 6 MySQL + 3 sheet + 1 CRM status + 6 sandbox', DEFAULT_NUDGES.filter((n) => n.channel === 'whatsapp').length, 18)
+check('whatsapp nudges: sample + legacy doc twin + 6 MySQL + 3 sheet + 1 CRM status + 7 sandbox', DEFAULT_NUDGES.filter((n) => n.channel === 'whatsapp').length, 19)
 const waDocs = byKey['documents_pending_wa']
 check('documents_pending_wa template language is en_US (not en)', waDocs.whatsappLanguage, 'en_US')
 check('documents_pending_wa supplies 3 params for its 3 variables', JSON.parse(waDocs.whatsappParams).length, countTemplateVars(waDocs.bodyTemplate))
@@ -1029,8 +1029,9 @@ const SANDBOX_KEYS = [
   'sandbox_documents_accepted',
   'sandbox_documents_under_review',
   'sandbox_closed_won_live_credentials',
+  'sandbox_placeholder_name_onboarding',
 ]
-check('sandbox: six nudges are defined', Object.keys(SANDBOX_WHATSAPP_NUDGES).length, 6)
+check('sandbox: seven nudges are defined', Object.keys(SANDBOX_WHATSAPP_NUDGES).length, 7)
 for (const key of SANDBOX_KEYS) {
   const n = DEFAULT_NUDGES.find((x) => x.key === key)
   const f = JSON.parse(n?.filters ?? '{}')
@@ -1076,12 +1077,44 @@ check('sandbox: docs-accepted criteria uses the exact picklist value', /\(KYC_Do
 check('sandbox: docs-accepted filter matches that value', JSON.stringify(sandboxFilters('sandbox_documents_accepted').kycUploadStatus), JSON.stringify(['Accepted']))
 check('sandbox: under-review criteria uses the exact picklist value', /\(KYC_Documents_Upload:equals:All Done\)/.test(sandboxCriteria('sandbox_documents_under_review')), true)
 check('sandbox: under-review filter matches that value', JSON.stringify(sandboxFilters('sandbox_documents_under_review').kycUploadStatus), JSON.stringify(['All Done']))
-check('sandbox: only the time-bounded criterion carries a placeholder', SANDBOX_KEYS.filter((k) => hasUnexpandedPlaceholder(sandboxCriteria(k))).join(','), 'sandbox_old_website_lead')
+check('sandbox: only the time-bounded criteria carry a placeholder', SANDBOX_KEYS.filter((k) => hasUnexpandedPlaceholder(sandboxCriteria(k))).sort().join(','), 'sandbox_old_website_lead,sandbox_placeholder_name_onboarding')
 check('sandbox: closed-won criteria uses the real status string', /\(Lead_Status:equals:Closed Won\)/.test(sandboxCriteria('sandbox_closed_won_live_credentials')), true)
 check('sandbox: closed-won filter matches the same status', JSON.stringify(sandboxFilters('sandbox_closed_won_live_credentials').includeStatuses), JSON.stringify([LEAD_STATUS.CLOSED_WON]))
 
 // The real Zoho picklist values, so a typo in the criteria is caught here rather than in production.
 check('sandbox: the KYC picklist values are the real ones', JSON.stringify(KYC_UPLOAD_STATUS_VALUES), JSON.stringify(['-None-', 'Partial Done', 'All Done', 'Re-upload Requested', 'Accepted']))
+
+// --- the placeholder-name nudge -----------------------------------------------
+// Zoho rejects `contains` outright (INVALID_QUERY, invalid operator found), so "the name is still the
+// placeholder" has to be an exact equals on Full_Name — and the local filter must say the same thing,
+// or the nudge reaches leads whose name merely STARTS with the placeholder (366 leads, not 260).
+const phNudge = DEFAULT_NUDGES.find((n) => n.key === 'sandbox_placeholder_name_onboarding')
+const phFilters = JSON.parse(phNudge?.filters ?? '{}')
+const phCriteria = phNudge?.zohoCriteria ?? ''
+check('placeholder: the nudge exists', Boolean(phNudge), true)
+check('placeholder: it is tagged sandbox_whatsapp', phFilters.category, 'sandbox_whatsapp')
+check('placeholder: it ships disabled (its template is pending)', phNudge?.enabled, false)
+check('placeholder: the criteria uses equals, not contains', /\(Full_Name:equals:FIRST NAME LAST NAME\)/.test(phCriteria), true)
+check('placeholder: the criteria never uses an unsupported operator', /:contains:|:not_contains:/.test(phCriteria), false)
+check('placeholder: the criteria is bounded to 2 months', /Created_Time:greater_than:\{\{monthsAgo:2\}\}/.test(phCriteria), true)
+check('placeholder: the local filter matches the criteria value exactly', phFilters.fullNameEquals, 'FIRST NAME LAST NAME')
+check('placeholder: the local window matches the criteria window', phFilters.createdWithinDays, 60)
+check('placeholder: it requires a phone', phFilters.requirePhone, true)
+check('placeholder: it is scoped to EPS', phFilters.businessVertical, EPS_BUSINESS_VERTICAL)
+// NO body variable, deliberately: these leads' name IS the placeholder, so "Hi {{1}}" would read
+// "Hi FIRST NAME" — a message that greets someone by their unfilled placeholder.
+check('placeholder: the template greets nobody by name', JSON.stringify(JSON.parse(phNudge?.whatsappParams ?? '{}').body), JSON.stringify([]))
+check('placeholder: it still sends the button parameter', JSON.stringify(JSON.parse(phNudge?.whatsappParams ?? '{}').button), JSON.stringify(['mobile_digits']))
+check('placeholder: the copy asks them to complete onboarding', /onboarding/i.test(phNudge?.bodyTemplate ?? ''), true)
+
+// The button metadata is what lets the template be CREATED with its CTA. Without it the creation path
+// submits a button-less template while the nudge sends a button parameter — 132000 on every send.
+for (const spec of Object.values(SANDBOX_WHATSAPP_NUDGES)) {
+  if (!spec.hasButton) continue
+  check(`sandbox: ${spec.key} declares a button label for creation`, Boolean(spec.buttonText), true)
+  check(`sandbox: ${spec.key} declares the console button URL`, /\?mobile=\{\{1\}\}$/.test(spec.buttonUrl ?? ''), true)
+  check(`sandbox: ${spec.key} button goes to the EPS console`, (spec.buttonUrl ?? '').startsWith(CONSOLE_URL), true)
+}
 
 // --- attribution confidence ---------------------------------------------------
 // "Which nudge was last sent" is a weak claim on its own. This score DESCRIBES how weak, so the UI

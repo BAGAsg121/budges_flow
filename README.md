@@ -194,6 +194,18 @@ Zoho nudge: Run (or the scheduler) syncs the criteria, then the local filters de
 | `sandbox_documents_accepted` | EPS, `KYC_Documents_Upload` = `Accepted` | 121 |
 | `sandbox_documents_under_review` | EPS, `KYC_Documents_Upload` = `All Done` | 8 |
 | `sandbox_closed_won_live_credentials` | EPS, `Lead_Status` = `Closed Won` | 288 |
+| `sandbox_placeholder_name_onboarding` | EPS, `Full_Name` = `FIRST NAME LAST NAME`, created < 2 months | 260 |
+
+> **This cohort is only reachable through `Phone`.** Every one of those 260 leads has an empty
+> `Mobile` and a populated `Phone` — as do all 440 of the wider placeholder pattern. The send path
+> falls back `mobile || phone`, so they deliver; a nudge that only looked at `Mobile` would have
+> silently reached nobody.
+
+> **The placeholder-name nudge has NO body variable, deliberately.** Every other template opens with
+> "Hi {{1}}" — which for this cohort would render as **"Hi FIRST NAME"**, because the placeholder *is*
+> the name. It greets nobody by name instead. It also shows why `Full_Name:equals` is used rather than
+> a substring: Zoho has no `contains` operator (it answers `INVALID_QUERY, invalid operator found`),
+> and a substring match would reach 366 leads rather than 260.
 
 *(Control: all EPS leads at the time of writing — 13,637. These audiences are large; each nudge is
 once-per-lead, but enabling one is a real send to hundreds or thousands of people.)*

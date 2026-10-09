@@ -26,6 +26,7 @@ import {
   MYSQL_FLOW_TEMPLATES,
   WA_SHEET_FLOW_TEMPLATES,
   ZOHO_FLOW_TEMPLATES,
+  SANDBOX_WHATSAPP_NUDGES,
   DEFAULT_NUDGES,
   CONSOLE_URL,
   PAY_ACTIVATION_FEE_URL,
@@ -68,6 +69,17 @@ function templateSpecFor(name) {
       body: zohoFlow.body,
       buttonText: zohoFlow.buttonText ?? null,
       buttonUrl: tracked ? (templateButtonUrlFor(name) ?? null) : (zohoFlow.buttonUrl ?? null),
+    }
+  }
+  // Sandbox nudges carry their own label + URL. Without this branch a sandbox template would be
+  // submitted with NO button, while its nudge sends a button parameter — a parameter-count mismatch
+  // (132000) on every send.
+  const sandbox = Object.values(SANDBOX_WHATSAPP_NUDGES).find((s) => s.templateName === base)
+  if (sandbox) {
+    return {
+      body: sandbox.body,
+      buttonText: sandbox.buttonText ?? null,
+      buttonUrl: sandbox.buttonUrl ?? null,
     }
   }
   return null
