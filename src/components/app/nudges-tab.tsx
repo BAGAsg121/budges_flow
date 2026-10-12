@@ -902,9 +902,18 @@ export function NudgesTab({
                   {runJob.failed ? <span className="text-destructive">{runJob.failed} failed</span> : '0 failed'}
                   {isJobActive(runJob) ? (
                     <span className="block mt-1 text-muted-foreground">
-                      {runJob.remaining > 0
-                        ? `${runJob.remaining} lead(s) still to go — continuing in the background.`
-                        : 'Working…'}
+                      {/* The first batch fetches the CRM before it sends anything, which can take
+                          minutes. Saying "Working…" over a 0-considered counter reads as stuck, so
+                          the fetching phase is named explicitly — and the elapsed time is shown, so
+                          "slow" and "stuck" can be told apart instead of guessed at. */}
+                      {runJob.batches === 0
+                        ? `${runJob.sync ? 'Preparing — fetching the latest leads from Zoho, then sending starts' : 'Preparing — sending starts in a moment'} (${Math.max(
+                            0,
+                            Math.round((Date.now() - new Date(runJob.startedAt).getTime()) / 1000)
+                          )}s)`
+                        : runJob.remaining > 0
+                          ? `${runJob.remaining} lead(s) still to go — continuing in the background.`
+                          : 'Working…'}
                     </span>
                   ) : runJob.status === 'done' ? (
                     <span className="block mt-1">
@@ -918,10 +927,14 @@ export function NudgesTab({
                   ) : (
                     <span className="block mt-1 text-destructive">{runJob.error ?? 'The run failed.'}</span>
                   )}
-                  <span className="block mt-1 text-muted-foreground">
-                    {runJob.batches} batch(es) of up to {runJob.batchLimit ?? '∞'} · {runJob.considered} lead(s)
-                    considered
-                  </span>
+                  {/* Only once a batch has actually run. Before that there is nothing to report, and
+                      "0 batch(es) · 0 considered" reads as a stall rather than a start. */}
+                  {runJob.batches > 0 ? (
+                    <span className="block mt-1 text-muted-foreground">
+                      {runJob.batches} batch(es) of up to {runJob.batchLimit ?? 'unlimited'} · {runJob.considered}{' '}
+                      lead(s) considered
+                    </span>
+                  ) : null}
                 </DialogDescription>
               </DialogHeader>
 
@@ -967,7 +980,10 @@ export function NudgesTab({
                     </div>
                   ))}
                 </div>
-              ) : (
+              ) : isJobActive(runJob) ? null : (
+                // Only claim "no skips" once the run has actually finished. During the fetch phase
+                // there is no skip list yet, and asserting everyone was messaged before anything has
+                // been attempted is simply untrue.
                 <p className="text-sm text-muted-foreground">No skips — everyone eligible got a message.</p>
               )}
 

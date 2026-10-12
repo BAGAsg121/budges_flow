@@ -533,8 +533,14 @@ function buildLeadVars(lead: {
   }
 }
 
-/** Resolve the per-run cap: explicit option wins, then NUDGE_MAX_PER_RUN, else unlimited. */
-function resolveBatchLimit(limit?: number): number | null {
+/**
+ * Resolve the per-run cap: explicit option wins, then NUDGE_MAX_PER_RUN, else unlimited.
+ *
+ * Exported because the background run queue has to report the cap BEFORE the first batch finishes
+ * (see src/lib/run-queue.ts) — reading the env var a second time there would be a duplicate
+ * definition of "what is the cap", which is how two screens start disagreeing.
+ */
+export function resolveBatchLimit(limit?: number): number | null {
   const raw = limit !== undefined ? limit : Number(process.env.NUDGE_MAX_PER_RUN || 0)
   return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : null
 }

@@ -178,6 +178,8 @@ export interface RunJobDto {
   nudgeName: string
   /** True when this is a one-off run of a DISABLED nudge. */
   force: boolean
+  /** Whether the first batch fetches leads from Zoho before sending. */
+  sync: boolean
   status: 'queued' | 'running' | 'done' | 'failed' | 'stopped'
   sent: number
   failed: number

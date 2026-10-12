@@ -30,18 +30,19 @@
  * leads. One at a time also means the numbers the operator watches mean something.
  */
 import { db } from '@/lib/db'
-import { runNudge } from '@/lib/nudge-engine'
+import { runNudge, resolveBatchLimit } from '@/lib/nudge-engine'
 import { getStaticBaseUrl } from '@/lib/base-url'
+import { isWhatsAppConfigured } from '@/lib/whatsapp'
+import { isMailerConfigured } from '@/lib/mailer'
 import type { RunJobDto } from '@/lib/app-types'
 
 export type RunJobStatus = RunJobDto['status']
 
 /**
  * The job shape lives in app-types.ts so the client can import it without pulling in this module
- * (which opens a database connection). Aliased here for readability at the call sites, plus the
- * per-job `sync` flag — server-only state the client has no use for.
+ * (which opens a database connection). Aliased here for readability at the call sites.
  */
-export type RunJob = RunJobDto & { sync: boolean }
+export type RunJob = RunJobDto
 
 /** How many skip rows a job carries. Enough to explain a run, small enough to poll. */
 const SKIPPED_CAP = 100
@@ -143,11 +144,20 @@ export async function enqueueRun(
     failed: 0,
     remaining: 0,
     batches: 0,
-    batchLimit: null,
+    /**
+     * SEEDED FROM THE REAL CONFIG, not left at a placeholder.
+     *
+     * The UI renders these the moment the job is returned, and the first batch can take minutes
+     * (it fetches the CRM before sending anything). Defaulting them to `false`/`null` made a
+     * freshly started WhatsApp run announce "WhatsApp not configured — attempts were logged as
+     * failed" while it was still syncing, and claim a cap of ∞. Both were false, and the first was
+     * alarming. A job must not describe itself until it knows — so it knows from the start.
+     */
+    batchLimit: resolveBatchLimit(),
+    whatsappConfigured: isWhatsAppConfigured(),
+    smtpConfigured: isMailerConfigured(),
     considered: 0,
     channel: nudge.channel,
-    smtpConfigured: false,
-    whatsappConfigured: false,
     syncedFromZoho: null,
     syncedVia: null,
     skipped: [],
