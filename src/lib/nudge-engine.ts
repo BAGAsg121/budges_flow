@@ -750,7 +750,7 @@ async function runMysqlNudge(nudge: Nudge, summary: RunSummary, batchLimit: numb
     }
 
     const logs = await db.messageLog.findMany({ where: { nudgeId: nudge.id, toPhone } })
-    const decision = decideSend(logs, nudge.maxEmailsPerLead, nudge.followUpDays, now)
+    const decision = decideSend(logs, nudge.maxEmailsPerLead, nudge.followUpDays, now, { channel: nudge.channel })
     if (decision.action === 'skip') {
       summary.skipped.push({ lead: label, email: null, phone: toPhone, reason: decision.reason!, detail: decision.detail })
       continue
@@ -937,7 +937,7 @@ export async function runNudge(
 
   for (const lead of leads) {
     const logs = await db.messageLog.findMany({ where: { nudgeId: nudge.id, leadId: lead.id } })
-    const decision = decideSend(logs, nudge.maxEmailsPerLead, nudge.followUpDays, now)
+    const decision = decideSend(logs, nudge.maxEmailsPerLead, nudge.followUpDays, now, { channel })
 
     if (decision.action === 'skip') {
       summary.skipped.push({
@@ -1131,7 +1131,7 @@ export async function previewNudge(nudgeId: string) {
 
   for (const lead of leads) {
     const logs = await db.messageLog.findMany({ where: { nudgeId: nudge.id, leadId: lead.id } })
-    const decision = decideSend(logs, nudge.maxEmailsPerLead, nudge.followUpDays, now)
+    const decision = decideSend(logs, nudge.maxEmailsPerLead, nudge.followUpDays, now, { channel })
 
     if (decision.action === 'send') {
       // mirror the run-time phone validation so preview never promises an undeliverable send

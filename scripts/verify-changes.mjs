@@ -707,6 +707,35 @@ const onceNudge = DEFAULT_NUDGES.find((n) => n.key === 'documents_submitted_revi
 check('sequence: a once-ever nudge sends first time', decideSend([], onceNudge?.maxEmailsPerLead ?? 1, onceNudge?.followUpDays ?? 0, seqNow).action, 'send')
 check('sequence: a once-ever nudge never sends twice', decideSend([sentLog(seqNow, 1000)], onceNudge?.maxEmailsPerLead ?? 1, onceNudge?.followUpDays ?? 0, seqNow).reason, 'max_reached')
 
+// A number that cannot receive WhatsApp must stop being retried. Measured on this database before
+// the rule existed: 18 unreachable leads produced 221 failed rows on one nudge, and one lead had 16
+// attempts. Nothing else stopped it, because the allowance counts SUCCESSFUL sends.
+const waOpt = { channel: 'whatsapp' }
+const deadLog = {
+  sentOk: false,
+  replied: false,
+  sentAt: null,
+  createdAt: new Date(seqNow.getTime() - 90 * 60 * 1000),
+  sendError: 'Message undeliverable (code 131026)',
+}
+check('sequence: an undeliverable number is not retried', decideSend([deadLog], maxPer, gapDays, seqNow, waOpt).action, 'skip')
+check('sequence: and says why', decideSend([deadLog], maxPer, gapDays, seqNow, waOpt).reason, 'undeliverable')
+// Terminal, not a backoff — waiting does not make an unreachable number reachable.
+check('sequence: still skipped long afterwards, unlike a cap', decideSend([{ ...deadLog, createdAt: new Date(seqNow.getTime() - 30 * 24 * 60 * 60 * 1000) }], maxPer, gapDays, seqNow, waOpt).reason, 'undeliverable')
+check('sequence: still skipped for a once-ever nudge', decideSend([deadLog], 1, 0, seqNow, waOpt).action, 'skip')
+// A later SUCCESS clears it, because only the newest row is consulted.
+check('sequence: a later success clears the block', decideSend([deadLog, sentLog(seqNow, 1)], maxPer, gapDays, seqNow, waOpt).action, 'skip')
+check('sequence: a later success resets to max_reached, not undeliverable', decideSend([deadLog, sentLog(seqNow, 1)], 1, 0, seqNow, waOpt).reason, 'max_reached')
+check('sequence: an undeliverable followed by a transient error is retried', decideSend([
+  { ...deadLog, createdAt: new Date(seqNow.getTime() - 10 * 60 * 60 * 1000) },
+  { ...deadLog, createdAt: new Date(seqNow.getTime() - 60 * 60 * 1000), sendError: 'some transient error' },
+], maxPer, gapDays, seqNow, waOpt).action, 'send')
+// "undeliverable" is ordinary SMTP bounce wording too, so the rule must NOT apply to email or to an
+// unknown channel — ending an email sequence on a soft bounce would lose a customer silently.
+check('sequence: the rule does not fire for email', decideSend([deadLog], maxPer, gapDays, seqNow, { channel: 'email' }).action, 'send')
+check('sequence: the rule does not fire for an unknown channel', decideSend([deadLog], maxPer, gapDays, seqNow).action, 'send')
+check('sequence: a config error is retried, not treated as undeliverable', decideSend([{ ...deadLog, sendError: 'template does not exist (code 132001)' }], maxPer, gapDays, seqNow, waOpt).action, 'send')
+
 // --- the Zoho sync path must be MCP-first everywhere -------------------------
 // The bug this guards: runNudge and the scheduler called syncLeadsFromCriteria (REST-ONLY) while
 // /api/zoho/sync used syncLeads (MCP-first). So the Run button and every scheduled cycle bypassed

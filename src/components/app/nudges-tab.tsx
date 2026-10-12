@@ -89,6 +89,10 @@ function reasonBadge(reason: string, detail?: string) {
       return <Badge variant="outline">skipped as duplicate{detail ? ` · ${detail}` : ''}</Badge>
     case 'delivery_cap_backoff':
       return <Badge className="bg-warning text-warning-foreground hover:bg-warning">capped by Meta{detail ? ` · ${detail}` : ''}</Badge>
+    case 'undeliverable':
+      // Terminal, not a backoff: Meta says this number cannot receive WhatsApp at all, so the run
+      // stops retrying it instead of re-attempting it on every pass.
+      return <Badge variant="outline">undeliverable{detail ? ` · ${detail}` : ''}</Badge>
     case 'email_fallback_missing':
       return <Badge variant="destructive">fallback nudge missing{detail ? ` · ${detail}` : ''}</Badge>
     case 'email_fallback':

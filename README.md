@@ -1421,6 +1421,45 @@ What no code can fix: if a user has genuinely opted out of marketing (131050) or
 at all (131026), only their opt-in or a different channel reaches them — which is what the email
 fallback is for.
 
+### Unreachable numbers are not retried (and why that mattered)
+
+**Measured on this database before the rule existed.** Of 590 failed WhatsApp rows, **436 (74%) were
+`131026 Message undeliverable`** — numbers that simply cannot receive WhatsApp. That is data quality,
+not a defect. But the failure *count* was far larger than the number of bad leads, because nothing
+stopped the retry:
+
+| Nudge | Unreachable leads | Failure rows | Amplification |
+| --- | --- | --- | --- |
+| `sandbox_old_website_lead` | 18 | 221 | 12.3× |
+| `sandbox_closed_won_live_credentials` | 12 | 105 | 8.8× |
+| `sandbox_placeholder_name_onboarding` | 22 | 96 | 4.4× |
+
+One lead (`rakesh pal`, +919932946258) had **16 attempts on record**, all undeliverable.
+
+The reason: `decideSend()` counts **successful** sends towards `maxEmailsPerLead`, so a lead who
+never receives one never reaches the cap. The Meta-cap rule only covered 131049/131050, and
+`isPermanentDeliveryFailure()` — which already existed, and which the sheet-run path already used —
+was never consulted by the run path. Every run therefore re-attempted every dead number, forever,
+burning messaging quota the reachable leads need.
+
+`decideSend()` now stops on a permanent failure, under two deliberate constraints:
+
+- **Terminal, not a backoff.** Waiting does not make an unreachable number reachable. Only the
+  *newest* row is consulted, so a later successful send clears it and the sequence resumes.
+- **WhatsApp only.** `isPermanentDeliveryFailure` falls back to matching the word "undeliverable",
+  which is also ordinary SMTP bounce wording. Applying it to email could silently end a sequence on
+  a soft bounce, so the check is gated on the channel and an unknown channel keeps the old
+  behaviour. The cost of being wrong that way is a wasted attempt, not a lost customer.
+
+The manual retry in the Failed-logs tab deliberately bypasses this rule, so an operator can always
+try a number again by hand — a recipient may install WhatsApp later.
+
+> **What this does not explain away.** Two other clusters were real incidents, now historical:
+> 50 × `132000` (parameter mismatch) on `sandbox_old_website_lead` on 2026-10-22, fixed by the
+> `bodyVars`/button correction — that nudge has sent successfully since; and 50 × "not configured"
+> plus 54 caps on 2026-10-07/08, from before the WhatsApp env vars and the UTILITY templates landed.
+> Delivery to *distinct* leads is 92–96%, not the 69–73% the raw failure counts suggested.
+
 ### What was actually done about it
 
 The two activation-fee templates were rebuilt as **UTILITY** and the nudges repointed at them:
@@ -1598,7 +1637,7 @@ parameters, `trackingId` and CTA destination are identical to a run-triggered se
 | --- | --- |
 | `sent` | delivered to the provider; includes `templateName` and `trackingId` |
 | `failed` | the provider rejected it; includes the error and a plain-English `help` |
-| `skipped` | with a `reason`: `status_not_included`, `wrong_business_vertical`, `no_valid_phone`, `kyc_expected_unknown`, `kyc_expected_differ`, `max_reached`, `replied`, `delivery_cap_backoff` |
+| `skipped` | with a `reason`: `status_not_included`, `wrong_business_vertical`, `no_valid_phone`, `kyc_expected_unknown`, `kyc_expected_differ`, `max_reached`, `replied`, `delivery_cap_backoff`, `undeliverable` |
 
 A delivery failure is reported as `failed` rather than a 500, because the CRM only needs to know
 whether to retry the record.
