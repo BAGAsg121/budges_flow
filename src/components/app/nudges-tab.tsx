@@ -19,7 +19,7 @@ import {
   AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { useToast } from '@/hooks/use-toast'
-import type { NudgeChannel, NudgeDto, PreviewDto, RunSummaryDto } from '@/lib/app-types'
+import type { NudgeChannel, NudgeDto, PreviewDto, RunJobDto } from '@/lib/app-types'
 import { capAppliesTo, nudgeSourceOf, nudgeCategoryOf, NUDGE_CATEGORY_LABEL, SHEET_DEDUP_RULE } from '@/lib/nudge-kind'
 import { cn } from '@/lib/utils'
 import { FlaskConical } from 'lucide-react'
@@ -59,6 +59,11 @@ function ChannelBadge({ channel }: { channel: NudgeChannel }) {
       <Mail className="h-3 w-3" /> Email
     </Badge>
   )
+}
+
+/** A background job that is still working — as opposed to one that has settled. */
+function isJobActive(job: { status: string }): boolean {
+  return job.status === 'running' || job.status === 'queued'
 }
 
 function reasonBadge(reason: string, detail?: string) {
@@ -142,7 +147,14 @@ export function NudgesTab({
   const [runWithSync, setRunWithSync] = useState(true)
   const [running, setRunning] = useState<string | null>(null)
   const [bulkBusy, setBulkBusy] = useState(false)
-  const [runResult, setRunResult] = useState<RunSummaryDto | null>(null)
+  /**
+   * The background job a run is currently executing, if any.
+   *
+   * Runs are started in `background` mode because a full drain does not fit in one HTTP request (see
+   * src/lib/run-queue.ts). The job is the live view of that work: it keeps climbing after this
+   * component stops awaiting anything, and it survives the tab being closed.
+   */
+  const [runJob, setRunJob] = useState<RunJobDto | null>(null)
   const [preview, setPreview] = useState<PreviewDto | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
 
@@ -292,59 +304,86 @@ export function NudgesTab({
   const run = async (n: NudgeDto) => {
     setRunning(n.id)
     try {
-      // The server drains its own batches and reports `complete: false` when its time budget ran out
-      // with leads still to message. We keep calling until it is finished, so ONE click walks the
-      // whole audience — previously the run stopped at the per-run cap and looked like a sending
-      // limit that did not exist.
+      // BACKGROUND MODE. The server enqueues a job and answers at once; the sending continues in the
+      // server process, so one click walks the entire audience and the operator can close the tab.
       //
-      // The cap is still real: it bounds each batch. What changed is that it no longer decides when
-      // the run ends. `sync` is only honoured on the first call (the server ignores it afterwards),
-      // so the expensive CRM refresh happens exactly once.
-      const MAX_CONTINUATIONS = 200
-      let merged: RunSummaryDto | null = null
-
-      for (let attempt = 0; attempt < MAX_CONTINUATIONS; attempt++) {
-        const res = await fetch(`/api/nudges/${n.id}/run`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          // force is sent ONLY for a nudge that is off. The API refuses to imply it, so a disabled
-          // nudge can only ever send because the operator confirmed it here.
-          body: JSON.stringify({ sync: runWithSync, force: !n.enabled }),
-        })
-        const data = (await res.json()) as { ok: boolean; summary?: RunSummaryDto; error?: string }
-        if (!data.ok || !data.summary) {
-          toast({ title: 'Run failed', description: data.error, variant: 'destructive' })
-          // Show whatever the earlier batches achieved rather than pretending nothing happened.
-          if (merged) setRunResult(merged)
-          return
-        }
-
-        const batch = data.summary
-        merged = merged
-          ? {
-              ...batch,
-              sent: merged.sent + batch.sent,
-              failed: merged.failed + batch.failed,
-              batches: (merged.batches ?? 1) + (batch.batches ?? 1),
-              // Keep the FIRST batch's sync figures — the refresh only happened there.
-              syncedFromZoho: merged.syncedFromZoho,
-              syncedVia: merged.syncedVia,
-            }
-          : batch
-
-        // Live progress: on a long drain the operator sees the count climb instead of a frozen dialog.
-        setRunResult(merged)
-
-        if (batch.complete !== false) break
-        if (batch.sent + batch.failed === 0) break
+      // This replaced a client-side loop that called /run repeatedly. That loop worked, but each call
+      // could only afford about one batch of 50 before its request budget expired (~2.5 minutes at
+      // ~3s a WhatsApp send), so a 417-lead run needed nine round trips and kept the browser busy and
+      // the tab open the whole time. The work now lives where it belongs — on the server.
+      const res = await fetch(`/api/nudges/${n.id}/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        // force is sent ONLY for a nudge that is off. The API refuses to imply it, so a disabled
+        // nudge can only ever send because the operator confirmed it here.
+        body: JSON.stringify({ sync: runWithSync, force: !n.enabled, background: true }),
+      })
+      const data = (await res.json()) as { ok: boolean; job?: RunJobDto; error?: string }
+      if (!data.ok || !data.job) {
+        toast({ title: 'Could not start the run', description: data.error, variant: 'destructive' })
+        return
       }
-
-      load()
-      onChanged()
+      setRunJob(data.job)
+      toast({
+        title: 'Sending started',
+        description: `${data.job.nudgeKey} — this continues in the background. You can leave this page.`,
+      })
     } finally {
       setRunning(null)
       setRunTarget(null)
     }
+  }
+
+  /**
+   * Poll the running job.
+   *
+   * Keyed on the job id and status, so the interval is torn down the moment the job reaches a
+   * terminal state — a finished job must not keep a timer alive on the page.
+   */
+  useEffect(() => {
+    const id = runJob?.id
+    const nudgeId = runJob?.nudgeId
+    const status = runJob?.status
+    if (!id || !nudgeId) return
+    if (status !== 'running' && status !== 'queued') return
+
+    let inFlight = false
+    const tick = async () => {
+      // Skip a tick rather than stack requests if the server is slow.
+      if (inFlight) return
+      inFlight = true
+      try {
+        const res = await fetch(`/api/runs?nudgeId=${nudgeId}`)
+        const data = (await res.json()) as { ok: boolean; job?: RunJobDto | null }
+        if (data.job) setRunJob(data.job)
+      } catch {
+        // A dropped poll is not an error worth reporting — the next tick re-reads the same state.
+      } finally {
+        inFlight = false
+      }
+    }
+
+    const timer = setInterval(tick, 3000)
+    return () => clearInterval(timer)
+  }, [runJob?.id, runJob?.nudgeId, runJob?.status])
+
+  /** Refresh the tables once a background run settles, so the row's last-run column is current. */
+  useEffect(() => {
+    if (!runJob) return
+    if (runJob.status === 'running' || runJob.status === 'queued') return
+    load()
+    onChanged()
+    // Deliberately keyed on the transition, not the job object: re-running on every poll would
+    // refetch the nudge list every three seconds.
+  }, [runJob?.status])
+
+  const stopRun = async () => {
+    if (!runJob) return
+    await fetch(`/api/runs/${runJob.id}/stop`, { method: 'POST' })
+    toast({
+      title: 'Stop requested',
+      description: 'The run stops after the batch it is currently sending. Nothing already delivered is recalled.',
+    })
   }
 
   const openPreview = async (n: NudgeDto) => {
@@ -792,8 +831,8 @@ export function NudgesTab({
                 ? 'This will send WhatsApp template messages (Meta Cloud API) to every eligible lead that hasn\'t hit the sequence limit.'
                 : 'This will send emails to every eligible lead that hasn\'t hit the sequence limit.'}{' '}
               Max {runTarget?.maxEmailsPerLead} message(s) per lead, {runTarget?.followUpDays} day(s) between follow-ups.{' '}
-              The run continues on its own until every eligible lead has been attempted, in batches of
-              NUDGE_MAX_PER_RUN — you do not need to click again.
+              Sending continues in the background until every eligible lead has been attempted — you can
+              close this page and it will still finish.
             </AlertDialogDescription>
           </AlertDialogHeader>
 
@@ -829,64 +868,121 @@ export function NudgesTab({
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Run result */}
-      <Dialog open={!!runResult} onOpenChange={(o) => !o && setRunResult(null)}>
+      {/* Run progress — the live view of a background job. */}
+      <Dialog
+        open={!!runJob}
+        onOpenChange={(o) => {
+          if (!o) {
+            // Clearing the job here only dismisses the DIALOG. The run itself lives on the server and
+            // is unaffected — which is the entire point of background mode.
+            setRunJob(null)
+          }
+        }}
+      >
         <DialogContent className="max-w-xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>Run complete: {runResult?.nudgeKey}</DialogTitle>
-            <DialogDescription>
-              {runResult?.forced ? (
-                <span className="mb-1 block text-warning">
-                  One-off run on a nudge that is <b>OFF</b> — the scheduler is still ignoring it.
-                </span>
+          {runJob ? (
+            <>
+              <DialogHeader>
+                <DialogTitle>
+                  {runJob.status === 'running' || runJob.status === 'queued'
+                    ? `Sending: ${runJob.nudgeKey}`
+                    : runJob.status === 'stopped'
+                      ? `Stopped: ${runJob.nudgeKey}`
+                      : runJob.status === 'failed'
+                        ? `Run failed: ${runJob.nudgeKey}`
+                        : `Run complete: ${runJob.nudgeKey}`}
+                </DialogTitle>
+                <DialogDescription>
+                  {runJob.force ? (
+                    <span className="mb-1 block text-warning">
+                      One-off run on a nudge that is <b>OFF</b> — the scheduler is still ignoring it.
+                    </span>
+                  ) : null}
+                  <b className="text-success">{runJob.sent} sent</b> ·{' '}
+                  {runJob.failed ? <span className="text-destructive">{runJob.failed} failed</span> : '0 failed'}
+                  {isJobActive(runJob) ? (
+                    <span className="block mt-1 text-muted-foreground">
+                      {runJob.remaining > 0
+                        ? `${runJob.remaining} lead(s) still to go — continuing in the background.`
+                        : 'Working…'}
+                    </span>
+                  ) : runJob.status === 'done' ? (
+                    <span className="block mt-1">
+                      Finished — every eligible lead has been attempted.
+                    </span>
+                  ) : runJob.status === 'stopped' ? (
+                    <span className="block mt-1 text-warning">
+                      Stopped after {runJob.batches} batch(es). {runJob.remaining} lead(s) were not attempted — run
+                      again to continue; nobody is messaged twice.
+                    </span>
+                  ) : (
+                    <span className="block mt-1 text-destructive">{runJob.error ?? 'The run failed.'}</span>
+                  )}
+                  <span className="block mt-1 text-muted-foreground">
+                    {runJob.batches} batch(es) of up to {runJob.batchLimit ?? '∞'} · {runJob.considered} lead(s)
+                    considered
+                  </span>
+                </DialogDescription>
+              </DialogHeader>
+
+              {isJobActive(runJob) ? (
+                <div className="flex items-start gap-2 rounded-md border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
+                  <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin" />
+                  <span>
+                    Sending continues on the server — you can close this or leave the page and the run will
+                    still finish. Progress here updates every few seconds.
+                  </span>
+                </div>
               ) : null}
-              {runResult?.syncedFromZoho !== null && runResult?.syncedFromZoho !== undefined
-                ? `${runResult.syncedFromZoho} leads synced from Zoho${runResult.syncedVia ? ` (via ${runResult.syncedVia.toUpperCase()})` : ''} · `
-                : ''}
-              {runResult?.leadsConsidered} leads considered ·{' '}
-              <b className="text-success">{runResult?.sent} sent</b> ·{' '}
-              {runResult?.failed ? <span className="text-destructive">{runResult.failed} failed</span> : '0 failed'}
-              {runResult?.deferred ? (
-                <span className="block mt-1 text-warning">
-                  {runResult.deferred} lead(s) still to go — the run budget ran out. Click Run again to
-                  continue from where it stopped; nothing is sent twice.
-                </span>
+
+              {runJob.syncedFromZoho !== null ? (
+                <p className="text-xs text-muted-foreground">
+                  {runJob.syncedFromZoho} leads synced from Zoho
+                  {runJob.syncedVia ? ` (via ${runJob.syncedVia.toUpperCase()})` : ''}
+                </p>
               ) : null}
-              {runResult?.batches && runResult.batches > 1 ? (
-                <span className="block mt-1 text-muted-foreground">
-                  Sent in {runResult.batches} batch(es) of up to {runResult.batchLimit}.
-                </span>
-              ) : null}
-              {runResult?.channel === 'email' && !runResult?.smtpConfigured && (
-                <span className="flex items-start gap-1.5 mt-2 text-warning">
+
+              {runJob.channel === 'email' && !runJob.smtpConfigured && (
+                <span className="flex items-start gap-1.5 text-warning">
                   <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
                   SMTP not configured — attempts were logged as failed. Set SMTP_USER / SMTP_PASS / MAIL_FROM in .env.
                 </span>
               )}
-              {runResult?.channel === 'whatsapp' && !runResult?.whatsappConfigured && (
-                <span className="flex items-start gap-1.5 mt-2 text-warning">
+              {runJob.channel === 'whatsapp' && !runJob.whatsappConfigured && (
+                <span className="flex items-start gap-1.5 text-warning">
                   <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
                   WhatsApp not configured — attempts were logged as failed. Set WHATSAPP_TOKEN + WHATSAPP_PHONE_NUMBER_ID in .env (after Meta approves your number and template).
                 </span>
               )}
-            </DialogDescription>
-          </DialogHeader>
 
-          {runResult && runResult.skipped.length > 0 ? (
-            <div className="rounded-md border max-h-72 overflow-y-auto p-2 space-y-1">
-              {runResult.skipped.map((s, i) => (
-                <div key={i} className="flex items-center justify-between gap-2 rounded px-2 py-1.5 text-sm hover:bg-muted/60">
-                  <div className="min-w-0">
-                    <p className="truncate font-medium">{s.lead}</p>
-                    <p className="truncate text-xs text-muted-foreground">{s.email || s.phone || 'no contact'}</p>
-                  </div>
-                  {reasonBadge(s.reason, s.detail)}
+              {runJob.skipped.length > 0 ? (
+                <div className="rounded-md border max-h-72 overflow-y-auto p-2 space-y-1">
+                  {runJob.skipped.map((s, i) => (
+                    <div key={i} className="flex items-center justify-between gap-2 rounded px-2 py-1.5 text-sm hover:bg-muted/60">
+                      <div className="min-w-0">
+                        <p className="truncate font-medium">{s.lead}</p>
+                        <p className="truncate text-xs text-muted-foreground">{s.email || s.phone || 'no contact'}</p>
+                      </div>
+                      {reasonBadge(s.reason, s.detail)}
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-          ) : (
-            <p className="text-sm text-muted-foreground">No skips — everyone eligible got a message.</p>
-          )}
+              ) : (
+                <p className="text-sm text-muted-foreground">No skips — everyone eligible got a message.</p>
+              )}
+
+              <DialogFooter>
+                {isJobActive(runJob) ? (
+                  <Button variant="destructive" onClick={stopRun}>
+                    Stop after this batch
+                  </Button>
+                ) : null}
+                <Button variant="outline" onClick={() => setRunJob(null)}>
+                  Close
+                </Button>
+              </DialogFooter>
+            </>
+          ) : null}
         </DialogContent>
       </Dialog>
 

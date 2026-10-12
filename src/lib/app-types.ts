@@ -153,6 +153,52 @@ export interface RunSummaryDto {
   whatsappConfigured: boolean
 }
 
+/** One lead a background run considered and deliberately did not message, and why. */
+export interface RunJobSkipDto {
+  lead: string
+  email: string | null
+  phone: string | null
+  reason: string
+  detail?: string
+}
+
+/**
+ * A background run job (src/lib/run-queue.ts).
+ *
+ * Separate from RunSummaryDto because it is a different thing: a summary is what one finished run
+ * did, a job is a long-running send the server is still working through after the request answered.
+ *
+ * Defined HERE rather than in run-queue.ts so the client can import the shape without importing a
+ * server module that opens a database connection.
+ */
+export interface RunJobDto {
+  id: string
+  nudgeId: string
+  nudgeKey: string
+  nudgeName: string
+  /** True when this is a one-off run of a DISABLED nudge. */
+  force: boolean
+  status: 'queued' | 'running' | 'done' | 'failed' | 'stopped'
+  sent: number
+  failed: number
+  /** Leads the last batch reported as still to do. 0 means the audience was exhausted. */
+  remaining: number
+  batches: number
+  batchLimit: number | null
+  considered: number
+  channel: string
+  smtpConfigured: boolean
+  whatsappConfigured: boolean
+  syncedFromZoho: number | null
+  syncedVia: 'mcp' | 'api' | null
+  /** The LAST batch's skips, capped — what the operator sees instead of a raw deferred count. */
+  skipped: RunJobSkipDto[]
+  startedAt: string
+  finishedAt?: string
+  error?: string
+  stopRequested: boolean
+}
+
 export interface PreviewDto {
   nudgeKey: string
   channel: NudgeChannel

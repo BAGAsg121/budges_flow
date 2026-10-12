@@ -1680,23 +1680,39 @@ Two options; both call the same code path:
    curl -X POST http://localhost:3000/api/cron/run -H "x-cron-secret: $CRON_SECRET"
    ```
 
-Each nudge runs in **batches** of at most `NUDGE_MAX_PER_RUN` messages. The batch size is what keeps
-any single send loop inside the request timeout — it is **not** how many messages a run sends.
+### Why a big run takes a while (and no longer stops at 50)
 
-A run keeps starting new batches until the eligible pool is exhausted, so one click on a 260-lead
-nudge finishes the list instead of stopping at 50. Progress is monotonic, which is what makes the
-repeat safe: a lead messaged in batch 1 has a log row, so `decideSend()` skips it in batch 2 without
-consuming that batch's allowance, and the next un-messaged leads move up.
+Each nudge sends in **batches** of at most `NUDGE_MAX_PER_RUN` messages. That cap is what keeps any
+single send loop inside its timeout — it is **not** how many messages a run sends.
 
-`RUN_BUDGET_SECONDS` (default 150) bounds how long one request may keep *starting* batches. When it
-runs out the response carries `complete: false` and whatever is left:
+The tricky part is that a batch of 50 WhatsApp sends already takes ~2.5 minutes at ~3s a send, and
+draining 417 leads takes ~18 minutes while draining 3,500 takes hours. **No HTTP request lives that
+long**, so there is no budget value that makes a large run finish inside one request. Tuning the
+budget only moves the point at which it gives up.
 
-- the **UI** calls `/run` again automatically, so the operator does not have to;
-- the **scheduler** picks it up on the next cycle.
+So the work moved off the request entirely. `POST /api/nudges/{id}/run` with `{"background": true}`
+enqueues a job (`src/lib/run-queue.ts`) and answers immediately; the queue keeps sending cap-sized
+batches **inside the server process** until the audience is exhausted, is stopped, or stops making
+progress. The UI polls `GET /api/runs?nudgeId=…` every few seconds and shows the count climb — but
+**you can close the page and the run still finishes.**
 
-Anything still counted as `deferred` when no budget remains means the run is genuinely unfinished, not
-that a cap was hit — the UI says so, and clicking Run again resumes from exactly where it stopped
-without re-sending to anyone.
+- Progress is monotonic, which is what makes repeating a batch safe: a lead messaged in batch 1 has a
+  log row, so `decideSend()` skips it in batch 2 without consuming that batch's allowance.
+- **Concurrency is one.** Two jobs at once would double the rate at Meta and interleave two sequences
+  over the same leads. A second job waits its turn, and starting a run for a nudge that is already
+  running is refused with a 409 rather than queued, because two back-to-back runs would re-message
+  anyone the first batch missed for a transient reason.
+- `POST /api/runs/{id}/stop` asks a run to stop. The flag is checked **between batches, never
+  mid-send**, so the numbers stay trustworthy: everything counted as sent really was sent.
+- Jobs live in memory for the life of the process, like the scheduler. A restart ends a running job —
+  which is safe, because a lost job is *resumable*, not corrupt: the next Run picks up the
+  un-messaged leads and nobody is messaged twice.
+
+The **scheduler** uses the same drain (`runNudgeDrained`) with a wall-clock budget, so a cycle makes
+real progress instead of 50 messages every 15 minutes.
+
+`RUN_BUDGET_SECONDS` (default 150) applies **only** to the synchronous mode — a `POST /run` without
+`background` — which must finish before its request is cut off. The UI does not use that mode.
 
 ### Running a nudge that is switched OFF (one-off "Fetch & Send")
 

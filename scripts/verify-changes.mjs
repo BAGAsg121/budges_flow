@@ -1989,6 +1989,10 @@ check('no custom_data without a value', bare.custom_data === undefined, true)
 const valued = buildConversionEvent({ eventName: 'Purchase', phone: '9876543210', value: 999, currency: 'INR' })
 check('a value produces custom_data', `${valued.custom_data.value}/${valued.custom_data.currency}`, '999/INR')
 
+// NOTE: src/lib/run-queue.ts (background run jobs) is deliberately NOT imported here. This suite has
+// no database and no Prisma on purpose — that is what lets it run anywhere in a second — and the
+// queue pulls in both. Its bookkeeping is covered by the type checker and by real runs instead.
+
 console.log(
   `\n${total - failures}/${total} assertions passed` +
     (failures === 0 ? ' — all checks passed.' : ` — ${failures} check(s) FAILED.`)

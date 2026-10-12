@@ -40,12 +40,11 @@ services:
         value: "false"
       - key: NUDGE_MAX_PER_RUN
         value: "50"
-      # Batch size, not run size: a run keeps starting batches until the audience is exhausted, so
-      # this is only what bounds one send loop. This budget caps how long a single request keeps
-      # starting them, after which the UI continues automatically and the scheduler continues next
-      # cycle. A batch of 50 WhatsApp sends is ~2.5 minutes at ~3s a send.
-      - key: RUN_BUDGET_SECONDS
-        value: "150"
+      # Batch size, not run size: a background run keeps sending batches until the audience is
+      # exhausted, so this is only what bounds one send loop. A batch of 50 WhatsApp sends is
+      # ~2.5 minutes at ~3s a send.
+      - key: RUN_BATCH_PAUSE_MS
+        value: "1000"
       # --- secrets: sync:false means Render prompts for them in the dashboard ---
       - key: DATABASE_URL
         sync: false
