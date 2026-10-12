@@ -19,6 +19,7 @@ import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { WA_EMAIL_TWIN } from '@/lib/nudge-defaults'
 import { buildDailySeries } from '@/lib/engagement-stats'
+import { accumulateTotals, emptyTotals, type NudgeTotals } from '@/lib/nudge-totals'
 import { capAppliesTo } from '@/lib/nudge-kind'
 
 export const dynamic = 'force-dynamic'
@@ -39,58 +40,6 @@ const FAMILIES = [
     whatsappKey: 'whatsapp_onboarded_transacting',
   },
 ] as const
-
-interface Totals {
-  nudgeKey: string
-  nudgeName: string | null
-  /** Messages Meta/Zoho accepted. A later failure flips this, so it is always current state. */
-  sent: number
-  failed: number
-  /** Email: pixel fired. WhatsApp: `read` receipt. */
-  opened: number
-  /** Sum of opensCount — one email can be opened several times. */
-  opensTotal: number
-  replied: number
-  /** Delivery-cap drops (131049/131050), which are retryable rather than real failures. */
-  capped: number
-  /** WhatsApp messages whose button was tapped at least once (from the CTA tracker). */
-  clicked: number
-  /** Total taps, including repeats by the same person. */
-  clicks: number
-  lastSentAt: string | null
-}
-
-interface DayBucket {
-  date: string
-  emailSent: number
-  emailOpened: number
-  emailFailed: number
-  waSent: number
-  waOpened: number
-  waFailed: number
-}
-
-function emptyTotals(nudgeKey: string): Totals {
-  return {
-    nudgeKey,
-    nudgeName: null,
-    sent: 0,
-    failed: 0,
-    opened: 0,
-    opensTotal: 0,
-    replied: 0,
-    capped: 0,
-    clicked: 0,
-    clicks: 0,
-    lastSentAt: null,
-  }
-}
-
-/** yyyy-mm-dd in the CRM's timezone, so a "day" matches the day the operator works in. */
-function istDayKey(d: Date): string {
-  const shifted = new Date(d.getTime() + (5 * 60 + 30) * 60 * 1000)
-  return shifted.toISOString().slice(0, 10)
-}
 
 export async function GET(req: Request) {
   const url = new URL(req.url)
@@ -152,7 +101,10 @@ export async function GET(req: Request) {
   const idToKey = new Map(nudges.map((n) => [n.id, n.key]))
 
   // --- lifetime totals -------------------------------------------------------
-  const totals = new Map<string, Totals>()
+  // Counting lives in src/lib/nudge-totals.ts so this route and the sandbox dashboard cannot drift
+  // apart on what a failure or a cap is. Keys are pre-seeded so a nudge with no logs reports zeroes
+  // rather than disappearing from the dashboard.
+  const totals = new Map<string, NudgeTotals>()
   for (const f of FAMILIES) {
     totals.set(f.emailKey, emptyTotals(f.emailKey))
     totals.set(f.whatsappKey, emptyTotals(f.whatsappKey))
@@ -163,39 +115,7 @@ export async function GET(req: Request) {
     if (t) t.nudgeName = byKey.get(key)?.name ?? null
   }
 
-  for (const log of allLogs) {
-    const key = idToKey.get(log.nudgeId)
-    if (!key) continue
-
-    // A fallback email is logged against the EMAIL nudge, so it already lands in the right
-    // bucket. A WhatsApp-capped row is counted as failed *and* as capped.
-    const t = totals.get(key)
-    if (!t) continue
-
-    if (log.channel === 'whatsapp') {
-      const capped = /131049|131050|healthy ecosystem engagement|part of an experiment/i.test(log.sendError || '')
-      if (capped) t.capped++
-    }
-
-    if (log.sentOk) {
-      t.sent++
-      if (log.sentAt && (!t.lastSentAt || log.sentAt.toISOString() > t.lastSentAt)) {
-        t.lastSentAt = log.sentAt.toISOString()
-      }
-    } else {
-      t.failed++
-    }
-
-    if (log.opened) {
-      t.opened++
-      t.opensTotal += log.opensCount || 0
-    }
-    if (log.replied) t.replied++
-    // CTA taps only exist for WhatsApp — the tracked template's button is the only click we see.
-    const taps = log.ctaClicks ?? 0
-    if (taps > 0) t.clicked++
-    t.clicks += taps
-  }
+  accumulateTotals(allLogs, idToKey, totals)
 
   // --- daily series, PER FAMILY ----------------------------------------------
   // Built once per family from that family's own two nudge ids. It used to be built once
@@ -218,8 +138,8 @@ export async function GET(req: Request) {
       families: FAMILIES.map((f) => ({
         id: f.id,
         label: f.label,
-        email: totals.get(f.emailKey) as Totals,
-        whatsapp: totals.get(f.whatsappKey) as Totals,
+        email: totals.get(f.emailKey) as NudgeTotals,
+        whatsapp: totals.get(f.whatsappKey) as NudgeTotals,
         config: {
           emailMax: byKey.get(f.emailKey)?.maxEmailsPerLead ?? null,
           emailFollowUpDays: byKey.get(f.emailKey)?.followUpDays ?? null,

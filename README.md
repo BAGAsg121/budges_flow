@@ -183,6 +183,22 @@ one conversion is "100%" and means nothing. Stage changes with no qualifying nud
 
 ### Sandbox WhatsApp nudges
 
+Every sandbox nudge gets its own card on the **Dashboard**, beside the activation-fee families and in
+the same shape: lifetime totals (sent / failed / read / replied / clicked / capped), its own
+7/14/30-day chart, and a `~N match the criteria` line from the code's live estimate. The section is
+served by `GET /api/stats/sandbox?days=N`.
+
+Per-nudge rather than one aggregate, deliberately: these are separate campaigns with separate
+templates, and a combined line answers a question nobody asked while hiding the per-template
+comparison the section exists for. The nudge list comes from `SANDBOX_WHATSAPP_NUDGES` rather than a
+query, so a nudge added in code but never seeded shows up as a warning instead of vanishing.
+
+> **`Clicked` reads 0 for these nudges, and that is structural.** Click tracking needs a `…_cta`
+> template twin (see §CTA click tracking), and only the templates registered in
+> `MYSQL_FLOW_TEMPLATES` / `WA_SHEET_FLOW_TEMPLATES` / `ZOHO_FLOW_TEMPLATES` have one. No sandbox
+> template is registered, so there is no tracker on their buttons and nothing to count. Attaching a
+> tracked twin would light the column up.
+
 Eight CRM-driven WhatsApp nudges, tagged `category: "sandbox_whatsapp"` and grouped by the **Sandbox
 WhatsApp** filter on the Nudges tab. They read the CRM through the Zoho **MCP** server like any other
 Zoho nudge: Run (or the scheduler) syncs the criteria, then the local filters decide who is messaged.

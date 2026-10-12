@@ -7,6 +7,7 @@ import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { SchedulerStatusDto, StatsDto } from '@/lib/app-types'
 import { OnboardingMetrics } from '@/components/app/onboarding-metrics'
+import { SandboxMetrics } from '@/components/app/sandbox-metrics'
 
 /**
  * One headline number.
@@ -132,6 +133,9 @@ export function DashboardTab({ refreshKey }: { refreshKey: number }) {
 
       {/* Per-nudge engagement for the two activation-fee families. */}
       <OnboardingMetrics refreshKey={refreshKey} />
+
+      {/* Per-nudge engagement for every sandbox WhatsApp nudge, one card each. */}
+      <SandboxMetrics refreshKey={refreshKey} />
 
       <Card>
         <CardContent className="p-4 sm:p-6 space-y-3">

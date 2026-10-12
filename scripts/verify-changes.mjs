@@ -41,6 +41,7 @@ import { buildDailySeries, seriesIsEmpty, istDayKey } from '../src/lib/engagemen
 import { nudgeSourceOf, capAppliesTo, isManualSheetNudge, runGuard, nudgeCategoryOf, NUDGE_CATEGORY_LABEL } from '../src/lib/nudge-kind.ts'
 import { expandZohoCriteria, hasUnexpandedPlaceholder, SANDBOX_WHATSAPP_NUDGES, KYC_UPLOAD_STATUS_VALUES } from '../src/lib/nudge-defaults.ts'
 import { buildXlsx, buildZip, crc32, columnLetter, sanitiseSheetName } from '../src/lib/xlsx.ts'
+import { accumulateTotals, emptyTotals, isCappedSendError } from '../src/lib/nudge-totals.ts'
 import { istDay, istDateTime, istRangeToUtc, istDaysAgo, toCsv, exportStatus, logToExportRow, buildBreakdown, EXPORT_COLUMNS, EXPORT_WIDTHS } from '../src/lib/export-format.ts'
 import { readZip, validateXlsx } from './lib/read-zip.mjs'
 import {
@@ -1369,6 +1370,67 @@ check('email and whatsapp go to different fields', (() => {
 
 check('seriesIsEmpty is true for a blank series', seriesIsEmpty(buildDailySeries({ logs: [], nudgeIds: ['x'], days: 3, since: SERIES_SINCE })), true)
 check('seriesIsEmpty is false once something is counted', seriesIsEmpty(seriesB), false)
+
+// --- per-nudge lifetime totals -------------------------------------------------
+// Shared by the onboarding and sandbox dashboards, so a mistake here shows wrong numbers on TWO
+// screens. The cap classifier is the subtle one: it is what tells "Meta throttled this template"
+// apart from "this send is broken", and an operator decides whether to keep a template based on it.
+const mkTotalLog = (nudgeId, over = {}) => ({
+  nudgeId,
+  channel: 'whatsapp',
+  sentOk: true,
+  opened: false,
+  opensCount: 0,
+  replied: false,
+  sendError: null,
+  ctaClicks: 0,
+  sentAt: new Date('2026-10-01T10:00:00Z'),
+  ...over,
+})
+
+const totalsFor = (logs) => {
+  const ids = new Map([['n1', 'k1']])
+  const seeded = new Map([['k1', emptyTotals('k1')]])
+  return accumulateTotals(logs, ids, seeded).get('k1')
+}
+
+check('totals: a fresh key starts at zero', `${emptyTotals('k').sent}/${emptyTotals('k').failed}`, '0/0')
+check('totals: a fresh key carries its own nudge key', emptyTotals('k1').nudgeKey, 'k1')
+check('totals: a delivered message counts as sent', totalsFor([mkTotalLog('n1')]).sent, 1)
+check('totals: a failed message counts as failed, not sent', (() => {
+  const t = totalsFor([mkTotalLog('n1', { sentOk: false })])
+  return `${t.sent}/${t.failed}`
+})(), '0/1')
+check('totals: an unknown nudge id is ignored, not attributed', totalsFor([mkTotalLog('other')]).sent, 0)
+check('totals: opened also accumulates opensTotal', (() => {
+  const t = totalsFor([mkTotalLog('n1', { opened: true, opensCount: 3 })])
+  return `${t.opened}/${t.opensTotal}`
+})(), '1/3')
+check('totals: replied counts once', totalsFor([mkTotalLog('n1', { replied: true })]).replied, 1)
+check('totals: any tap counts the message as clicked', totalsFor([mkTotalLog('n1', { ctaClicks: 1 })]).clicked, 1)
+check('totals: repeated taps count once as clicked', totalsFor([mkTotalLog('n1', { ctaClicks: 4 })]).clicked, 1)
+check('totals: but every tap counts in clicks', totalsFor([mkTotalLog('n1', { ctaClicks: 4 })]).clicks, 4)
+check('totals: the newest successful send wins lastSentAt', totalsFor([
+  mkTotalLog('n1', { sentAt: new Date('2026-10-01T10:00:00Z') }),
+  mkTotalLog('n1', { sentAt: new Date('2026-10-03T10:00:00Z') }),
+  mkTotalLog('n1', { sentAt: new Date('2026-10-02T10:00:00Z') }),
+]).lastSentAt, '2026-10-03T10:00:00.000Z')
+
+check('cap: a bare code counts', isCappedSendError('failed 131049'), true)
+check('cap: Meta\'s (code N) wording counts', isCappedSendError('Not delivered (code 131049)'), true)
+check('cap: the opt-out code counts too', isCappedSendError('Blocked (code 131050)'), true)
+check('cap: the engagement wording counts without a code', isCappedSendError('not delivered to maintain healthy ecosystem engagement'), true)
+check('cap: an experiment opt-out counts', isCappedSendError("User's number is part of an experiment"), true)
+// The failures an operator must NOT mistake for throttling.
+check('cap: a missing template is not a cap', isCappedSendError('template does not exist (code 132001)'), false)
+check('cap: a parameter mismatch is not a cap', isCappedSendError('number of parameters does not match (code 132000)'), false)
+check('cap: an undeliverable number is not a cap', isCappedSendError('Message undeliverable (code 131026)'), false)
+check('cap: a null error is safe', isCappedSendError(null), false)
+check('totals: only failed rows can be capped', totalsFor([mkTotalLog('n1', { sentOk: true, sendError: 'x (code 131049)' })]).capped, 0)
+check('totals: a capped failure is counted as capped AND failed', (() => {
+  const t = totalsFor([mkTotalLog('n1', { sentOk: false, sendError: 'Not delivered (code 131049)' })])
+  return `${t.capped}/${t.failed}`
+})(), '1/1')
 
 // --- the hand-rolled .xlsx writer --------------------------------------------
 // A corrupt workbook is the worst possible export bug: the user cannot tell "no data" from
