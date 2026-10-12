@@ -6,11 +6,13 @@
  *   1. runs every enabled nudge (optionally syncing leads from Zoho first), and
  *   2. polls for email replies over IMAP when IMAP_ENABLED=true.
  *
- * Each nudge is capped at NUDGE_MAX_PER_RUN messages per cycle so a cycle can never
- * run past a request timeout; the remainder is picked up on the next cycle.
+ * Each nudge is run through runNudgeDrained(), which keeps starting cap-sized batches
+ * (NUDGE_MAX_PER_RUN) until the eligible pool is exhausted or the run budget expires — so a cycle
+ * makes real progress through a large audience instead of sending 50 and waiting a quarter of an
+ * hour for the next one. Anything left when the budget runs out is picked up on the next cycle.
  */
 import { db } from '@/lib/db'
-import { runNudge, syncLeads, type RunSummary } from '@/lib/nudge-engine'
+import { runNudgeDrained, syncLeads, type RunSummary } from '@/lib/nudge-engine'
 import { beginMysqlSnapshot, endMysqlSnapshot } from '@/lib/mysql-nudges'
 import { recalculateScores, type ScoreRunResult } from '@/lib/score-leads'
 import { scoreRecalcIntervalMinutes } from '@/lib/journey'
@@ -223,7 +225,11 @@ export async function runAllEnabledNudges(opts?: { sync?: boolean; limit?: numbe
 
       try {
         // sync:false — the refresh already happened above, once for this criteria.
-        const summary = await runNudge(nudge.id, baseUrl, { sync: false, limit: limit ?? undefined })
+        //
+        // runNudgeDrained, not runNudge: a cycle should work through a large audience rather than
+        // stop at the per-run cap and wait a quarter of an hour for the next tick. The cap still
+        // bounds every batch; it just no longer bounds the whole cycle.
+        const summary = await runNudgeDrained(nudge.id, baseUrl, { sync: false, limit: limit ?? undefined })
         // Report the shared sync's count so the run summary still says what was pulled.
         if (synced && 'count' in synced) {
           summary.syncedFromZoho = synced.count

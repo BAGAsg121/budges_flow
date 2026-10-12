@@ -234,7 +234,7 @@ check('whatsapp_sample targets exactly one status', filtersOf('whatsapp_sample')
 checkTrue('whatsapp_sample asks for a phone', filtersOf('whatsapp_sample').requirePhone === true)
 check('whatsapp_sample is capped at 1 message/lead', wa.maxEmailsPerLead, 1)
 checkTrue('whatsapp_sample body renders first_name', renderTemplate(wa.bodyTemplate, { first_name: 'Asha' }).includes('Hi Asha'))
-check('whatsapp nudges: sample + legacy doc twin + 6 MySQL + 3 sheet + 1 CRM status + 7 sandbox', DEFAULT_NUDGES.filter((n) => n.channel === 'whatsapp').length, 19)
+check('whatsapp nudges: sample + legacy doc twin + 6 MySQL + 3 sheet + 1 CRM status + 8 sandbox', DEFAULT_NUDGES.filter((n) => n.channel === 'whatsapp').length, 20)
 const waDocs = byKey['documents_pending_wa']
 check('documents_pending_wa template language is en_US (not en)', waDocs.whatsappLanguage, 'en_US')
 check('documents_pending_wa supplies 3 params for its 3 variables', JSON.parse(waDocs.whatsappParams).length, countTemplateVars(waDocs.bodyTemplate))
@@ -1030,8 +1030,9 @@ const SANDBOX_KEYS = [
   'sandbox_documents_under_review',
   'sandbox_closed_won_live_credentials',
   'sandbox_placeholder_name_onboarding',
+  'sandbox_documents_resubmission',
 ]
-check('sandbox: seven nudges are defined', Object.keys(SANDBOX_WHATSAPP_NUDGES).length, 7)
+check('sandbox: eight nudges are defined', Object.keys(SANDBOX_WHATSAPP_NUDGES).length, 8)
 for (const key of SANDBOX_KEYS) {
   const n = DEFAULT_NUDGES.find((x) => x.key === key)
   const f = JSON.parse(n?.filters ?? '{}')
@@ -1077,7 +1078,7 @@ check('sandbox: docs-accepted criteria uses the exact picklist value', /\(KYC_Do
 check('sandbox: docs-accepted filter matches that value', JSON.stringify(sandboxFilters('sandbox_documents_accepted').kycUploadStatus), JSON.stringify(['Accepted']))
 check('sandbox: under-review criteria uses the exact picklist value', /\(KYC_Documents_Upload:equals:All Done\)/.test(sandboxCriteria('sandbox_documents_under_review')), true)
 check('sandbox: under-review filter matches that value', JSON.stringify(sandboxFilters('sandbox_documents_under_review').kycUploadStatus), JSON.stringify(['All Done']))
-check('sandbox: only the time-bounded criteria carry a placeholder', SANDBOX_KEYS.filter((k) => hasUnexpandedPlaceholder(sandboxCriteria(k))).sort().join(','), 'sandbox_old_website_lead,sandbox_placeholder_name_onboarding')
+check('sandbox: only the time-bounded criteria carry a placeholder', SANDBOX_KEYS.filter((k) => hasUnexpandedPlaceholder(sandboxCriteria(k))).sort().join(','), 'sandbox_documents_resubmission,sandbox_old_website_lead,sandbox_placeholder_name_onboarding')
 check('sandbox: closed-won criteria uses the real status string', /\(Lead_Status:equals:Closed Won\)/.test(sandboxCriteria('sandbox_closed_won_live_credentials')), true)
 check('sandbox: closed-won filter matches the same status', JSON.stringify(sandboxFilters('sandbox_closed_won_live_credentials').includeStatuses), JSON.stringify([LEAD_STATUS.CLOSED_WON]))
 
@@ -1115,6 +1116,36 @@ for (const spec of Object.values(SANDBOX_WHATSAPP_NUDGES)) {
   check(`sandbox: ${spec.key} declares the console button URL`, /\?mobile=\{\{1\}\}$/.test(spec.buttonUrl ?? ''), true)
   check(`sandbox: ${spec.key} button goes to the EPS console`, (spec.buttonUrl ?? '').startsWith(CONSOLE_URL), true)
 }
+
+// --- the documents-resubmission nudge ------------------------------------------
+// The rule is "KYC_Document_Reject_Count has some value other than 0 or null". Both negatives are
+// different facts — 0 is "nothing rejected", NULL is "the CRM never told us" — and BOTH must be
+// silent, so the criteria and the local filter have to agree on that as well as on the window.
+const reNudge = DEFAULT_NUDGES.find((n) => n.key === 'sandbox_documents_resubmission')
+const reFilters = JSON.parse(reNudge?.filters ?? '{}')
+const reCriteria = reNudge?.zohoCriteria ?? ''
+check('resubmission: the nudge exists', Boolean(reNudge), true)
+check('resubmission: it is tagged sandbox_whatsapp', reFilters.category, 'sandbox_whatsapp')
+check('resubmission: it ships disabled (its template is not confirmed yet)', reNudge?.enabled, false)
+check('resubmission: it is a WhatsApp nudge', reNudge?.channel, 'whatsapp')
+check('resubmission: it is scoped to EPS', reFilters.businessVertical, EPS_BUSINESS_VERTICAL)
+check('resubmission: it uses the real CRM field name', /\(KYC_Document_Reject_Count:greater_than:0\)/.test(reCriteria), true)
+check('resubmission: the window is applied in the criteria', /Created_Time:greater_than:\{\{monthsAgo:2\}\}/.test(reCriteria), true)
+check('resubmission: the local filter bounds creation to the same window', reFilters.createdWithinDays, 60)
+check('resubmission: the local filter mirrors "more than zero rejected"', reFilters.kycRejectCountPresent, true)
+// `gt: 0` in Prisma excludes NULL as well as 0, which is what makes "not told" silent rather than a
+// false positive. A `not: null` / `not_equal:null` spelling would treat 0 as a rejection and message
+// every lead in the CRM whose field merely exists.
+check('resubmission: the criteria is not an "any non-null" test', /KYC_Document_Reject_Count:not_equal:null/.test(reCriteria), false)
+// It has no button in the supplied copy, so it must NOT declare a button parameter — that mismatch is
+// 132000 on every send, the same failure the six templates hit when the seed declared `{ body: [] }`.
+const reParams = JSON.parse(reNudge?.whatsappParams ?? '{}')
+check('resubmission: no button parameter is sent', reParams.button, undefined)
+check('resubmission: the body carries the name and the rejected count', JSON.stringify(reParams.body), JSON.stringify(['first_name', 'kyc_document_reject_count']))
+check('resubmission: the copy asks for a resubmission', /resubmission/i.test(reNudge?.bodyTemplate ?? ''), true)
+// A WhatsApp template cannot declare {{3}} without {{2}} — Meta requires sequential numbering from
+// {{1}} — so the supplied "your {{3}} documents" had to become the SECOND variable.
+check('resubmission: no gap in the variable numbering', /\{\{3\}\}/.test(reNudge?.bodyTemplate ?? ''), false)
 
 // --- attribution confidence ---------------------------------------------------
 // "Which nudge was last sent" is a weak claim on its own. This score DESCRIBES how weak, so the UI

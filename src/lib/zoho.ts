@@ -266,6 +266,10 @@ export function mapZohoLead(z: ZohoLead) {
     // The other half of the "all documents submitted" rule. Both are needed: a match is only
     // meaningful when the expectation is known (see src/lib/kyc-match.ts).
     kycDocumentsExpectedCount: parseCount(z.KYC_Documents_Expected_Count),
+    // How many submitted documents were rejected. 0 and "not told" (NULL) are different facts, and
+    // the resubmission nudge fires only on `> 0` — so an unsynced lead is silent rather than assumed
+    // clean (see src/lib/nudge-engine.ts, filter `kycRejectCountPresent`).
+    kycDocumentRejectCount: parseCount(z.KYC_Document_Reject_Count),
     ekoCode: z.Eko_Code?.trim() || null,
     // A Zoho boolean arrives as a real boolean; anything else (a string "true") is coerced, and an
     // absent field stays NULL rather than becoming `false` — "not told" is not "not signed".

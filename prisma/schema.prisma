@@ -42,6 +42,13 @@ model Lead {
   // (additive ALTER only). Needed by the "all documents submitted" rule, which compares this
   // with kycDocumentUploadCount; NULL means "expectation unknown" and never counts as a match.
   kycDocumentsExpectedCount Int?
+  /**
+   * Zoho's KYC_Document_Reject_Count — how many submitted documents were rejected and need
+   * resubmitting. NULL means the CRM did not tell us; 0 means "nothing rejected". The resubmission
+   * nudge fires on `> 0` only, so both NULL and 0 are correctly silent.
+   * Added with scripts/add-kyc-reject-column.mjs (additive ALTER only).
+   */
+  kycDocumentRejectCount Int?
   ekoCode                String?
   /**
    * Zoho Sign_Agreement, a boolean. NULL means the CRM did not tell us — deliberately distinct from

@@ -141,6 +141,13 @@ export interface RunSummaryDto {
   deferred: number
   /** Per-run cap applied (null = unlimited). */
   batchLimit: number | null
+  /**
+   * True when the run walked the whole eligible pool. False means the run budget expired with work
+   * left, and the caller should call /run again to continue — the UI does this automatically.
+   */
+  complete?: boolean
+  /** How many cap-sized batches this run needed. 1 for anything under the cap. */
+  batches?: number
   skipped: RunSkippedDto[]
   smtpConfigured: boolean
   whatsappConfigured: boolean

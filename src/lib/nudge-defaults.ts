@@ -572,8 +572,14 @@ export interface SandboxNudgeSpec {
   buttonText?: string
   buttonUrl?: string
   body: string
-  /** Verified against the live CRM when this was written, for the operator's benefit. */
-  liveMatchEstimate: number
+  /**
+   * How many leads the criteria matched in the live CRM when this was written, for the operator's
+   * benefit.
+   *
+   * OPTIONAL on purpose: it is a measurement, and a nudge whose audience has not been measured yet
+   * must not invent a number. The seed only claims a count when one was actually observed.
+   */
+  liveMatchEstimate?: number
 }
 
 export const SANDBOX_WHATSAPP_NUDGES: Record<string, SandboxNudgeSpec> = {
@@ -727,6 +733,56 @@ export const SANDBOX_WHATSAPP_NUDGES: Record<string, SandboxNudgeSpec> = {
       'Hi 👋 Congratulations — your Eko partner account is now live!\n\n' +
       'Your live production credentials will be shared with you within 30 minutes.',
     liveMatchEstimate: 288,
+  },
+  sandbox_documents_resubmission: {
+    key: 'sandbox_documents_resubmission',
+    title: 'Documents rejected — resubmission needed',
+    description:
+      'EPS leads created in the last two months whose KYC_Document_Reject_Count is a real positive ' +
+      'number, i.e. one or more of the documents they submitted were rejected and need resubmitting. ' +
+      'The rule is "some value other than 0 or null": 0 means nothing was rejected and NULL means the ' +
+      'CRM never told us, and BOTH are silent. Tells the partner to resubmit from the EPS console.',
+    criteria: `((Business_vertical:equals:${EPS_BUSINESS_VERTICAL})and(KYC_Document_Reject_Count:greater_than:0)and(Created_Time:greater_than:{{monthsAgo:2}}))`,
+    // Zoho decides what is FETCHED; these decide who is MESSAGED, and they must say the same thing.
+    // `kycRejectCountPresent` compiles to `kycDocumentRejectCount > 0`, which excludes 0 and NULL —
+    // exactly the criterion above, minus the two-month window which `createdWithinDays` mirrors.
+    filters: { kycRejectCountPresent: true, createdWithinDays: 60 },
+    /**
+     * NOT YET CONFIRMED against the WABA.
+     *
+     * Every other template in this file was named from what Meta actually holds, because these
+     * templates were created by pasting the body into the Meta UI and Meta auto-generates an ugly
+     * name from the text. This one has not been looked up, so the name below is a placeholder: it
+     * MUST be checked (Templates tab, or `npm run wa:templates`) and corrected before the nudge is
+     * enabled. A wrong name is error 132001 on every single send.
+     */
+    templateName: 'documents_resubmission_required',
+    /**
+     * "Hi {{1}}, your {{2}} documents needs resubmission …"
+     *
+     * {{1}} = the lead's name, {{2}} = the number of rejected documents.
+     *
+     * NOTE ON THE SPEC: the body as supplied read "your {{3}} documents". A WhatsApp template cannot
+     * jump to {{3}} — Meta requires variables to be numbered from {{1}} with no gaps, and rejects a
+     * template whose first parameter is {{3}}. The variable was therefore taken as the SECOND one,
+     * which is what it must be. If the approved template really does declare three variables, a
+     * third source must be added here or every send fails with 132000.
+     */
+    bodyVars: ['first_name', 'kyc_document_reject_count'],
+    /**
+     * No button, deliberately — the supplied copy tells the partner to go to the EPS console and
+     * resubmit the highlighted documents; it does not carry a link. This matters: declaring a button
+     * parameter for a template that has no button is error 132000 on every send (the same class of
+     * mistake as declaring none for a template that has one).
+     *
+     * If the real template DOES have a URL button, flip this to true and give it buttonText and
+     * `${CONSOLE_URL}?mobile={{1}}` like its neighbours.
+     */
+    hasButton: false,
+    body:
+      'Hi {{1}}, your {{2}} documents needs resubmission.\n\n' +
+      'The reason could be as simple as they are not clear. Please go to the EPS console and resubmit ' +
+      'the documents highlighted there.',
   },
 }
 
@@ -1063,8 +1119,11 @@ export const DEFAULT_NUDGES: NudgeSeed[] = [
       `filters mirror it, because Zoho decides what is FETCHED and the filters decide who is MESSAGED. ` +
       `Template "${s.templateName}" has NOT been created on the WABA yet: create and approve it ` +
       `(Templates tab, or npm run wa:templates -- --create-missing) before enabling this nudge, or every ` +
-      `send fails with 132001. When this was written the criteria matched roughly ` +
-      `${s.liveMatchEstimate} lead(s) in the live CRM.`,
+      `send fails with 132001. ` +
+      (typeof s.liveMatchEstimate === 'number'
+        ? `When this was written the criteria matched roughly ${s.liveMatchEstimate} lead(s) in the live CRM.`
+        : `How many leads this criteria matches in the live CRM has NOT been measured yet — run ` +
+          `npm run readiness or Preview to see the real audience before enabling it.`),
     enabled: false,
     channel: 'whatsapp',
     zohoCriteria: s.criteria,

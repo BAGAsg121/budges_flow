@@ -91,6 +91,15 @@ export interface NudgeFilters {
   /** KYC_Documents_Upload must be one of these, e.g. ['Accepted'] or ['All Done']. */
   kycUploadStatus?: string[]
   /**
+   * `true` = the lead must have one or more REJECTED documents (KYC_Document_Reject_Count > 0).
+   *
+   * The rule as specified is "some value other than 0 or null", which is exactly what this says.
+   * The two negatives are different facts and both are silent: 0 means nothing was rejected, and
+   * NULL means the CRM never told us. Treating NULL as 0 would be wrong the other way too — a lead
+   * we have never synced must not be messaged as though we knew it had a rejection.
+   */
+  kycRejectCountPresent?: boolean
+  /**
    * The lead's full name must be EXACTLY this.
    *
    * Zoho has no `contains` operator (it rejects the criteria with `INVALID_QUERY, invalid operator
@@ -200,6 +209,9 @@ function buildWhere(filters: NudgeFilters, channel: Channel) {
   if (filters.kycUploadStatus?.length) {
     where.kycDocumentsUploadStatus = { in: filters.kycUploadStatus }
   }
+  // "One or more documents were rejected." `gt: 0` excludes BOTH 0 and NULL, which is the entire
+  // rule: 0 is "nothing rejected", NULL is "the CRM never told us", and neither is a resubmission.
+  if (filters.kycRejectCountPresent === true) and.push({ kycDocumentRejectCount: { gt: 0 } })
   // Exact match, mirroring Zoho's `equals`. A substring match here would nudge leads whose name
   // merely CONTAINS the placeholder ("FIRST NAME SANJAY"), which is a different cohort.
   if (filters.fullNameEquals) where.fullName = filters.fullNameEquals
@@ -489,6 +501,7 @@ function buildLeadVars(lead: {
   leadStatus: string | null
   kycDocumentUploadCount: number | null
   kycDocumentsExpectedCount: number | null
+  kycDocumentRejectCount: number | null
   ekoCode: string | null
   businessVertical: string | null
   city: string | null
@@ -504,6 +517,10 @@ function buildLeadVars(lead: {
     lead_status: lead.leadStatus,
     kyc_document_upload_count: lead.kycDocumentUploadCount,
     kyc_documents_expected_count: lead.kycDocumentsExpectedCount,
+    // Needed by the resubmission template, which counts the rejected documents in its body
+    // ("your {{2}} documents needs resubmission"). A null would render as the fallback "-", so the
+    // nudge refuses to select a lead with no reject count in the first place.
+    kyc_document_reject_count: lead.kycDocumentRejectCount,
     // Needed by the sandbox sign-agreement template, which names the code in its body ("your Eko
     // Code {{2}} is ready"). Without it the parameter falls back to "-" and the message tells the
     // customer their code is a dash.
@@ -981,6 +998,100 @@ export async function runNudge(
 
   await db.nudge.update({ where: { id: nudge.id }, data: { lastRunAt: new Date() } })
   return summary
+}
+
+/* ─────────────────────────── draining a whole run ─────────────────────────── */
+
+/**
+ * How long one drained run may keep starting new batches, in milliseconds.
+ *
+ * A batch of NUDGE_MAX_PER_RUN WhatsApp sends already takes ~2.5 minutes at ~3s a send, so this is
+ * a budget for STARTING another batch, not a hard stop in the middle of one.
+ */
+function drainBudgetMs(): number {
+  const raw = Number(process.env.RUN_BUDGET_SECONDS || 0)
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) * 1000 : 150_000
+}
+
+/** How many skip entries a drained summary keeps. A 4,000-lead run would otherwise return 4,000 rows. */
+const DRAIN_SKIPPED_CAP = 200
+
+/**
+ * Run a nudge repeatedly until its whole eligible pool has been attempted.
+ *
+ * WHY THIS EXISTS: `runNudge()` deliberately sends at most NUDGE_MAX_PER_RUN messages, so a single
+ * request can never run past a proxy timeout. The side effect is that running a 260-lead nudge by
+ * hand sent 50 and stopped — which reads as "the nudge only messages a handful of people" to
+ * whoever clicked it, and looks like a sending cap on Meta's side. It is not: it is ours.
+ *
+ * This is a LOOP AROUND runNudge, not a change to it. Every batch still obeys the cap, so no single
+ * send loop is unbounded and the per-request safety property is untouched — the batching simply no
+ * longer decides when the work stops.
+ *
+ * Repeated batches terminate because progress is monotonic: a lead messaged in batch 1 has a log
+ * row, so `decideSend()` skips it in batch 2 without consuming that batch's cap, and the next
+ * un-messaged leads move up. The run therefore walks the list in cap-sized steps.
+ *
+ * Three stopping conditions, all deliberate:
+ *   • nothing left deferred — the job is finished;
+ *   • a batch attempted nothing (sent + failed === 0) — everything remaining is genuinely
+ *     unsendable (no valid phone, sequence limit reached), so looping again would spin forever;
+ *   • the wall-clock budget expired — the caller's deadline is respected, and the caller resumes
+ *     with another call. The UI does this automatically; the scheduler does it next cycle.
+ */
+export async function runNudgeDrained(
+  nudgeId: string,
+  baseUrl: string,
+  opts: { sync: boolean; force?: boolean; limit?: number; budgetMs?: number }
+): Promise<RunSummary & { complete: boolean; batches: number }> {
+  const budgetMs = opts.budgetMs ?? drainBudgetMs()
+  const startedAt = Date.now()
+
+  let merged: RunSummary | null = null
+  let batches = 0
+  let complete = false
+
+  for (;;) {
+    const summary = await runNudge(nudgeId, baseUrl, {
+      // Only the FIRST batch syncs. Re-syncing per batch would re-pull the same CRM window — by far
+      // the most expensive part of a run — for data the next batch cannot need.
+      sync: batches === 0 ? opts.sync : false,
+      force: opts.force,
+      limit: opts.limit,
+    })
+    batches++
+
+    if (!merged) {
+      merged = summary
+    } else {
+      merged.sent += summary.sent
+      merged.failed += summary.failed
+      merged.leadsConsidered = Math.max(merged.leadsConsidered, summary.leadsConsidered)
+      // The latest batch's number is the true remainder.
+      merged.deferred = summary.deferred
+      // Keep the LATEST batch's skips. On the final batch these are the real leftovers (no phone,
+      // sequence limit, duplicate contact); earlier batches were mostly "batch_limit", which is no
+      // longer true once the drain has moved past them. Capped, because one summary crossing the
+      // wire with 4,000 rows helps nobody.
+      merged.skipped = summary.skipped.slice(0, DRAIN_SKIPPED_CAP)
+      if (summary.syncedFromZoho !== null && summary.syncedFromZoho !== undefined) {
+        merged.syncedFromZoho = summary.syncedFromZoho
+        merged.syncedVia = summary.syncedVia
+      }
+    }
+
+    // NOTE: `deferred > 0` implies this batch filled its cap, so `sent + failed > 0` is guaranteed
+    // whenever there is more to do — the no-progress check below is belt-and-braces, not the
+    // primary termination condition.
+    if (summary.deferred === 0) {
+      complete = true
+      break
+    }
+    if (summary.sent + summary.failed === 0) break
+    if (Date.now() - startedAt >= budgetMs) break
+  }
+
+  return { ...(merged as RunSummary), complete, batches }
 }
 
 /** Preview who would be considered + what would happen, without sending. */

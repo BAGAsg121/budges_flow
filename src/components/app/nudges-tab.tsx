@@ -292,19 +292,53 @@ export function NudgesTab({
   const run = async (n: NudgeDto) => {
     setRunning(n.id)
     try {
-      const res = await fetch(`/api/nudges/${n.id}/run`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        // force is sent ONLY for a nudge that is off. The API refuses to imply it, so a disabled
-        // nudge can only ever send because the operator confirmed it here.
-        body: JSON.stringify({ sync: runWithSync, force: !n.enabled }),
-      })
-      const data = (await res.json()) as { ok: boolean; summary?: RunSummaryDto; error?: string }
-      if (!data.ok || !data.summary) {
-        toast({ title: 'Run failed', description: data.error, variant: 'destructive' })
-        return
+      // The server drains its own batches and reports `complete: false` when its time budget ran out
+      // with leads still to message. We keep calling until it is finished, so ONE click walks the
+      // whole audience — previously the run stopped at the per-run cap and looked like a sending
+      // limit that did not exist.
+      //
+      // The cap is still real: it bounds each batch. What changed is that it no longer decides when
+      // the run ends. `sync` is only honoured on the first call (the server ignores it afterwards),
+      // so the expensive CRM refresh happens exactly once.
+      const MAX_CONTINUATIONS = 200
+      let merged: RunSummaryDto | null = null
+
+      for (let attempt = 0; attempt < MAX_CONTINUATIONS; attempt++) {
+        const res = await fetch(`/api/nudges/${n.id}/run`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          // force is sent ONLY for a nudge that is off. The API refuses to imply it, so a disabled
+          // nudge can only ever send because the operator confirmed it here.
+          body: JSON.stringify({ sync: runWithSync, force: !n.enabled }),
+        })
+        const data = (await res.json()) as { ok: boolean; summary?: RunSummaryDto; error?: string }
+        if (!data.ok || !data.summary) {
+          toast({ title: 'Run failed', description: data.error, variant: 'destructive' })
+          // Show whatever the earlier batches achieved rather than pretending nothing happened.
+          if (merged) setRunResult(merged)
+          return
+        }
+
+        const batch = data.summary
+        merged = merged
+          ? {
+              ...batch,
+              sent: merged.sent + batch.sent,
+              failed: merged.failed + batch.failed,
+              batches: (merged.batches ?? 1) + (batch.batches ?? 1),
+              // Keep the FIRST batch's sync figures — the refresh only happened there.
+              syncedFromZoho: merged.syncedFromZoho,
+              syncedVia: merged.syncedVia,
+            }
+          : batch
+
+        // Live progress: on a long drain the operator sees the count climb instead of a frozen dialog.
+        setRunResult(merged)
+
+        if (batch.complete !== false) break
+        if (batch.sent + batch.failed === 0) break
       }
-      setRunResult(data.summary)
+
       load()
       onChanged()
     } finally {
@@ -757,9 +791,9 @@ export function NudgesTab({
               {runTarget?.channel === 'whatsapp'
                 ? 'This will send WhatsApp template messages (Meta Cloud API) to every eligible lead that hasn\'t hit the sequence limit.'
                 : 'This will send emails to every eligible lead that hasn\'t hit the sequence limit.'}{' '}
-              Max {runTarget?.maxEmailsPerLead} message(s) per lead, {runTarget?.followUpDays} day(s) between follow-ups.
-              A per-run cap (NUDGE_MAX_PER_RUN) protects the request from timing out — leftover leads resume on the next
-              scheduled run.
+              Max {runTarget?.maxEmailsPerLead} message(s) per lead, {runTarget?.followUpDays} day(s) between follow-ups.{' '}
+              The run continues on its own until every eligible lead has been attempted, in batches of
+              NUDGE_MAX_PER_RUN — you do not need to click again.
             </AlertDialogDescription>
           </AlertDialogHeader>
 
@@ -814,8 +848,13 @@ export function NudgesTab({
               {runResult?.failed ? <span className="text-destructive">{runResult.failed} failed</span> : '0 failed'}
               {runResult?.deferred ? (
                 <span className="block mt-1 text-warning">
-                  {runResult.deferred} lead(s) deferred — the per-run cap is {runResult.batchLimit}. They are picked up on
-                  the next scheduled run, or run again now.
+                  {runResult.deferred} lead(s) still to go — the run budget ran out. Click Run again to
+                  continue from where it stopped; nothing is sent twice.
+                </span>
+              ) : null}
+              {runResult?.batches && runResult.batches > 1 ? (
+                <span className="block mt-1 text-muted-foreground">
+                  Sent in {runResult.batches} batch(es) of up to {runResult.batchLimit}.
                 </span>
               ) : null}
               {runResult?.channel === 'email' && !runResult?.smtpConfigured && (

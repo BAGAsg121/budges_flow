@@ -59,6 +59,7 @@ npm start                   # node .next/standalone/server.js  (PORT env, defaul
 | `npm run logs:export:demo` | Write a workbook of invented rows, to confirm Excel opens the format |
 | `npm run db:add-cta-columns` | Add the WhatsApp CTA click columns (dry run; `--apply` to write) |
 | `npm run db:add-kyc-expected-column` | Add `kycDocumentsExpectedCount` to `nudge_lead` (dry run; `--apply` to write) |
+| `npm run db:add-kyc-reject-column` | Add `kycDocumentRejectCount` to `nudge_lead` (dry run; `--apply` to write) |
 | `npm run wa:repoint` | Repoint the sheet WhatsApp nudges at their UTILITY templates (dry run) |
 | `npm run wa:analytics` | **Button clicks from Meta** — per template, per day (no template change needed) |
 | `npm run capi:check` | Meta Conversions API config + the exact payload it would send |
@@ -182,7 +183,7 @@ one conversion is "100%" and means nothing. Stage changes with no qualifying nud
 
 ### Sandbox WhatsApp nudges
 
-Six CRM-driven WhatsApp nudges, tagged `category: "sandbox_whatsapp"` and grouped by the **Sandbox
+Eight CRM-driven WhatsApp nudges, tagged `category: "sandbox_whatsapp"` and grouped by the **Sandbox
 WhatsApp** filter on the Nudges tab. They read the CRM through the Zoho **MCP** server like any other
 Zoho nudge: Run (or the scheduler) syncs the criteria, then the local filters decide who is messaged.
 
@@ -195,6 +196,7 @@ Zoho nudge: Run (or the scheduler) syncs the criteria, then the local filters de
 | `sandbox_documents_under_review` | EPS, `KYC_Documents_Upload` = `All Done` | 8 |
 | `sandbox_closed_won_live_credentials` | EPS, `Lead_Status` = `Closed Won` | 288 |
 | `sandbox_placeholder_name_onboarding` | EPS, `Full_Name` = `FIRST NAME LAST NAME`, created < 2 months | 260 |
+| `sandbox_documents_resubmission` | EPS, `KYC_Document_Reject_Count` > 0, created < 2 months | not yet measured |
 
 > **This cohort is only reachable through `Phone`.** Every one of those 260 leads has an empty
 > `Mobile` and a populated `Phone` — as do all 440 of the wider placeholder pattern. The send path
@@ -206,6 +208,42 @@ Zoho nudge: Run (or the scheduler) syncs the criteria, then the local filters de
 > the name. It greets nobody by name instead. It also shows why `Full_Name:equals` is used rather than
 > a substring: Zoho has no `contains` operator (it answers `INVALID_QUERY, invalid operator found`),
 > and a substring match would reach 366 leads rather than 260.
+
+#### `sandbox_documents_resubmission` — the "0 or null" rule
+
+Fires when `KYC_Document_Reject_Count` holds **some value other than 0 or null**, i.e. one or more of
+the documents the partner submitted were rejected and need resubmitting.
+
+The two negatives are different facts and **both are silent**, which is the whole point of the rule:
+
+| Value | Meaning | Nudged? |
+| --- | --- | --- |
+| `NULL` | the CRM never told us | no |
+| `0` | nothing was rejected | no |
+| `1+` | one or more need resubmitting | **yes** |
+
+`NULL` must not be treated as `0` *or* as a rejection. It compiles to
+`kycDocumentRejectCount: { gt: 0 }`, which excludes both — a `not: null` spelling would have messaged
+every lead whose field merely exists, and `gte: 0` would have messaged literally everyone.
+
+> **It ships disabled and its template is unconfirmed.** The template name in
+> `SANDBOX_WHATSAPP_NUDGES` is a placeholder: these templates are created by pasting the body into the
+> Meta UI, and Meta auto-generates an unreadable name from the text. Check the real name (Templates
+> tab, or `npm run wa:templates`) and correct it before enabling, or every send fails with **132001**.
+>
+> **The supplied body's `{{3}}` became `{{2}}`.** A WhatsApp template cannot jump to `{{3}}` — Meta
+> requires variables numbered from `{{1}}` with no gaps. So `{{1}}` = the lead's name and `{{2}}` = the
+> rejected-document count. If the approved template really does declare three variables, a third
+> source must be added to `bodyVars` or every send fails with **132000**.
+>
+> **It has no button**, unlike its neighbours: the copy tells the partner to go to the EPS console
+> rather than linking there. Declaring a button parameter for a button-less template is 132000 on every
+> send — the same class of mistake, in the opposite direction.
+
+> **The column starts empty.** `kycDocumentRejectCount` is populated by the sync, so the nudge shows
+> "0 would send" until its criteria has been fetched once. That is the designed behaviour, not a
+> failure to match: the migration backfills nothing, and a lead we have never synced must not be
+> messaged as though we knew it had a rejection.
 
 *(Control: all EPS leads at the time of writing — 13,637. These audiences are large; each nudge is
 once-per-lead, but enabling one is a real send to hundreds or thousands of people.)*
@@ -1642,8 +1680,23 @@ Two options; both call the same code path:
    curl -X POST http://localhost:3000/api/cron/run -H "x-cron-secret: $CRON_SECRET"
    ```
 
-Each nudge sends at most `NUDGE_MAX_PER_RUN` messages per cycle, so a cycle can never run past a
-request timeout; leftover leads are deferred to the next cycle (shown as `deferred` in the UI).
+Each nudge runs in **batches** of at most `NUDGE_MAX_PER_RUN` messages. The batch size is what keeps
+any single send loop inside the request timeout — it is **not** how many messages a run sends.
+
+A run keeps starting new batches until the eligible pool is exhausted, so one click on a 260-lead
+nudge finishes the list instead of stopping at 50. Progress is monotonic, which is what makes the
+repeat safe: a lead messaged in batch 1 has a log row, so `decideSend()` skips it in batch 2 without
+consuming that batch's allowance, and the next un-messaged leads move up.
+
+`RUN_BUDGET_SECONDS` (default 150) bounds how long one request may keep *starting* batches. When it
+runs out the response carries `complete: false` and whatever is left:
+
+- the **UI** calls `/run` again automatically, so the operator does not have to;
+- the **scheduler** picks it up on the next cycle.
+
+Anything still counted as `deferred` when no budget remains means the run is genuinely unfinished, not
+that a cap was hit — the UI says so, and clicking Run again resumes from exactly where it stopped
+without re-sending to anyone.
 
 ### Running a nudge that is switched OFF (one-off "Fetch & Send")
 
