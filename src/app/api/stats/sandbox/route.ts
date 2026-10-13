@@ -76,7 +76,16 @@ export async function GET(req: Request) {
     nudgeIds.length
       ? db.messageLog.findMany({
           where: { nudgeId: { in: nudgeIds }, createdAt: { gte: since } },
-          select: { nudgeId: true, channel: true, sentOk: true, opened: true, createdAt: true, sentAt: true },
+          // ctaClicks is needed for the daily series, which plots clicks beside sent/read/failed.
+          select: {
+            nudgeId: true,
+            channel: true,
+            sentOk: true,
+            opened: true,
+            ctaClicks: true,
+            createdAt: true,
+            sentAt: true,
+          },
         })
       : Promise.resolve([]),
   ])

@@ -39,7 +39,7 @@ import { isRetryableWhatsAppError } from '../src/lib/whatsapp-errors.ts'
 import { buildSheetVars, normaliseMobileDigits, pickSheetEmail, pickSheetMobile, planSheetSends } from '../src/lib/sheet-vars.ts'
 import { buildDailySeries, seriesIsEmpty, istDayKey } from '../src/lib/engagement-stats.ts'
 import { nudgeSourceOf, capAppliesTo, isManualSheetNudge, runGuard, nudgeCategoryOf, NUDGE_CATEGORY_LABEL } from '../src/lib/nudge-kind.ts'
-import { expandZohoCriteria, hasUnexpandedPlaceholder, SANDBOX_WHATSAPP_NUDGES, KYC_UPLOAD_STATUS_VALUES } from '../src/lib/nudge-defaults.ts'
+import { expandZohoCriteria, hasUnexpandedPlaceholder, SANDBOX_WHATSAPP_NUDGES, KYC_UPLOAD_STATUS_VALUES, sandboxTrackedName } from '../src/lib/nudge-defaults.ts'
 import { buildXlsx, buildZip, crc32, columnLetter, sanitiseSheetName } from '../src/lib/xlsx.ts'
 import { accumulateTotals, emptyTotals, isCappedSendError } from '../src/lib/nudge-totals.ts'
 import { istDay, istDateTime, istRangeToUtc, istDaysAgo, toCsv, exportStatus, logToExportRow, buildBreakdown, EXPORT_COLUMNS, EXPORT_WIDTHS } from '../src/lib/export-format.ts'
@@ -1069,7 +1069,7 @@ for (const key of SANDBOX_KEYS) {
   check(`sandbox: ${key} exists`, Boolean(n), true)
   check(`sandbox: ${key} is tagged sandbox_whatsapp`, f.category, 'sandbox_whatsapp')
   check(`sandbox: ${key} is a WhatsApp nudge`, n?.channel, 'whatsapp')
-  check(`sandbox: ${key} ships DISABLED (its template does not exist yet)`, n?.enabled, false)
+  check(`sandbox: ${key} ships DISABLED (its template may still be in Meta review)`, n?.enabled, false)
   check(`sandbox: ${key} is scoped to EPS`, f.businessVertical, EPS_BUSINESS_VERTICAL)
   check(`sandbox: ${key} requires a phone`, f.requirePhone, true)
   check(`sandbox: ${key} has a criteria to fetch with`, Boolean(n?.zohoCriteria), true)
@@ -1077,7 +1077,15 @@ for (const key of SANDBOX_KEYS) {
   // What must never happen is one SURVIVING expansion, because Zoho would then be sent the literal
   // text and match nothing.
   check(`sandbox: ${key} expands cleanly`, hasUnexpandedPlaceholder(expandZohoCriteria(n?.zohoCriteria ?? '', now)), false)
-  check(`sandbox: ${key} names its real approved template`, n?.whatsappTemplateName, SANDBOX_WHATSAPP_NUDGES[key].templateName)
+  // The template the nudge actually sends on. Every sandbox nudge sends on its tracked `_cta` twin,
+  // so the expected value is derived the same way the seed derives it rather than compared to the raw
+  // spec — an opt-out (`trackClicks: false`) is the only case that keeps the bare name.
+  const templateSpec = SANDBOX_WHATSAPP_NUDGES[key]
+  check(
+    `sandbox: ${key} names the template it really sends on`,
+    n?.whatsappTemplateName,
+    templateSpec.trackClicks === false ? templateSpec.templateName : sandboxTrackedName(templateSpec),
+  )
   // THE ASSERTION THAT WOULD HAVE CAUGHT THE 132000 FAILURES. Every one of these templates declares
   // at least one {{1}} body variable and a URL button with its own {{1}}, so the nudge must supply
   // exactly that many parameters of each kind. The seed originally declared `{ body: [] }`, which
@@ -1087,6 +1095,8 @@ for (const key of SANDBOX_KEYS) {
   check(`sandbox: ${key} supplies one body param per template variable`, wa.body?.length ?? 0, spec.bodyVars.length)
   check(`sandbox: ${key} declares the right body sources`, JSON.stringify(wa.body), JSON.stringify(spec.bodyVars))
   check(`sandbox: ${key} supplies the button param its URL button needs`, JSON.stringify(wa.button), spec.hasButton ? JSON.stringify(['mobile_digits']) : undefined)
+  // (The "which template does it really send on" check is asserted earlier, derived the same way the
+  // seed derives it — one assertion for that invariant, not two that can disagree.)
   check(`sandbox: ${key} is once per lead`, `${n?.maxEmailsPerLead}/${n?.followUpDays}`, '1/0')
   check(`sandbox: ${key} carries its template copy for later creation`, (n?.bodyTemplate ?? '').length > 40, true)
 }
@@ -1156,7 +1166,7 @@ const reFilters = JSON.parse(reNudge?.filters ?? '{}')
 const reCriteria = reNudge?.zohoCriteria ?? ''
 check('resubmission: the nudge exists', Boolean(reNudge), true)
 check('resubmission: it is tagged sandbox_whatsapp', reFilters.category, 'sandbox_whatsapp')
-check('resubmission: it ships disabled (its template is not confirmed yet)', reNudge?.enabled, false)
+check('resubmission: it ships disabled (its template is in Meta review)', reNudge?.enabled, false)
 check('resubmission: it is a WhatsApp nudge', reNudge?.channel, 'whatsapp')
 check('resubmission: it is scoped to EPS', reFilters.businessVertical, EPS_BUSINESS_VERTICAL)
 check('resubmission: it uses the real CRM field name', /\(KYC_Document_Reject_Count:greater_than:0\)/.test(reCriteria), true)
@@ -1167,15 +1177,66 @@ check('resubmission: the local filter mirrors "more than zero rejected"', reFilt
 // false positive. A `not: null` / `not_equal:null` spelling would treat 0 as a rejection and message
 // every lead in the CRM whose field merely exists.
 check('resubmission: the criteria is not an "any non-null" test', /KYC_Document_Reject_Count:not_equal:null/.test(reCriteria), false)
-// It has no button in the supplied copy, so it must NOT declare a button parameter — that mismatch is
-// 132000 on every send, the same failure the six templates hit when the seed declared `{ body: [] }`.
+// It is created WITH a URL button — the copy sends the partner to the console to resubmit — so it
+// must declare exactly one button parameter. Declaring none for a template that has one is 132000 on
+// every send, the same failure the six templates hit when the seed declared `{ body: [] }`.
 const reParams = JSON.parse(reNudge?.whatsappParams ?? '{}')
-check('resubmission: no button parameter is sent', reParams.button, undefined)
+check('resubmission: it sends the button parameter its CTA needs', JSON.stringify(reParams.button), JSON.stringify(['mobile_digits']))
 check('resubmission: the body carries the name and the rejected count', JSON.stringify(reParams.body), JSON.stringify(['first_name', 'kyc_document_reject_count']))
 check('resubmission: the copy asks for a resubmission', /resubmission/i.test(reNudge?.bodyTemplate ?? ''), true)
 // A WhatsApp template cannot declare {{3}} without {{2}} — Meta requires sequential numbering from
 // {{1}} — so the supplied "your {{3}} documents" had to become the SECOND variable.
 check('resubmission: no gap in the variable numbering', /\{\{3\}\}/.test(reNudge?.bodyTemplate ?? ''), false)
+
+// --- click tracking on the resubmission nudge ---------------------------------
+// Taps are only attributable if BOTH halves agree: the nudge must send on the `_cta` twin, and the
+// template registry must still resolve that twin back to the real console destination (the tracker
+// needs a destination to redirect to). Getting the second half wrong sends every click to the
+// fallback page.
+check('resubmission: it is click-tracked by default', SANDBOX_WHATSAPP_NUDGES.sandbox_documents_resubmission.trackClicks, undefined)
+check('resubmission: it sends on the tracked twin', isTrackedTemplate(reNudge?.whatsappTemplateName ?? ''), true)
+check('resubmission: the tracked name is the base plus _cta', reNudge?.whatsappTemplateName, 'documents_resubmission_required_cta')
+check('resubmission: the twin still resolves to the console', whatsappButtonUrlFor(reNudge?.whatsappTemplateName ?? ''), `${CONSOLE_URL}?mobile={{1}}`)
+check('resubmission: the base resolves to the console too', whatsappButtonUrlFor('documents_resubmission_required'), `${CONSOLE_URL}?mobile={{1}}`)
+check('resubmission: it declares a button label to create the template with', SANDBOX_WHATSAPP_NUDGES.sandbox_documents_resubmission.buttonText, 'Resubmit Now')
+
+// --- click tracking across EVERY sandbox nudge ---------------------------------
+// The rule is "tracked unless a spec explicitly opts out", and it has to hold for all eight at once:
+// the button URL lives inside the approved template, so a nudge that is tracked in code but whose
+// template was built without the tracker URL would send a token to a button expecting the mobile.
+check(
+  'sandbox: every nudge is click-tracked',
+  Object.values(SANDBOX_WHATSAPP_NUDGES).filter((s) => s.trackClicks !== false).length,
+  SANDBOX_KEYS.length,
+)
+check('sandbox: none has opted out', Object.values(SANDBOX_WHATSAPP_NUDGES).filter((s) => s.trackClicks === false).length, 0)
+check(
+  'sandbox: every tracked nudge sends on a _cta name',
+  SANDBOX_KEYS.every((k) => isTrackedTemplate(DEFAULT_NUDGES.find((n) => n.key === k)?.whatsappTemplateName ?? '')),
+  true,
+)
+check(
+  'sandbox: every twin resolves back to the console',
+  SANDBOX_KEYS.every(
+    (k) => whatsappButtonUrlFor(DEFAULT_NUDGES.find((n) => n.key === k)?.whatsappTemplateName ?? '') === `${CONSOLE_URL}?mobile={{1}}`,
+  ),
+  true,
+)
+// An alias exists only because Meta locks deleted names. It must still be a `_cta` name (that suffix
+// is what tells the send path to pass a message token) and it must still be unique — two nudges
+// sharing one twin would silently cross-attribute their clicks.
+const trackedNames = SANDBOX_KEYS.map((k) => DEFAULT_NUDGES.find((n) => n.key === k)?.whatsappTemplateName ?? '')
+check('sandbox: every tracked name uses the _cta suffix', trackedNames.every((n) => !n || n.endsWith('_cta')), true)
+check('sandbox: no two nudges share a tracked template', new Set(trackedNames).size, trackedNames.length)
+// The alias must not have broken the base lookup the tracker depends on: `baseTemplateName` strips
+// `_cta`, which for an alias yields a name that is NOT the real base — so resolution has to go
+// through the spec, and this pins that it does.
+check(
+  'sandbox: an aliased twin still resolves its destination',
+  whatsappButtonUrlFor('email_missing_v2_cta'),
+  `${CONSOLE_URL}?mobile={{1}}`,
+)
+check('sandbox: an aliased twin is still recognised as tracked', isTrackedTemplate('email_missing_v2_cta'), true)
 
 // --- attribution confidence ---------------------------------------------------
 // "Which nudge was last sent" is a weak claim on its own. This score DESCRIBES how weak, so the UI
@@ -1375,6 +1436,32 @@ const noLogs = buildDailySeries({ logs: mixedLogs, nudgeIds: ['nothing-here'], d
 check('a family with no logs still gets one bucket per day', noLogs.length, 4)
 check('those buckets are all zero', sum(noLogs, 'waSent') + sum(noLogs, 'waFailed'), 0)
 check('empty days are zero, not missing', dayOf(seriesA, '2026-09-20').waSent, 0)
+
+// --- clicks on the daily series -------------------------------------------------
+// The dashboard plots clicks beside sent/read/failed, so a bucketing mistake here shows a wrong
+// engagement curve rather than an obviously broken number.
+const clickLogs = [
+  // `sentAt` must be set explicitly: bucketing uses it in preference to createdAt, and mkLog's
+  // default is a different day — which silently bins the click on the wrong date.
+  mkLog('famA-wa', { ctaClicks: 1, sentAt: new Date('2026-09-21T06:00:00Z'), createdAt: new Date('2026-09-21T06:00:00Z') }),
+  // Tapped four times: ONE engaged recipient, so one click — matching the "Clicked" tile.
+  mkLog('famA-wa', { ctaClicks: 4, sentAt: new Date('2026-09-21T07:00:00Z'), createdAt: new Date('2026-09-21T07:00:00Z') }),
+  // Never tapped.
+  mkLog('famA-wa', { ctaClicks: 0, sentAt: new Date('2026-09-21T08:00:00Z'), createdAt: new Date('2026-09-21T08:00:00Z') }),
+  // A tap on a row that also carries a failure. Counted anyway: a tap is positive evidence someone
+  // engaged, and the tracker only ever records one after resolving the message — so this stays
+  // consistent with the "Clicked" tile, which also counts it.
+  mkLog('famA-wa', { ctaClicks: 2, sentOk: false, sentAt: null, createdAt: new Date('2026-09-22T06:00:00Z') }),
+  // Another nudge's click must not leak in.
+  mkLog('famB-wa', { ctaClicks: 9, sentAt: new Date('2026-09-21T09:00:00Z'), createdAt: new Date('2026-09-21T09:00:00Z') }),
+]
+const clickSeries = buildDailySeries({ logs: clickLogs, nudgeIds: ['famA-wa'], days: 4, since: SERIES_SINCE })
+check('clicks: repeated taps count the message once', dayOf(clickSeries, '2026-09-21').waClicked, 2)
+check('clicks: a tap on a failed row still counts as engagement', dayOf(clickSeries, '2026-09-22').waClicked, 1)
+check('clicks: a neighbouring nudge does not leak in', sum(clickSeries, 'waClicked'), 3)
+check('clicks: a series with only clicks is not "empty"', seriesIsEmpty(clickSeries), false)
+check('clicks: an untapped day is zero, not missing', dayOf(clickSeries, '2026-09-20').waClicked, 0)
+check('clicks: a log with no ctaClicks field counts as zero', dayOf(seriesA, '2026-09-23').waClicked, 0)
 
 // A log at 20:00Z is 01:30 IST the NEXT day, so it must bucket on the IST date.
 const istLog = [mkLog('famA-wa', { sentAt: new Date('2026-09-22T20:00:00Z'), createdAt: new Date('2026-09-22T20:00:00Z') })]
@@ -1972,7 +2059,8 @@ const waNudges = DEFAULT_NUDGES.filter((n) => n.channel === 'whatsapp' && n.what
 const shouldTrack = waNudges.filter((n) => templateHasButton(n.whatsappTemplateName))
 check('every button template is tracked', shouldTrack.every((n) => isTrackedTemplate(n.whatsappTemplateName)), true)
 check('templates without a button stay untracked', waNudges.filter((n) => !templateHasButton(n.whatsappTemplateName)).every((n) => !isTrackedTemplate(n.whatsappTemplateName)), true)
-check('9 templates are tracked', shouldTrack.length, 9)
+// 9 pre-existing (6 console flows + 2 pay + the review nudge) + all 8 sandbox nudges.
+check('17 templates are tracked', shouldTrack.length, 17)
 // The retired MARKETING templates must not be resurrected by this change.
 check(
   'no nudge points at a retired MARKETING template',

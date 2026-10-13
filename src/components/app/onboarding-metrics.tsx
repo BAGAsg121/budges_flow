@@ -64,6 +64,7 @@ interface Payload {
 const chartConfig = {
   sent: { label: 'Sent', color: 'var(--chart-1)' },
   opened: { label: 'Opened', color: 'var(--chart-2)' },
+  clicked: { label: 'Clicked', color: 'var(--chart-3)' },
   failed: { label: 'Failed', color: 'var(--chart-4)' },
 } satisfies ChartConfig
 
@@ -81,7 +82,7 @@ function HistoryChart({ family, series }: { family: Family; series: DayBucket[] 
     () =>
       series.map((d) => {
         const label = new Date(`${d.date}T12:00:00Z`).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
-        return { day: label, sent: d.waSent, opened: d.waOpened, failed: d.waFailed }
+        return { day: label, sent: d.waSent, opened: d.waOpened, clicked: d.waClicked, failed: d.waFailed }
       }),
     [series]
   )
@@ -102,7 +103,7 @@ function HistoryChart({ family, series }: { family: Family; series: DayBucket[] 
               {family.label}
             </h4>
             <p className="field-hint mt-0.5">
-              WhatsApp · last {series.length} day(s) · opened = read receipt
+              WhatsApp · last {series.length} day(s) · opened = read receipt, clicked = button tap
             </p>
             <p className="mono mt-0.5 text-[11px] text-muted-foreground">{sourceKey}</p>
           </div>
@@ -121,6 +122,7 @@ function HistoryChart({ family, series }: { family: Family; series: DayBucket[] 
               <ChartTooltip content={<ChartTooltipContent />} />
               <Bar dataKey="sent" fill="var(--color-sent)" radius={[3, 3, 0, 0]} maxBarSize={22} />
               <Bar dataKey="opened" fill="var(--color-opened)" radius={[3, 3, 0, 0]} maxBarSize={22} />
+              <Bar dataKey="clicked" fill="var(--color-clicked)" radius={[3, 3, 0, 0]} maxBarSize={22} />
               <Bar dataKey="failed" fill="var(--color-failed)" radius={[3, 3, 0, 0]} maxBarSize={22} />
             </BarChart>
           </ChartContainer>

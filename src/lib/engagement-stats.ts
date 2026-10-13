@@ -16,6 +16,18 @@ export interface DayBucket {
   waSent: number
   waOpened: number
   waFailed: number
+  /**
+   * WhatsApp messages whose button was tapped at least once that day.
+   *
+   * WhatsApp-only because a tap is the only click we can observe at all: it comes from our own
+   * tracker, which only exists for a template whose button URL routes through it (see src/lib/cta.ts).
+   * Email has no equivalent column, so there is no `emailClicked` — a field that could only ever be 0
+   * is worse than no field.
+   *
+   * Counts MESSAGES, not taps, so it lines up with the "Clicked" tile and with the score, both of
+   * which ask "how many people engaged", not "how many times did they press it".
+   */
+  waClicked: number
 }
 
 /** The minimum a log row must expose to be bucketed. */
@@ -26,6 +38,8 @@ export interface BucketableLog {
   opened: boolean
   sentAt: Date | null
   createdAt: Date
+  /** Taps recorded on this message. Absent on an email row, which has no button. */
+  ctaClicks?: number | null
 }
 
 /** The CRM's timezone — a "day" must match the day the operator works in, not UTC. */
@@ -37,7 +51,7 @@ export function istDayKey(d: Date): string {
 }
 
 export function emptyBucket(date: string): DayBucket {
-  return { date, emailSent: 0, emailOpened: 0, emailFailed: 0, waSent: 0, waOpened: 0, waFailed: 0 }
+  return { date, emailSent: 0, emailOpened: 0, emailFailed: 0, waSent: 0, waOpened: 0, waFailed: 0, waClicked: 0 }
 }
 
 /**
@@ -73,6 +87,9 @@ export function buildDailySeries(opts: {
       if (log.sentOk) bucket.waSent++
       else bucket.waFailed++
       if (log.opened) bucket.waOpened++
+      // A message-level count, so a recipient who tapped the button ten times still counts once —
+      // matching the "Clicked" tile rather than double-counting enthusiasm.
+      if ((log.ctaClicks ?? 0) > 0) bucket.waClicked++
     } else {
       if (log.sentOk) bucket.emailSent++
       else bucket.emailFailed++
@@ -85,5 +102,7 @@ export function buildDailySeries(opts: {
 
 /** True when a series has nothing in it — lets the UI show an empty state per family. */
 export function seriesIsEmpty(series: DayBucket[]): boolean {
-  return series.every((d) => !d.emailSent && !d.emailOpened && !d.emailFailed && !d.waSent && !d.waOpened && !d.waFailed)
+  return series.every(
+    (d) => !d.emailSent && !d.emailOpened && !d.emailFailed && !d.waSent && !d.waOpened && !d.waFailed && !d.waClicked
+  )
 }

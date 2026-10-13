@@ -53,6 +53,7 @@ interface Payload {
 const chartConfig = {
   sent: { label: 'Sent', color: 'var(--chart-1)' },
   opened: { label: 'Read', color: 'var(--chart-2)' },
+  clicked: { label: 'Clicked', color: 'var(--chart-3)' },
   failed: { label: 'Failed', color: 'var(--chart-4)' },
 } satisfies ChartConfig
 
@@ -68,7 +69,7 @@ function NudgeChart({ series }: { series: DayBucket[] }) {
     () =>
       series.map((d) => {
         const label = new Date(`${d.date}T12:00:00Z`).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
-        return { day: label, sent: d.waSent, opened: d.waOpened, failed: d.waFailed }
+        return { day: label, sent: d.waSent, opened: d.waOpened, clicked: d.waClicked, failed: d.waFailed }
       }),
     [series]
   )
@@ -88,6 +89,7 @@ function NudgeChart({ series }: { series: DayBucket[] }) {
         <ChartTooltip content={<ChartTooltipContent />} />
         <Bar dataKey="sent" fill="var(--color-sent)" radius={[3, 3, 0, 0]} maxBarSize={16} />
         <Bar dataKey="opened" fill="var(--color-opened)" radius={[3, 3, 0, 0]} maxBarSize={16} />
+        <Bar dataKey="clicked" fill="var(--color-clicked)" radius={[3, 3, 0, 0]} maxBarSize={16} />
         <Bar dataKey="failed" fill="var(--color-failed)" radius={[3, 3, 0, 0]} maxBarSize={16} />
       </BarChart>
     </ChartContainer>

@@ -377,7 +377,41 @@ export function whatsappButtonUrlFor(templateName: string | null | undefined): s
   if (sheetFlow) return sheetFlow.buttonUrl ?? null
   const zohoFlow = Object.values(ZOHO_FLOW_TEMPLATES).find((t) => t.templateName === name)
   if (zohoFlow) return zohoFlow.buttonUrl ?? null
+  // Sandbox nudges carry their own button, and all of them are click-tracked by default (see the
+  // `trackClicks` note on SandboxNudgeSpec). Opting one out is explicit, so `!== false` rather than
+  // a truthy check — a spec that simply omits the field is tracked, which is what its template is
+  // built as.
+  //
+  // Resolved from the ORIGINAL name, not the stripped `name`: `baseTemplateName()` only understands
+  // the `<base>_cta` convention, so handing it an ALIAS yields a name that is not the real base and
+  // the spec would not be found — the destination would silently become null.
+  const sbx = sandboxSpecForTemplate(templateName)
+  if (sbx && sbx.trackClicks !== false) return sbx.buttonUrl ?? null
   return null
+}
+
+/** The name a sandbox nudge's tracked twin lives under — an alias if it declared one. */
+export function sandboxTrackedName(spec: SandboxNudgeSpec): string {
+  return spec.trackedName ?? trackedTemplateName(spec.templateName)
+}
+
+/**
+ * Which sandbox spec a template name belongs to, accepting the base, the `<base>_cta` twin and any
+ * declared alias.
+ *
+ * This is the one place that answers "which nudge does this template serve", so the button lookup,
+ * the seed and the template-creation tooling cannot disagree — an alias that one of them resolved
+ * and another did not would silently lose the click destination.
+ */
+export function sandboxSpecForTemplate(templateName: string | null | undefined): SandboxNudgeSpec | null {
+  const raw = (templateName || '').trim()
+  if (!raw) return null
+  const stripped = baseTemplateName(raw)
+  return (
+    Object.values(SANDBOX_WHATSAPP_NUDGES).find(
+      (s) => sandboxTrackedName(s) === raw || s.templateName === raw || s.templateName === stripped
+    ) ?? null
+  )
 }
 
 /**
@@ -565,6 +599,37 @@ export interface SandboxNudgeSpec {
   /** True when the template's URL button carries its own `{{1}}`. All of these do. */
   hasButton: boolean
   /**
+   * Whether this template's button routes through the click tracker. **Defaults to true.**
+   *
+   * Every sandbox nudge is tracked, and that is self-consistent rather than assumed: the button URL
+   * lives inside the approved template, and these templates are created by this repo's tooling
+   * (`wa:templates --create-missing`), which builds the `_cta` twin with the tracker URL. A template
+   * built here and marked tracked therefore agrees with itself.
+   *
+   * Set it to FALSE only for a template that was created outside this tooling and whose button points
+   * straight at the destination. Turning tracking on for such a template without re-creating it sends
+   * a message token to a button that expects the mobile — the tracker finds no log and the customer
+   * lands on the fallback page instead of the console.
+   *
+   * Enabling tracking is not an in-place edit for that reason: it needs a NEW `_cta` template and a
+   * fresh Meta review. Until review completes every send falls back to the base template (132001), so
+   * the message still goes out and only the attribution is lost.
+   */
+  trackClicks?: boolean
+  /**
+   * The name this nudge's tracked twin is created under. Defaults to `<templateName>_cta`.
+   *
+   * Exists because Meta LOCKS a deleted template's name, and for far longer than it documents —
+   * error 2388023 answers "try again in less than 1 minute" and then keeps refusing, with the same
+   * template sometimes reporting "4 weeks". Renaming the twin rather than waiting is the difference
+   * between tracking working today and tracking working next month.
+   *
+   * MUST end in `_cta`: that suffix is what tells the send path the button expects a message token
+   * rather than the mobile (see src/lib/cta.ts). The BASE is resolved through
+   * `sandboxSpecForTemplate()` instead of by stripping the suffix, which is why an alias is safe.
+   */
+  trackedName?: string
+  /**
    * The button's label and URL, so `wa:templates --create-missing` can submit the template WITH its
    * CTA. Without this the creation path falls back to "no button", and the nudge would then send a
    * button parameter to a template that has none — a parameter-count mismatch.
@@ -592,15 +657,21 @@ export const SANDBOX_WHATSAPP_NUDGES: Record<string, SandboxNudgeSpec> = {
     criteria: `((Business_vertical:equals:${EPS_BUSINESS_VERTICAL})and(Eko_Code:equals:null)and(Created_Time:greater_than:{{monthsAgo:2}}))`,
     filters: { ekoCodePresent: false, createdWithinDays: 60 },
     templateName: 'old_website_leads__from_eko_co_in_',
+    // Meta locked the `<base>_cta` name after it was deleted (error 2388023), so the twin lives under
+    // this alias instead. Same template, same body, same tracker URL — only the name differs.
+    trackedName: 'old_website_leads__from_eko_co_in__v2_cta',
     // "Hi {{1}} 👋 …" → the lead's name.
     bodyVars: ['first_name'],
     hasButton: true,
     buttonText: 'Click Now',
     buttonUrl: `${CONSOLE_URL}?mobile={{1}}`,
+    // THE REAL APPROVED COPY, read back from Meta. This field is the template BODY — it is what
+    // `wa:templates --create-missing` submits — so it has to match the approved template verbatim,
+    // including the `{{n}}` placeholders. These six were originally written as PARAPHRASES, which is
+    // how the creation path ended up building tracked twins with zero variables while the nudge sent
+    // one: a parameter-count mismatch (132000) on every send.
     body:
-      'Hi 👋 We noticed you started your Eko partner signup but it looks like it was not completed.\n\n' +
-      'Your application is still pending on our side. Please continue from where you left off so we can ' +
-      'get your account activated.',
+      "Hi {{1}} 👋 Your EPS API journey is almost ready to start, but your registration isn't complete yet and your Eko Code is still waiting to be generated. A couple of quick steps in the EPS console will get you going.",
     liveMatchEstimate: 573,
   },
   sandbox_sign_agreement_pending: {
@@ -614,6 +685,9 @@ export const SANDBOX_WHATSAPP_NUDGES: Record<string, SandboxNudgeSpec> = {
     // about is not "unsigned", and must not be nudged as though it were.
     filters: { ekoCodePresent: true, signAgreement: false },
     templateName: 'eko_code_is_present_but_sign_agreement_is_pending_',
+    // Meta locked the `<base>_cta` name after it was deleted (error 2388023) — see the note on
+    // `trackedName`.
+    trackedName: 'eko_code_present_sign_agreement_pending_v2_cta',
     // "Hi {{1}}, good news: your Eko Code {{2}} is ready!" → name, then the actual code.
     // eko_code is added to buildLeadVars for exactly this; without it {{2}} would render as "-"
     // and tell the customer their Eko Code is a dash.
@@ -622,9 +696,7 @@ export const SANDBOX_WHATSAPP_NUDGES: Record<string, SandboxNudgeSpec> = {
     buttonText: 'Click Now',
     buttonUrl: `${CONSOLE_URL}?mobile={{1}}`,
     body:
-      'Hi 👋 Your Eko Code has been issued and your account is almost ready.\n\n' +
-      'The only step pending is signing your Eko partner agreement. Please complete the e-signature so ' +
-      'we can activate your account.',
+      "Hi {{1}}, good news: your Eko Code {{2}} is ready! ✅ One small thing is left, your service agreement is still waiting for your signature. Sign it in the EPS console and you're one step closer to going live.",
     liveMatchEstimate: 2782,
   },
   sandbox_email_missing: {
@@ -636,14 +708,13 @@ export const SANDBOX_WHATSAPP_NUDGES: Record<string, SandboxNudgeSpec> = {
     criteria: `((Business_vertical:equals:${EPS_BUSINESS_VERTICAL})and(Email:equals:null))`,
     filters: { emailMissing: true },
     templateName: 'email_missing',
+    trackedName: 'email_missing_v2_cta',
     bodyVars: ['first_name'],
     hasButton: true,
     buttonText: 'Proceed Now',
     buttonUrl: `${CONSOLE_URL}?mobile={{1}}`,
     body:
-      'Hi 👋 We do not have an email address on record for your Eko partner application.\n\n' +
-      'Please share a valid email ID with us — your onboarding updates and production credentials are ' +
-      'sent there.',
+      "Hi {{1}}, we're missing one small thing on your EPS account: your email address 📧 We need it to send your agreements, invoices and account updates. Add it in the EPS console and we'll take it from there.",
     liveMatchEstimate: 3906,
   },
   sandbox_documents_accepted: {
@@ -656,13 +727,13 @@ export const SANDBOX_WHATSAPP_NUDGES: Record<string, SandboxNudgeSpec> = {
     // Zoho's picklist value verbatim — a space or a different case matches nothing.
     filters: { kycUploadStatus: ['Accepted'] },
     templateName: 'once_all_documents_are_completed_and_approved___esign_your_document_',
+    trackedName: 'documents_completed_esign_your_document_v2_cta',
     bodyVars: ['first_name'],
     hasButton: true,
     buttonText: 'Proceed to E-Sign',
     buttonUrl: `${CONSOLE_URL}?mobile={{1}}`,
     body:
-      'Hi 👋 Good news — all the documents you submitted have been verified and accepted.\n\n' +
-      'The last step is to e-sign your document to complete your onboarding.',
+      "Hi {{1}}, great news! 🎉 Your KYC documents are verified and approved. The next step is to eSign your service agreement. It only takes a few minutes in the EPS console.",
     liveMatchEstimate: 121,
   },
   sandbox_documents_under_review: {
@@ -674,13 +745,13 @@ export const SANDBOX_WHATSAPP_NUDGES: Record<string, SandboxNudgeSpec> = {
     criteria: `((Business_vertical:equals:${EPS_BUSINESS_VERTICAL})and(KYC_Documents_Upload:equals:All Done))`,
     filters: { kycUploadStatus: ['All Done'] },
     templateName: 'once_all_docs_are_submitted_but_not_approved___under_review',
+    trackedName: 'docs_submitted_under_review_v2_cta',
     bodyVars: ['first_name'],
     hasButton: true,
     buttonText: 'Check Status',
     buttonUrl: `${CONSOLE_URL}?mobile={{1}}`,
     body:
-      'Hi 👋 We have received all the documents you submitted and they are currently under review.\n\n' +
-      'We will update you as soon as the verification is complete.',
+      "Hi {{1}}, thanks for sending everything over! 🙌 We've received all your KYC documents and our compliance team is reviewing them now. We'll update you as soon as it's done, and you can follow your status in the EPS console.",
     liveMatchEstimate: 8,
   },
   sandbox_placeholder_name_onboarding: {
@@ -725,13 +796,13 @@ export const SANDBOX_WHATSAPP_NUDGES: Record<string, SandboxNudgeSpec> = {
     // The template that exists for this one, which is NOT what the seed originally guessed — the
     // original placeholder name was never created, so this nudge pointed at nothing.
     templateName: 'lead_status____closed_won__tell_the_cus_they_will_recieve_live_credntials_in_under_30_minutes',
+    trackedName: 'closed_won_live_credentials_v2_cta',
     bodyVars: ['first_name'],
     hasButton: true,
     buttonText: 'Check Your Status',
     buttonUrl: `${CONSOLE_URL}?mobile={{1}}`,
     body:
-      'Hi 👋 Congratulations — your Eko partner account is now live!\n\n' +
-      'Your live production credentials will be shared with you within 30 minutes.',
+      "Hi {{1}}, welcome aboard! 🚀 Your EPS account is activated, and your live API credentials will reach you within 30 minutes. You can keep an eye on your account in the EPS console.",
     liveMatchEstimate: 288,
   },
   sandbox_documents_resubmission: {
@@ -748,13 +819,15 @@ export const SANDBOX_WHATSAPP_NUDGES: Record<string, SandboxNudgeSpec> = {
     // exactly the criterion above, minus the two-month window which `createdWithinDays` mirrors.
     filters: { kycRejectCountPresent: true, createdWithinDays: 60 },
     /**
-     * NOT YET CONFIRMED against the WABA.
+     * The name this template is CREATED under, and the name the nudge points at once tracking is on.
      *
-     * Every other template in this file was named from what Meta actually holds, because these
-     * templates were created by pasting the body into the Meta UI and Meta auto-generates an ugly
-     * name from the text. This one has not been looked up, so the name below is a placeholder: it
-     * MUST be checked (Templates tab, or `npm run wa:templates`) and corrected before the nudge is
-     * enabled. A wrong name is error 132001 on every single send.
+     * Chosen rather than guessed: unlike its neighbours — whose names Meta auto-generated from the
+     * pasted body, producing unreadable strings like `old_website_leads__from_eko_co_in_` — this one
+     * is submitted through the API, so the name is ours to pick. It must be settled BEFORE creation,
+     * because Meta holds a deleted name for a long time (error 2388023).
+     *
+     * The nudge points at the `_cta` twin (the seed derives it from `trackClicks`), which is what
+     * makes a tap attributable to a person.
      */
     templateName: 'documents_resubmission_required',
     /**
@@ -762,26 +835,19 @@ export const SANDBOX_WHATSAPP_NUDGES: Record<string, SandboxNudgeSpec> = {
      *
      * {{1}} = the lead's name, {{2}} = the number of rejected documents.
      *
-     * NOTE ON THE SPEC: the body as supplied read "your {{3}} documents". A WhatsApp template cannot
-     * jump to {{3}} — Meta requires variables to be numbered from {{1}} with no gaps, and rejects a
-     * template whose first parameter is {{3}}. The variable was therefore taken as the SECOND one,
-     * which is what it must be. If the approved template really does declare three variables, a
-     * third source must be added here or every send fails with 132000.
+     * NOTE ON THE SUPPLIED COPY: it read "your {{3}} documents". A WhatsApp template cannot jump to
+     * {{3}} — Meta requires variables numbered from {{1}} with no gaps, and rejects a template whose
+     * numbering does. The rejected-document count is therefore the SECOND variable, which is what it
+     * has to be. If three variables are ever wanted, a third source must be added to `bodyVars` or
+     * every send fails with 132000.
      */
     bodyVars: ['first_name', 'kyc_document_reject_count'],
-    /**
-     * No button, deliberately — the supplied copy tells the partner to go to the EPS console and
-     * resubmit the highlighted documents; it does not carry a link. This matters: declaring a button
-     * parameter for a template that has no button is error 132000 on every send (the same class of
-     * mistake as declaring none for a template that has one).
-     *
-     * If the real template DOES have a URL button, flip this to true and give it buttonText and
-     * `${CONSOLE_URL}?mobile={{1}}` like its neighbours.
-     */
-    hasButton: false,
+    hasButton: true,
+    buttonText: 'Resubmit Now',
+    buttonUrl: `${CONSOLE_URL}?mobile={{1}}`,
     body:
       'Hi {{1}}, your {{2}} documents needs resubmission.\n\n' +
-      'The reason could be as simple as they are not clear. Please go to the EPS console and resubmit ' +
+      'The reason could be as simple as they are not clear. Please go to EPS console and resubmit ' +
       'the documents highlighted there.',
   },
 }
@@ -1136,7 +1202,9 @@ export const DEFAULT_NUDGES: NudgeSeed[] = [
       ...s.filters,
     }),
     bodyTemplate: s.body,
-    whatsappTemplateName: s.templateName,
+    // Every sandbox nudge sends on its tracked twin unless it explicitly opted out. The twin's name
+    // comes from `sandboxTrackedName` so a Meta-locked base name can be worked around with an alias.
+    whatsappTemplateName: s.trackClicks === false ? s.templateName : sandboxTrackedName(s),
     whatsappLanguage: WHATSAPP_TEMPLATE_LANGUAGE_DEFAULT,
     // The body sources and the button parameter are BOTH required, and both come from the template's
     // real declaration — a template with one {{1}} and a URL button needs exactly

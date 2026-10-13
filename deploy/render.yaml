@@ -32,6 +32,13 @@ services:
       # Open-tracking pixels must point at a URL the recipient's mail client can reach.
       - key: APP_BASE_URL
         value: https://nudge-engine.onrender.com
+      # Where a tracked template's button points. This is baked into the template at CREATION time and
+      # read at SEND time, so it must match the deployed host exactly — a mismatch either sends the
+      # recipient to the fallback page instead of the console, or records no click at all.
+      - key: CTA_TRACK_BASE_URL
+        value: https://nudge-engine.onrender.com/api/track/cta
+      - key: CTA_FALLBACK_URL
+        value: https://eps.eko.in/console
       - key: AUTH_ENABLED
         value: "true"
       # A sleeping instance cannot run an in-process scheduler. Leave this false and trigger

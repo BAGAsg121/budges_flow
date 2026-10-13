@@ -27,6 +27,7 @@ import {
   WA_SHEET_FLOW_TEMPLATES,
   ZOHO_FLOW_TEMPLATES,
   SANDBOX_WHATSAPP_NUDGES,
+  sandboxSpecForTemplate,
   DEFAULT_NUDGES,
   CONSOLE_URL,
   PAY_ACTIVATION_FEE_URL,
@@ -74,12 +75,19 @@ function templateSpecFor(name) {
   // Sandbox nudges carry their own label + URL. Without this branch a sandbox template would be
   // submitted with NO button, while its nudge sends a button parameter — a parameter-count mismatch
   // (132000) on every send.
-  const sandbox = Object.values(SANDBOX_WHATSAPP_NUDGES).find((s) => s.templateName === base)
+  //
+  // `tracked` is honoured here exactly as it is for the sheet and Zoho branches above: a `_cta`
+  // template must be SUBMITTED with the tracker URL, or the tracker would never see a tap and the
+  // whole point of naming it `_cta` would be lost.
+  //
+  // Resolution goes through `sandboxSpecForTemplate`, not a name comparison, so a twin that was
+  // renamed to dodge a Meta name lock is still recognised.
+  const sandbox = sandboxSpecForTemplate(name)
   if (sandbox) {
     return {
       body: sandbox.body,
       buttonText: sandbox.buttonText ?? null,
-      buttonUrl: sandbox.buttonUrl ?? null,
+      buttonUrl: tracked ? (templateButtonUrlFor(name) ?? sandbox.buttonUrl ?? null) : (sandbox.buttonUrl ?? null),
     }
   }
   return null

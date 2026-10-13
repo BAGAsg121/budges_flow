@@ -193,11 +193,41 @@ templates, and a combined line answers a question nobody asked while hiding the 
 comparison the section exists for. The nudge list comes from `SANDBOX_WHATSAPP_NUDGES` rather than a
 query, so a nudge added in code but never seeded shows up as a warning instead of vanishing.
 
-> **`Clicked` reads 0 for these nudges, and that is structural.** Click tracking needs a `…_cta`
-> template twin (see §CTA click tracking), and only the templates registered in
-> `MYSQL_FLOW_TEMPLATES` / `WA_SHEET_FLOW_TEMPLATES` / `ZOHO_FLOW_TEMPLATES` have one. No sandbox
-> template is registered, so there is no tracker on their buttons and nothing to count. Attaching a
-> tracked twin would light the column up.
+> **`Clicked` is now a real number for these nudges.** Every sandbox nudge sends on a tracked
+> `_cta` template whose button routes through `/api/track/cta`, so a tap is attributed to a person.
+> While a twin is still in Meta review, sends fall back to the approved base automatically (132001)
+> and only the attribution is lost — the recipient still gets the message and the console link.
+
+#### Why some tracked twins have odd names
+
+Enabling tracking means a twin template ending in `_cta`. Meta **locks a deleted template's name**,
+and for far longer than it documents: after six twins were deleted (their bodies had been built from
+paraphrased copy and declared zero variables, which would have failed every send with 132000), Meta
+refused to re-create them under the same names with `2388023` — for the same template answering
+"try again in less than 1 minute" and then "try again in 4 weeks".
+
+So a spec can declare `trackedName`, and the twin lives under that alias instead:
+
+| Nudge | Twin |
+| --- | --- |
+| `sandbox_email_missing` | `email_missing_v2_cta` |
+| `sandbox_documents_accepted` | `documents_completed_esign_your_document_v2_cta` |
+| `sandbox_documents_under_review` | `docs_submitted_under_review_v2_cta` |
+| `sandbox_sign_agreement_pending` | `eko_code_present_sign_agreement_pending_v2_cta` |
+| `sandbox_closed_won_live_credentials` | `closed_won_live_credentials_v2_cta` |
+| `sandbox_old_website_lead` | `old_website_leads__from_eko_co_in__v2_cta` |
+
+Two rules make an alias safe, and both are asserted: it must still end in `_cta` (that suffix is what
+tells the send path to pass a message token rather than the mobile), and the base must be resolved
+through `sandboxSpecForTemplate()` rather than by stripping the suffix — `baseTemplateName()` only
+understands `<base>_cta`, so an alias would otherwise silently lose the click destination.
+
+> **A spec's `body` is the TEMPLATE body, verbatim, including the `{{n}}` placeholders.** It is what
+> `wa:templates --create-missing` submits. Six specs originally held PARAPHRASES instead, which is how
+> the twins came to be created with zero variables while their nudges sent one — a parameter-count
+> mismatch (132000) on every send, which the 132001 fallback does **not** rescue, because the template
+> is not missing, it is mismatched. `npm run wa:fix-tracked` reports any twin whose body has drifted
+> from its base and can repair it.
 
 Eight CRM-driven WhatsApp nudges, tagged `category: "sandbox_whatsapp"` and grouped by the **Sandbox
 WhatsApp** filter on the Nudges tab. They read the CRM through the Zoho **MCP** server like any other

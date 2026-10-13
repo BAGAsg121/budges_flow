@@ -18,6 +18,7 @@
     "wa:check": "node --env-file=.env scripts/check-whatsapp.mjs",
     "wa:webhook": "node --env-file=.env scripts/check-whatsapp-webhook.mjs",
     "wa:templates": "node --env-file=.env scripts/check-whatsapp-templates.mjs",
+    "wa:fix-tracked": "node --import ./scripts/lib/register-alias.mjs --env-file=.env scripts/fix-tracked-sandbox-templates.mjs",
     "wa:flows": "node --env-file=.env scripts/check-whatsapp-flows.mjs",
     "wa:repoint": "node --env-file=.env scripts/repoint-whatsapp-templates.mjs",
     "wa:analytics": "node --env-file=.env scripts/check-whatsapp-analytics.mjs",
