@@ -660,7 +660,21 @@ export async function deliverToLead(opts: {
     trackingId
   )
 
-  const result = await sendEmail({ to: lead.email, subject, html: bodyHtml, text: htmlToText(bodyHtml) })
+  const result = await sendEmail({
+    to: lead.email,
+    subject,
+    html: bodyHtml,
+    text: htmlToText(bodyHtml),
+    // Records the send on the CRM lead AND carries the tracking id to the n8n webhook. The CRM is
+    // where a salesperson looks; the tracking id ties the note to the open pixel and any CTA click.
+    context: {
+      leadId: lead.zohoId,
+      nudgeName: nudge.name,
+      nudgeKey: nudge.key,
+      messageNumber,
+      trackingId,
+    },
+  })
 
   await db.messageLog.create({
     data: {

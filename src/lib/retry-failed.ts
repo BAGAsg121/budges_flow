@@ -279,7 +279,22 @@ export async function retryFailedLogs(logIds: string[]): Promise<RetryResult> {
           baseUrl,
           trackingId
         )
-        const send = await sendEmail({ to, subject, html, text: htmlToText(html) })
+        const send = await sendEmail({
+          to,
+          subject,
+          html,
+          text: htmlToText(html),
+          // A retry is still a real send, so it gets the same CRM note and the same tracking id for
+          // the webhook. `log.lead` is included by the query, which is where the CRM record id comes
+          // from — note that `log.leadId` is OUR row id and the Notes API needs the CRM's `zohoId`.
+          context: {
+            leadId: log.lead?.zohoId ?? null,
+            nudgeName: nudge.name,
+            nudgeKey: nudge.key,
+            messageNumber: log.messageNumber,
+            trackingId,
+          },
+        })
 
         const created = await db.messageLog.create({
           data: {

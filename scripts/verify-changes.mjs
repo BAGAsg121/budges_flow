@@ -42,6 +42,8 @@ import { nudgeSourceOf, capAppliesTo, isManualSheetNudge, runGuard, nudgeCategor
 import { expandZohoCriteria, hasUnexpandedPlaceholder, SANDBOX_WHATSAPP_NUDGES, KYC_UPLOAD_STATUS_VALUES, sandboxTrackedName } from '../src/lib/nudge-defaults.ts'
 import { buildXlsx, buildZip, crc32, columnLetter, sanitiseSheetName } from '../src/lib/xlsx.ts'
 import { accumulateTotals, emptyTotals, isCappedSendError } from '../src/lib/nudge-totals.ts'
+import { buildEmailNote, istStamp, NOTE_TITLE } from '../src/lib/zoho-notes.ts'
+import { interpretWebhookResponse } from '../src/lib/email-webhook.ts'
 import { istDay, istDateTime, istRangeToUtc, istDaysAgo, toCsv, exportStatus, logToExportRow, buildBreakdown, EXPORT_COLUMNS, EXPORT_WIDTHS } from '../src/lib/export-format.ts'
 import { readZip, validateXlsx } from './lib/read-zip.mjs'
 import {
@@ -2171,6 +2173,72 @@ check('a value produces custom_data', `${valued.custom_data.value}/${valued.cust
 // NOTE: src/lib/run-queue.ts (background run jobs) is deliberately NOT imported here. This suite has
 // no database and no Prisma on purpose — that is what lets it run anywhere in a second — and the
 // queue pulls in both. Its bookkeeping is covered by the type checker and by real runs instead.
+
+// --- the "email sent" CRM note ---------------------------------------------------
+// Written onto the Zoho lead after every successful email to a lead. The tracking id in it is what
+// links the CRM record to the open pixel and any CTA click in our own log, so the format is pinned:
+// a note that silently loses it is worse than no note, because it looks complete.
+const noteAt = new Date('2026-10-19T10:04:00Z') // 15:34 IST
+const note = buildEmailNote({
+  leadId: '109211000430170073',
+  nudgeName: 'Documents Pending (Agreement Signed)',
+  nudgeKey: 'documents_pending',
+  messageNumber: 2,
+  to: 'asha@example.com',
+  subject: 'Action pending: complete your KYC documents',
+  trackingId: 'abc-123',
+  at: noteAt,
+})
+check('note: title is the fixed marker', note.title, NOTE_TITLE)
+check('note: it names the nudge and its key', note.content.includes('Nudge: Documents Pending (Agreement Signed) (documents_pending)'), true)
+check('note: it carries the message number', note.content.includes('Message: #2'), true)
+check('note: it carries the recipient', note.content.includes('To: asha@example.com'), true)
+check('note: it carries the subject', note.content.includes('Subject: Action pending: complete your KYC documents'), true)
+check('note: it carries the tracking id', note.content.includes('Tracking: abc-123'), true)
+// IST, not UTC — 10:04Z is 15:34 in the CRM's timezone, and an operator reading "10:04" would
+// conclude the send happened at the wrong time of day.
+check('note: the timestamp reads in IST', note.content.includes('Sent: 2026-10-19 15:34 IST'), true)
+check('note: IST formatting is pinned', istStamp(noteAt), '2026-10-19 15:34')
+check('note: a missing tracking id does not print "undefined"', buildEmailNote({ leadId: 'x', to: 'a@b.c', subject: 's', at: noteAt }).content.includes('undefined'), false)
+check('note: it falls back to the key when there is no name', buildEmailNote({ leadId: 'x', nudgeKey: 'k1', to: 'a@b.c', subject: 's', at: noteAt }).content.includes('Nudge: k1'), true)
+check('note: message number defaults to 1', buildEmailNote({ leadId: 'x', to: 'a@b.c', subject: 's', at: noteAt }).content.includes('Message: #1'), true)
+check('note: the body is plain text, not HTML', /<[a-z][^>]*>/i.test(note.content), false)
+
+// --- the n8n webhook transport ------------------------------------------------
+// The app hands the finished message to n8n and trusts its reply. These assertions cover the case
+// that matters most: a 200 that does NOT mean the email was sent. n8n replies
+// `{"message":"Workflow was started"}` immediately, before the email node runs, so treating any 200
+// as success would mark messages delivered — and write "email sent" notes into the CRM — for mail
+// that never left.
+const wh = (status, body) => interpretWebhookResponse(status, JSON.stringify(body))
+
+check('webhook: a normal result is a send', wh(200, { ok: true, message_id: 'abc123' }).ok, true)
+check('webhook: and yields the provider id', wh(200, { ok: true, message_id: 'abc123' }).messageId, 'abc123')
+check('webhook: it records which transport ran', wh(200, { ok: true, message_id: 'x' }).transport, 'webhook')
+check('webhook: a bare Gmail-style {id} is accepted', wh(200, { id: 'gmail-1' }).messageId, 'gmail-1')
+check('webhook: a camelCase messageId is accepted', wh(200, { messageId: 'm-1' }).messageId, 'm-1')
+check('webhook: a nested json.id is accepted', wh(200, { json: { id: 'nested-1' } }).messageId, 'nested-1')
+
+// THE guard: n8n's placeholder on a 200 must be a failure, not a delivery.
+check('webhook: n8n\'s placeholder is NOT a send', wh(200, { message: 'Workflow was started' }).ok, false)
+check('webhook: the placeholder error explains the fix', /Respond to Webhook/i.test(wh(200, { message: 'Workflow was started' }).error), true)
+check('webhook: an empty 200 is NOT a send', interpretWebhookResponse(200, '').ok, false)
+// The empty case and the placeholder case are DIFFERENT faults and must not share a message, or the
+// operator is told to change the wrong setting.
+check('webhook: the empty-body error names the empty body', /EMPTY body/i.test(interpretWebhookResponse(200, '').error), true)
+check('webhook: the empty-body error suggests First Incoming Item', /First Incoming Item/i.test(interpretWebhookResponse(200, '').error), true)
+check('webhook: the placeholder error does NOT claim an empty body', /EMPTY body/i.test(wh(200, { message: 'Workflow was started' }).error), false)
+check('webhook: a 200 with no id and no placeholder is NOT a send', wh(200, { hello: 'world' }).ok, false)
+
+check('webhook: an explicit failure is honoured', wh(200, { ok: false, error: '550 mailbox full' }).ok, false)
+check('webhook: and its reason survives', wh(200, { ok: false, error: '550 mailbox full' }).error, '550 mailbox full')
+check('webhook: a failure without a reason still fails', wh(200, { ok: false }).ok, false)
+check('webhook: HTTP 500 is a failure', wh(500, { message: 'boom' }).ok, false)
+check('webhook: the 500 text is kept for the classifier', /boom/.test(wh(500, { message: 'boom' }).error), true)
+check('webhook: HTTP 404 is a failure', wh(404, {}).ok, false)
+check('webhook: an unparseable body on 200 is still not a send', interpretWebhookResponse(200, '<html>oops</html>').ok, false)
+check('webhook: a null message id falls through to a failure', wh(200, { message_id: '   ' }).ok, false)
+check('webhook: success beats a stray non-string id', wh(200, { message_id: 42, id: 'str-id' }).messageId, 'str-id')
 
 console.log(
   `\n${total - failures}/${total} assertions passed` +

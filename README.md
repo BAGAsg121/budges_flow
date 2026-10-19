@@ -1451,6 +1451,97 @@ What no code can fix: if a user has genuinely opted out of marketing (131050) or
 at all (131026), only their opt-in or a different channel reaches them — which is what the email
 fallback is for.
 
+### Sending email through n8n (the current transport)
+
+The Zoho Mail API refuses this mailbox with `550 5.4.6 Unusual sending activity detected`, so email
+goes out through an n8n webhook that sends via **Gmail**. Set `EMAIL_WEBHOOK_URL` and it is chosen
+first — before Zoho Mail and SMTP, because it is the only path that currently delivers.
+
+**The app still renders the email.** The payload carries the finished `html`, open-tracking pixel
+included, plus the `tracking_id`. n8n is a pipe, not a renderer: if it built the body from a template
+the pixel would never be inserted and open tracking would die silently.
+
+```
+POST {EMAIL_WEBHOOK_URL}          header: x-nudge-secret (when EMAIL_WEBHOOK_SECRET is set)
+{ tracking_id, lead_id, nudge_key, nudge_name, message_number,
+  to_email, subject, html, text }
+
+← 200 { "id": "1a153cca27ed4562", ... }        → recorded as sent, message id kept
+```
+
+Fields are **flat** (`to_email`, not `to.email`) so an n8n expression is one token —
+`{{ $json.body.to_email }}` — rather than a nested path that is easy to mistype.
+
+#### The n8n workflow that works
+
+| Node | Setting |
+| --- | --- |
+| **Webhook** | POST; **Respond: "When Last Node Finishes"** |
+| **Gmail** | To `{{ $json.body.to_email }}` · Subject `{{ $json.body.subject }}` · Message `{{ $json.body.html }}` · **Email Type: HTML** |
+
+> **Do not add a Respond to Webhook node.** Three attempts to return the result that way produced
+> `HTTP 200` with a zero-byte body every time — the app could not tell a send from a no-op. Letting
+> n8n return the **last node's output** instead removes a node and cannot half-work: the Gmail node's
+> output *is* `{ id, threadId, labelIds: ["SENT"] }`, which is the proof of delivery.
+
+> **The `Email Type: HTML` setting is not cosmetic.** The Gmail node defaults to plain text, which
+> sends the markup as literal `<p>` tags, and only then does anyone notice.
+
+#### Why an empty or placeholder 200 is treated as a failure
+
+n8n's default webhook response is `{"message":"Workflow was started"}`, returned **immediately** —
+before the email node runs. And a Webhook node still on `responseMode: onReceived` ignores a Respond
+node entirely. An app that treated any 200 as success would mark messages delivered, and (because the
+CRM note fires on success) write "email sent" notes into Zoho for mail that never left. That is worse
+than an error, because it looks like it worked.
+
+So `interpretWebhookResponse()` requires evidence: a 2xx carrying a message id. Empty bodies,
+n8n's placeholder, and unrecognised replies are all **failures**, each with a message naming the
+setting to fix. Verified against the live webhook:
+`ok: true, messageId: 1a153cca27ed4562, note: { ok: true }`.
+
+### The "email sent" note on the CRM lead
+
+Every successful email to a **lead** is recorded as a note on that lead in Zoho CRM:
+
+```
+Nudge Engine — email sent
+Nudge: Documents Pending (Agreement Signed) (documents_pending)
+Message: #1
+To: asha@example.com
+Subject: Action pending: complete your KYC documents
+Tracking: 11111111-2222-3333-4444-555555555555
+Sent: 2026-10-19 15:34 IST
+```
+
+The **tracking id** is the point: it is the same id in the open-tracking pixel
+(`/api/track/open/<id>`) and in any CTA click, so a note in the CRM can be traced back to real
+engagement in our own log. The timestamp is IST, because an operator reading "10:04" would conclude
+the send happened at the wrong time of day.
+
+**REST, not MCP.** The MCP server exposes ten `get*` tools and no write capability at all, so the
+note goes through CRM v8 REST (`POST /Leads/{id}/Notes`) using `ZOHO_CLIENT_*` /
+`ZOHO_REFRESH_TOKEN`. Those credentials must carry a **write** scope — a read-only token answers
+`OAUTHLIB_SCOPE_MISMATCH` (401), and only at the moment the note is posted.
+
+Four properties that make it safe, all deliberate:
+
+- **It is written in `sendEmail()`, not at each call site** — so the manual sheet run, the
+  failed-log retry and the WhatsApp→email fallback inherit it by construction. A future caller cannot
+  forget it.
+- **A failed note never fails a send.** `addLeadNote()` returns `ok: false` instead of throwing, and
+  the outcome rides back on the send result as `note`. The email has already gone; a CRM hiccup must
+  not make a delivered message look like a failure.
+- **Only for a message that actually went out**, and only when there is a lead. A Google-Sheet send
+  has no lead row, so it has nothing to attach to and is skipped rather than guessed at.
+- **Bounded** (10s abort). The note is fire-and-report; it must not hold up a send loop.
+
+`ZOHO_NOTE_ENABLED=false` turns the writes off without touching credentials.
+
+> Note that the Lead row's `leadId` (our id) and `zohoId` (the CRM record id) are **not**
+> interchangeable. The Notes endpoint takes the CRM id, which is why the callers pass
+> `lead.zohoId` — passing our internal id would 400 or, worse, note the wrong record.
+
 ### Unreachable numbers are not retried (and why that mattered)
 
 **Measured on this database before the rule existed.** Of 590 failed WhatsApp rows, **436 (74%) were
