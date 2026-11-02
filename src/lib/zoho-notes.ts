@@ -114,7 +114,71 @@ export interface NoteResult {
 export async function addLeadNote(input: EmailNoteInput): Promise<NoteResult> {
   if (!input.leadId) return { ok: false, error: 'no lead id' }
   if (!isLeadNoteEnabled()) return { ok: false, error: 'disabled (ZOHO_NOTE_ENABLED=false)' }
+  const note = buildEmailNote(input)
+  return postNote(input.leadId, note.title, note.content)
+}
 
+/* ─────────────────── a note for a nudge sent by a CRM webhook ─────────────────── */
+
+export interface NudgeNoteInput {
+  /** Zoho CRM record id. */
+  leadId: string
+  nudgeName?: string | null
+  nudgeKey?: string | null
+  /** 'whatsapp' | 'email' — spelled out, because a WhatsApp message cannot be un-sent. */
+  channel: string
+  templateName?: string | null
+  /** WHY it was sent: the rule that matched. */
+  why?: string | null
+  /** What the lead looked like at the time, so the note is evidence rather than an assertion. */
+  leadStatus?: string | null
+  messageNumber?: number | null
+  at?: Date
+}
+
+export const NUDGE_NOTE_TITLE = 'Nudge Engine — nudge sent'
+
+/**
+ * The note for a dispatched nudge.
+ *
+ * Includes the RULE that matched, not just the message name, because the useful question later is
+ * "why did we message this person?" — a note that only says "sent" cannot answer it, and the answer
+ * lived only in an ephemeral webhook response.
+ */
+export function buildNudgeNote(input: NudgeNoteInput): { title: string; content: string } {
+  const at = input.at ?? new Date()
+  const channel = input.channel === 'email' ? 'Email' : 'WhatsApp'
+  const who = input.nudgeName || input.nudgeKey || 'Nudge'
+  const key = input.nudgeKey && input.nudgeName ? ` (${input.nudgeKey})` : ''
+  const lines = [
+    `Nudge: ${who}${key}`,
+    `Channel: ${channel}`,
+    `Template: ${input.templateName || '—'}`,
+    `Message: #${input.messageNumber ?? 1}`,
+    `Lead status: ${input.leadStatus || '—'}`,
+    `Why: ${input.why || 'matched this nudge\'s filters'}`,
+    `Trigger: CRM webhook`,
+    `Sent:`,
+    istStamp(at),
+  ]
+  return { title: NUDGE_NOTE_TITLE, content: lines.join('\n') }
+}
+
+/** Write the "nudge sent" note. Never throws; returns the outcome. */
+export async function addNudgeNote(input: NudgeNoteInput): Promise<NoteResult> {
+  if (!input.leadId) return { ok: false, error: 'no lead id' }
+  if (!isLeadNoteEnabled()) return { ok: false, error: 'disabled (ZOHO_NOTE_ENABLED=false)' }
+  const note = buildNudgeNote(input)
+  return postNote(input.leadId, note.title, note.content)
+}
+
+/**
+ * Create a note. Returns `ok: false` rather than throwing, always.
+ *
+ * `Note_Title` + `Note_Content` on the lead's Notes sub-resource is the documented shape for
+ * "a note attached to this record"; the id comes back under data[0].details.id.
+ */
+async function postNote(leadId: string, title: string, content: string): Promise<NoteResult> {
   let token: string
   try {
     token = await getAccessToken()
@@ -122,15 +186,14 @@ export async function addLeadNote(input: EmailNoteInput): Promise<NoteResult> {
     return { ok: false, error: err instanceof Error ? err.message : String(err) }
   }
 
-  const note = buildEmailNote(input)
   try {
-    const res = await fetch(`${apiBase()}/Leads/${encodeURIComponent(input.leadId)}/Notes`, {
+    const res = await fetch(`${apiBase()}/Leads/${encodeURIComponent(leadId)}/Notes`, {
       method: 'POST',
       headers: {
         Authorization: `Zoho-oauthtoken ${token}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ data: [{ Note_Title: note.title, Note_Content: note.content }] }),
+      body: JSON.stringify({ data: [{ Note_Title: title, Note_Content: content }] }),
       // Bounded: a slow CRM must not hold up a send loop. The note is fire-and-report.
       signal: AbortSignal.timeout(10_000),
     })

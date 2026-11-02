@@ -22,9 +22,9 @@
  *     applies and is what actually prevents repeats.
  */
 import { db } from '@/lib/db'
-import { deliverToLead } from '@/lib/nudge-engine'
-import { evaluateNudgeForLead, type Eligibility } from '@/lib/lead-eligibility'
+import { deliverToLead, evaluateNudgeForLead, type Eligibility } from '@/lib/nudge-engine'
 import { sortBySandboxPriority } from './sandbox-priority.ts'
+import { addNudgeNote } from './zoho-notes.ts'
 import type { Lead, Nudge } from '@prisma/client'
 
 // The ranking lives in a dependency-free module so the verification suite can assert that it covers
@@ -50,6 +50,29 @@ export interface DispatchResult {
   failedNudgeKey?: string
   /** Every nudge considered, with why it did not win. Never more than the priority list length. */
   evaluated: DispatchSkipped[]
+  /** Outcome of the "nudge sent" CRM note. A failure here never fails the send. */
+  note?: { ok: boolean; noteId?: string; error?: string }
+}
+
+/**
+ * The rule that matched, in words an operator can read in the CRM.
+ *
+ * Prefers the nudge's stored Zoho criteria, because that is literally the condition — falling back
+ * to the filter JSON would be accurate but unreadable in a note.
+ */
+function whyMatched(nudge: Nudge): string {
+  const criteria = (nudge.zohoCriteria || '').trim()
+  if (criteria) return criteria
+  try {
+    const f = JSON.parse(nudge.filters || '{}')
+    delete f.category
+    delete f.requirePhone
+    const bits = Object.entries(f).map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+    if (bits.length) return bits.join(', ')
+  } catch {
+    /* fall through */
+  }
+  return 'matched this nudge\'s filters'
 }
 
 function isSandbox(nudge: Nudge): boolean {
@@ -114,6 +137,23 @@ export async function dispatchSandboxNudge(
       }
     }
 
+    // Record it on the CRM lead — WHAT was sent and WHY. The "why" is the rule that matched, taken
+    // from the nudge's own criteria, because the question asked later is "why did we message this
+    // person?" and the answer otherwise lived only in this ephemeral webhook response.
+    //
+    // A failed note never fails the send: the message has already gone.
+    const note = await addNudgeNote({
+      leadId: lead.zohoId,
+      nudgeName: nudge.name,
+      nudgeKey: nudge.key,
+      channel: nudge.channel,
+      templateName: delivery.templateName ?? nudge.whatsappTemplateName ?? null,
+      why: whyMatched(nudge),
+      leadStatus: lead.leadStatus,
+      messageNumber: verdict.messageNumber,
+      at: now,
+    })
+
     return {
       action: 'sent',
       nudgeKey: nudge.key,
@@ -121,6 +161,7 @@ export async function dispatchSandboxNudge(
       templateName: delivery.templateName ?? null,
       messageNumber: verdict.messageNumber,
       toPhone: delivery.toPhone ?? null,
+      note,
       evaluated,
     }
   }

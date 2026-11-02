@@ -239,6 +239,111 @@ function buildWhere(filters: NudgeFilters, channel: Channel) {
   return where
 }
 
+/* ───────────────── is THIS lead eligible for THIS nudge, right now? ───────────────── */
+
+export type Eligibility =
+  | { ok: true; messageNumber: number }
+  | { ok: false; reason: string; detail?: string }
+
+/**
+ * Does this one lead satisfy this nudge's filters?
+ *
+ * AUTHORITATIVE BY CONSTRUCTION: it asks the database the same question a scheduled run asks, using
+ * `buildWhere()` + `applyRowPredicates()`. Nothing is re-implemented here, because a hand-written
+ * copy of the predicate list is exactly what went wrong — a dispatcher that checked status, vertical
+ * and phone but silently ignored `kycRejectCountPresent` matched a lead with zero rejected documents
+ * and sent it "your 0 documents need resubmission". Every sandbox predicate (eko code, missing email,
+ * sign agreement, KYC upload status, placeholder name, created-within, reject count) is now covered
+ * because the SAME where-clause that selects a sweep's audience selects this lead.
+ */
+export async function leadMatchesNudgeFilters(
+  nudge: { id: string; channel: string; filters: string },
+  lead: { id: string; kycDocumentUploadCount: number | null; kycDocumentsExpectedCount: number | null }
+): Promise<{ matches: boolean; reason?: string; detail?: string }> {
+  const channel: Channel = nudge.channel === 'whatsapp' ? 'whatsapp' : 'email'
+  const filters = parseFilters(nudge.filters)
+
+  const found = await db.lead.findFirst({
+    where: { AND: [buildWhere(filters, channel), { id: lead.id }] },
+    select: { id: true },
+  })
+  if (!found) {
+    const why = explainFilterMiss(lead, filters)
+    return { matches: false, reason: why.reason, detail: why.detail }
+  }
+
+  const { rejected } = applyRowPredicates([lead], filters)
+  if (rejected.length) {
+    return {
+      matches: false,
+      reason: rejected[0].reason,
+      detail: `upload ${lead.kycDocumentUploadCount ?? '—'} vs expected ${lead.kycDocumentsExpectedCount ?? '—'}`,
+    }
+  }
+  return { matches: true }
+}
+
+/**
+ * A human reason for a filter miss — DIAGNOSTIC ONLY, never a decision.
+ *
+ * `leadMatchesNudgeFilters()` above decides; this only explains, and is allowed to be approximate.
+ * If it drifts from `buildWhere()`, the worst outcome is a vaguer reason string, never a wrong send.
+ */
+function explainFilterMiss(
+  lead: {
+    id: string
+    businessVertical?: string | null
+    leadStatus?: string | null
+    mobile?: string | null
+    phone?: string | null
+  },
+  filters: NudgeFilters
+): { reason: string; detail?: string } {
+  if (filters.includeStatuses?.length && (!lead.leadStatus || !filters.includeStatuses.includes(lead.leadStatus))) {
+    return {
+      reason: 'status_not_included',
+      detail: `lead status "${lead.leadStatus ?? '—'}" is not in ${JSON.stringify(filters.includeStatuses)}`,
+    }
+  }
+  if (filters.excludeStatuses?.length && lead.leadStatus && filters.excludeStatuses.includes(lead.leadStatus)) {
+    return { reason: 'status_excluded', detail: lead.leadStatus }
+  }
+  if (filters.businessVertical && lead.businessVertical !== filters.businessVertical) {
+    return {
+      reason: 'wrong_business_vertical',
+      detail: `"${lead.businessVertical ?? '—'}" != "${filters.businessVertical}"`,
+    }
+  }
+  if (filters.requirePhone !== false && !lead.mobile && !lead.phone) {
+    return { reason: 'no_valid_phone' }
+  }
+  return { reason: 'filters_not_matched', detail: 'lead does not satisfy this nudge\'s filters' }
+}
+
+/**
+ * The full eligibility chain for a single lead: filters, then the sequence rule.
+ *
+ * Used by the CRM webhooks (the single-nudge trigger and the sandbox dispatcher) so that a webhook
+ * send obeys precisely the rules a scheduled send obeys.
+ */
+export async function evaluateNudgeForLead(
+  nudge: { id: string; key: string; channel: string; filters: string; maxEmailsPerLead: number; followUpDays: number },
+  lead: { id: string; kycDocumentUploadCount: number | null; kycDocumentsExpectedCount: number | null },
+  now: Date = new Date()
+): Promise<Eligibility> {
+  const filterVerdict = await leadMatchesNudgeFilters(nudge, lead)
+  if (!filterVerdict.matches) {
+    return { ok: false, reason: filterVerdict.reason ?? 'filters_not_matched', detail: filterVerdict.detail }
+  }
+
+  const logs = await db.messageLog.findMany({ where: { nudgeId: nudge.id, leadId: lead.id } })
+  const decision = decideSend(logs, nudge.maxEmailsPerLead, nudge.followUpDays, now, { channel: nudge.channel })
+  if (decision.action === 'skip') {
+    return { ok: false, reason: decision.reason ?? 'skipped', detail: decision.detail }
+  }
+  return { ok: true, messageNumber: decision.messageNumber ?? 1 }
+}
+
 /**
  * Filters that compare two columns of the same row, applied after the query.
  *

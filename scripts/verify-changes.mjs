@@ -42,7 +42,7 @@ import { nudgeSourceOf, capAppliesTo, isManualSheetNudge, runGuard, nudgeCategor
 import { expandZohoCriteria, hasUnexpandedPlaceholder, SANDBOX_WHATSAPP_NUDGES, KYC_UPLOAD_STATUS_VALUES, sandboxTrackedName } from '../src/lib/nudge-defaults.ts'
 import { buildXlsx, buildZip, crc32, columnLetter, sanitiseSheetName } from '../src/lib/xlsx.ts'
 import { accumulateTotals, emptyTotals, isCappedSendError } from '../src/lib/nudge-totals.ts'
-import { buildEmailNote, istStamp, NOTE_TITLE } from '../src/lib/zoho-notes.ts'
+import { buildEmailNote, istStamp, NOTE_TITLE, buildNudgeNote, NUDGE_NOTE_TITLE } from '../src/lib/zoho-notes.ts'
 import { interpretWebhookResponse } from '../src/lib/email-webhook.ts'
 import { describeLogError, logFailureWarning } from '../src/lib/db-error-text.ts'
 import { SANDBOX_PRIORITY, sandboxRankOf, sortBySandboxPriority } from '../src/lib/sandbox-priority.ts'
@@ -2276,6 +2276,34 @@ check('log warning: it warns about duplicate protection', /duplicate protection 
 check('log warning: it tells the operator NOT to re-run', /before running this nudge again/i.test(warn), true)
 check('log warning: it carries the underlying error', warn.includes('INSERT command denied'), true)
 check('log warning: it works without a sample', logFailureWarning(1).includes('First error'), false)
+
+// --- the "nudge sent" CRM note -------------------------------------------------
+// Written whenever a webhook dispatches a nudge. The important part is that it records WHY — the
+// rule that matched — because the question asked later is "why did we message this person?", and
+// otherwise that answer only ever existed in an ephemeral webhook response.
+const nn = buildNudgeNote({
+  leadId: '109211000430170073',
+  nudgeName: 'WhatsApp · Sandbox · Documents rejected — resubmission needed',
+  nudgeKey: 'sandbox_documents_resubmission',
+  channel: 'whatsapp',
+  templateName: 'documents_resubmission_required_cta',
+  why: '(Business_vertical:equals:EPS)and(KYC_Document_Reject_Count:greater_than:0)',
+  leadStatus: 'Documents Pending',
+  messageNumber: 1,
+  at: noteAt,
+})
+check('nudge note: title is the fixed marker', nn.title, NUDGE_NOTE_TITLE)
+check('nudge note: it names the nudge and key', nn.content.includes('(sandbox_documents_resubmission)'), true)
+check('nudge note: it says the channel in words', nn.content.includes('Channel: WhatsApp'), true)
+check('nudge note: it names the template', nn.content.includes('Template: documents_resubmission_required_cta'), true)
+check('nudge note: it records the lead status at the time', nn.content.includes('Lead status: Documents Pending'), true)
+check('nudge note: it records WHY it matched', nn.content.includes('KYC_Document_Reject_Count:greater_than:0'), true)
+check('nudge note: it says the trigger was the CRM webhook', nn.content.includes('Trigger: CRM webhook'), true)
+check('nudge note: it carries the IST stamp', nn.content.includes('3:31 PM'), true)
+check('nudge note: an email channel reads as Email', buildNudgeNote({ leadId: 'x', channel: 'email', at: noteAt }).content.includes('Channel: Email'), true)
+// A missing reason must not print "undefined" into the CRM.
+check('nudge note: no why still reads sensibly', buildNudgeNote({ leadId: 'x', channel: 'whatsapp', at: noteAt }).content.includes('undefined'), false)
+check('nudge note: a missing template shows a dash', buildNudgeNote({ leadId: 'x', channel: 'whatsapp', at: noteAt }).content.includes('Template: —'), true)
 
 // --- the sandbox dispatch priority --------------------------------------------
 // Only ONE nudge is sent per CRM change, so this order is a product decision, not a detail. The
