@@ -44,6 +44,8 @@ import { buildXlsx, buildZip, crc32, columnLetter, sanitiseSheetName } from '../
 import { accumulateTotals, emptyTotals, isCappedSendError } from '../src/lib/nudge-totals.ts'
 import { buildEmailNote, istStamp, NOTE_TITLE } from '../src/lib/zoho-notes.ts'
 import { interpretWebhookResponse } from '../src/lib/email-webhook.ts'
+import { describeLogError, logFailureWarning } from '../src/lib/db-error-text.ts'
+import { SANDBOX_PRIORITY, sandboxRankOf, sortBySandboxPriority } from '../src/lib/sandbox-priority.ts'
 import { istDay, istDateTime, istRangeToUtc, istDaysAgo, toCsv, exportStatus, logToExportRow, buildBreakdown, EXPORT_COLUMNS, EXPORT_WIDTHS } from '../src/lib/export-format.ts'
 import { readZip, validateXlsx } from './lib/read-zip.mjs'
 import {
@@ -2178,7 +2180,7 @@ check('a value produces custom_data', `${valued.custom_data.value}/${valued.cust
 // Written onto the Zoho lead after every successful email to a lead. The tracking id in it is what
 // links the CRM record to the open pixel and any CTA click in our own log, so the format is pinned:
 // a note that silently loses it is worse than no note, because it looks complete.
-const noteAt = new Date('2026-10-19T10:04:00Z') // 15:34 IST
+const noteAt = new Date('2026-11-02T10:01:00Z') // 15:31 IST — matches the operator's format sample
 const note = buildEmailNote({
   leadId: '109211000430170073',
   nudgeName: 'Documents Pending (Agreement Signed)',
@@ -2195,10 +2197,17 @@ check('note: it carries the message number', note.content.includes('Message: #2'
 check('note: it carries the recipient', note.content.includes('To: asha@example.com'), true)
 check('note: it carries the subject', note.content.includes('Subject: Action pending: complete your KYC documents'), true)
 check('note: it carries the tracking id', note.content.includes('Tracking: abc-123'), true)
-// IST, not UTC — 10:04Z is 15:34 in the CRM's timezone, and an operator reading "10:04" would
-// conclude the send happened at the wrong time of day.
-check('note: the timestamp reads in IST', note.content.includes('Sent: 2026-10-19 15:34 IST'), true)
-check('note: IST formatting is pinned', istStamp(noteAt), '2026-10-19 15:34')
+// The stamp is spelled out in IST, in the operator's format: time, then long date, then the zone.
+// A bare "3:31 PM" is ambiguous across regions, and the note is read in a CRM activity feed.
+check('note: the timestamp reads in IST', note.content.includes('3:31 PM'), true)
+check('note: the date is long-form and in IST', note.content.includes('Monday, November 2, 2026'), true)
+check('note: the timezone is spelled out', note.content.includes('India Standard Time IST UTC+5:30'), true)
+check('note: the whole stamp is pinned', istStamp(noteAt), '3:31 PM\nMonday, November 2, 2026\nIndia Standard Time IST UTC+5:30')
+// Midnight and afternoon edges, so a 12-hour-format slip cannot pass unnoticed.
+check('note: midnight IST is 12:00 AM, not 0:00', istStamp(new Date('2026-11-01T18:30:00Z')).split('\n')[0], '12:00 AM')
+check('note: noon IST is 12:00 PM', istStamp(new Date('2026-11-02T06:30:00Z')).split('\n')[0], '12:00 PM')
+// A UTC instant that is already the NEXT day in IST must carry the IST date, not the UTC one.
+check('note: the date follows IST, not UTC', istStamp(new Date('2026-11-02T20:00:00Z')).split('\n')[1], 'Tuesday, November 3, 2026')
 check('note: a missing tracking id does not print "undefined"', buildEmailNote({ leadId: 'x', to: 'a@b.c', subject: 's', at: noteAt }).content.includes('undefined'), false)
 check('note: it falls back to the key when there is no name', buildEmailNote({ leadId: 'x', nudgeKey: 'k1', to: 'a@b.c', subject: 's', at: noteAt }).content.includes('Nudge: k1'), true)
 check('note: message number defaults to 1', buildEmailNote({ leadId: 'x', to: 'a@b.c', subject: 's', at: noteAt }).content.includes('Message: #1'), true)
@@ -2239,6 +2248,53 @@ check('webhook: HTTP 404 is a failure', wh(404, {}).ok, false)
 check('webhook: an unparseable body on 200 is still not a send', interpretWebhookResponse(200, '<html>oops</html>').ok, false)
 check('webhook: a null message id falls through to a failure', wh(200, { message_id: '   ' }).ok, false)
 check('webhook: success beats a stray non-string id', wh(200, { message_id: 42, id: 'str-id' }).messageId, 'str-id')
+
+// --- a failed log write must not be fatal, and must be loud ---------------------
+// The send happens BEFORE the log row is written, so a rejected insert cannot undo a delivered
+// message — it just loses the record. Aborting the run there abandoned the rest of the sheet and
+// forgot everyone already messaged, which is how a permission gap turned into duplicate sends.
+const prismaDenied =
+  'Invalid `prisma.messageLog.create()` invocation: Error occurred during query execution: ' +
+  'ConnectorError(ConnectorError { user_facing_error: None, kind: QueryError(Server(ServerError ' +
+  '{ code: 1142, message: "INSERT command denied to user \'render\'@\'74.220.52.251\' for table ' +
+  '\'nudge_message_log\'", state: "42000" })) , transient: false })'
+
+check('log error: MySQL\'s own message is extracted', describeLogError(new Error(prismaDenied)), "INSERT command denied to user 'render'@'74.220.52.251' for table 'nudge_message_log'")
+check('log error: the Prisma wrapper is not shown', describeLogError(new Error(prismaDenied)).includes('ConnectorError'), false)
+check('log error: a plain error is passed through', describeLogError(new Error('boom')), 'boom')
+check('log error: a non-Error value is handled', describeLogError('something odd'), 'something odd')
+check('log error: absurdly long text is truncated', describeLogError(new Error('x'.repeat(500))).length <= 221, true)
+
+check('log warning: zero failures means no warning', logFailureWarning(0), null)
+check('log warning: undefined count means no warning', logFailureWarning(undefined), null)
+check('log warning: a negative count means no warning', logFailureWarning(-3), null)
+const warn = logFailureWarning(4, 'INSERT command denied')
+check('log warning: it states the messages WERE sent', /were SENT/.test(warn), true)
+check('log warning: it counts them', /^4 message/.test(warn), true)
+check('log warning: it says tracking cannot see them', /open\/click\/reply tracking/.test(warn), true)
+check('log warning: it warns about duplicate protection', /duplicate protection cannot see them/.test(warn), true)
+check('log warning: it tells the operator NOT to re-run', /before running this nudge again/i.test(warn), true)
+check('log warning: it carries the underlying error', warn.includes('INSERT command denied'), true)
+check('log warning: it works without a sample', logFailureWarning(1).includes('First error'), false)
+
+// --- the sandbox dispatch priority --------------------------------------------
+// Only ONE nudge is sent per CRM change, so this order is a product decision, not a detail. The
+// assertion that matters is coverage: a newly added sandbox nudge that nobody ranks would silently
+// lose every contest (unknown keys sort last), and nothing else would ever show it.
+const sandboxKeyList = Object.keys(SANDBOX_WHATSAPP_NUDGES)
+check('dispatch: every sandbox nudge is ranked', sandboxKeyList.filter((k) => !SANDBOX_PRIORITY.includes(k)).join(',') || '(none)', '(none)')
+check('dispatch: the ranking has no duplicate entries', new Set(SANDBOX_PRIORITY).size, SANDBOX_PRIORITY.length)
+check('dispatch: the ranking names no unknown nudge', SANDBOX_PRIORITY.filter((k) => !sandboxKeyList.includes(k)).join(',') || '(none)', '(none)')
+check('dispatch: the ranking covers exactly the sandbox nudges', SANDBOX_PRIORITY.length, sandboxKeyList.length)
+// Closed Won outranks everything: the lead is live and the question is about credentials.
+check('dispatch: an unlisted key sorts last, not first', sandboxRankOf('not_a_real_nudge'), SANDBOX_PRIORITY.length)
+check('dispatch: the first entry wins over the last', sandboxRankOf(SANDBOX_PRIORITY[0]) < sandboxRankOf(SANDBOX_PRIORITY[SANDBOX_PRIORITY.length - 1]), true)
+check('dispatch: a closed-won lead beats a documents-under-review one', sandboxRankOf('sandbox_closed_won_live_credentials') < sandboxRankOf('sandbox_documents_under_review'), true)
+// Sorting is stable in intent and must not mutate the caller's array.
+const unsorted = [{ key: 'sandbox_email_missing' }, { key: 'sandbox_closed_won_live_credentials' }, { key: 'unknown_key' }]
+const sorted = sortBySandboxPriority(unsorted)
+check('dispatch: sorting puts priority first and unknown last', sorted.map((x) => x.key).join(','), 'sandbox_closed_won_live_credentials,sandbox_email_missing,unknown_key')
+check('dispatch: sorting does not mutate the input', unsorted[0].key, 'sandbox_email_missing')
 
 console.log(
   `\n${total - failures}/${total} assertions passed` +

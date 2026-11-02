@@ -1542,6 +1542,31 @@ Four properties that make it safe, all deliberate:
 > interchangeable. The Notes endpoint takes the CRM id, which is why the callers pass
 > `lead.zohoId` — passing our internal id would 400 or, worse, note the wrong record.
 
+### A failed log write must never abort a send run
+
+The send happens **before** the log row is written, and it has to: the row records the provider's
+message id, which does not exist until the send returns. So by the time `messageLog.create()` runs,
+the recipient already has the message.
+
+Throwing there does not undo the send — it kills the loop. That is what a revoked `INSERT` privilege
+produced: **one message delivered, the whole sheet run reported as failed, the remaining rows never
+attempted, and nothing recorded** — so the next run was free to message the same people again.
+
+`logMessageSafely()` (src/lib/message-log.ts) therefore returns `{ ok, error }` instead of throwing,
+and every send path counts the failure:
+
+- nudge runs surface `logFailures` + `logErrorSample` on the run summary and job
+- sheet runs return `logFailures`, `logErrorSample` and a ready-made `logWarning`
+- the UI shows a **destructive** banner: *"N message(s) were SENT but their log rows could not be
+  saved … do not run this nudge again until the database write permission is fixed"*
+
+Losing the row is still serious — the dashboard, open/click/reply attribution, the failed-log retry
+and the sequence's duplicate protection all read that table — so the failure is loud, never silent.
+A `lastRunAt` stamp that fails is likewise logged and ignored rather than failing a run that has
+already sent messages.
+
+<br/>
+
 ### Unreachable numbers are not retried (and why that mattered)
 
 **Measured on this database before the rule existed.** Of 590 failed WhatsApp rows, **436 (74%) were

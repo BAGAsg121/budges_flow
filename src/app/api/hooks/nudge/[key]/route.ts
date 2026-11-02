@@ -37,6 +37,7 @@ import {
 } from '@/lib/nudge-engine'
 import { splitByKycMatch } from '@/lib/kyc-match'
 import { getStaticBaseUrl } from '@/lib/base-url'
+import { evaluateNudgeForLead } from '@/lib/lead-eligibility'
 import { isLeadWebhookAuthorized } from '@/lib/cron-auth'
 import { explainWhatsAppError } from '@/lib/whatsapp-errors'
 import { leadRecordId, payloadFields, readWebhookPayload } from '@/lib/webhook-payload'
@@ -141,60 +142,17 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ key
     lead: lead.fullName || lead.email || zohoId,
   }
 
-  // Every eligibility rule, in the SAME ORDER the scheduled run applies them.
-  //
-  // Order changes the ANSWER, not just the style: buildWhere() narrows on status, vertical and
-  // phone in the QUERY, and only then does the KYC row predicate see the survivors. Running the
-  // row predicate first here reported "expected count unknown" for a lead that was really refused
-  // for its status — a misleading reason that sends whoever reads the CRM log hunting the wrong
-  // field.
-  const statusOk =
-    !filters.includeStatuses?.length || (lead.leadStatus && filters.includeStatuses.includes(lead.leadStatus))
-  if (!statusOk) {
-    return NextResponse.json({
-      ...base,
-      action: 'skipped',
-      reason: 'status_not_included',
-      detail: `lead status "${lead.leadStatus ?? '—'}" is not in ${JSON.stringify(filters.includeStatuses)}`,
-    })
-  }
-  if (filters.excludeStatuses?.length && lead.leadStatus && filters.excludeStatuses.includes(lead.leadStatus)) {
-    return NextResponse.json({ ...base, action: 'skipped', reason: 'status_excluded', detail: lead.leadStatus })
-  }
-  if (filters.businessVertical && lead.businessVertical !== filters.businessVertical) {
-    return NextResponse.json({
-      ...base,
-      action: 'skipped',
-      reason: 'wrong_business_vertical',
-      detail: `"${lead.businessVertical ?? '—'}" != "${filters.businessVertical}"`,
-    })
-  }
-  if (filters.requirePhone !== false && !lead.mobile && !lead.phone) {
-    return NextResponse.json({ ...base, action: 'skipped', reason: 'no_valid_phone' })
-  }
-
-  // Only now the row predicate: "all documents submitted".
-  const { rejected } = splitByKycMatch([lead], filters)
-  if (rejected.length) {
-    const r = rejected[0]
-    return NextResponse.json({
-      ...base,
-      action: 'skipped',
-      reason: r.reason,
-      detail: `upload ${lead.kycDocumentUploadCount ?? '—'} vs expected ${lead.kycDocumentsExpectedCount ?? '—'}`,
-    })
-  }
-
-  const logs = await db.messageLog.findMany({ where: { nudgeId: nudge.id, leadId: lead.id } })
-  const decision = sequenceDecision(logs, nudge.maxEmailsPerLead, nudge.followUpDays, now)
-  if (decision.action === 'skip') {
-    return NextResponse.json({ ...base, action: 'skipped', reason: decision.reason, detail: decision.detail ?? null })
+  // Every eligibility rule — delegated, so this route and the sandbox dispatcher cannot answer the
+  // question differently. The rule order matters and lives in src/lib/lead-eligibility.ts.
+  const verdict = await evaluateNudgeForLead(nudge, lead, now)
+  if (!verdict.ok) {
+    return NextResponse.json({ ...base, action: 'skipped', reason: verdict.reason, detail: verdict.detail ?? null })
   }
 
   const delivery = await deliverToLead({
     nudge,
     lead,
-    messageNumber: decision.messageNumber ?? 1,
+    messageNumber: verdict.messageNumber,
     baseUrl: getStaticBaseUrl(),
     now,
   })

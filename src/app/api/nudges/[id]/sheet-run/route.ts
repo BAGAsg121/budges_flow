@@ -38,6 +38,9 @@ import { getBaseUrl } from '@/lib/base-url'
 import { parseSheetCsv, toSheetCsvUrl } from '@/lib/sheet-parser'
 import { buildSheetVars, planSheetSends } from '@/lib/sheet-vars'
 import { ctaSendParams } from '@/lib/cta'
+import { logMessageSafely } from '@/lib/message-log'
+import { logFailureWarning } from '@/lib/db-error-text'
+import { resolveLeadByEmail } from '@/lib/lead-lookup'
 import { ctaDestinationFor } from '@/lib/nudge-defaults'
 
 export const dynamic = 'force-dynamic'
@@ -142,6 +145,20 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     const failed: { email: string; error: string }[] = []
     const skipped: SkipEntry[] = []
     const fallbackEmails: { to: string; reason: string }[] = []
+    /**
+     * Rows whose message went out but whose log row could not be written.
+     *
+     * Never fatal: the recipient already has the message by the time the insert runs, so aborting
+     * here would abandon the rest of the sheet AND forget the ones already messaged. See
+     * src/lib/message-log.ts.
+     */
+    let logFailures = 0
+    let logErrorSample: string | undefined
+    /** Sent, but the CRM note write was rejected (usually the Zoho credential or its scope). */
+    let noteFailures = 0
+    let noteErrorSample: string | undefined
+    /** Sent, but no lead matched the address — nothing to attach a note to. */
+    let notesSkipped = 0
 
     // Optional email fallback: when WhatsApp cannot deliver (Meta's marketing cap, or the
     // number is unreachable), send the twin EMAIL nudge instead. Configured per nudge as
@@ -204,24 +221,25 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
           fallback,
         })
 
-        await db.messageLog.create({
-          data: {
-            leadId: null,
-            nudgeId: nudge.id,
-            channel: 'whatsapp',
-            messageNumber: 1,
-            toPhone,
-            templateName: result.usedFallbackTemplate ?? nudge.whatsappTemplateName,
-            messageId: result.waMessageId ?? null,
-            trackingId,
-            ctaUrl,
-            sheetRowRef: sheetRowRef.slice(0, 512),
-            sentOk: result.ok,
-            sendError: result.error ?? null,
-            sentAt: result.ok ? new Date() : null,
-            engagementStatus: 'sent',
-          },
+        const logged = await logMessageSafely({
+          leadId: null,
+          nudgeId: nudge.id,
+          channel: 'whatsapp',
+          messageNumber: 1,
+          toPhone,
+          templateName: result.usedFallbackTemplate ?? nudge.whatsappTemplateName,
+          messageId: result.waMessageId ?? null,
+          trackingId,
+          ctaUrl,
+          sheetRowRef: sheetRowRef.slice(0, 512),
+          sentOk: result.ok,
+          sendError: result.error ?? null,
+          sentAt: result.ok ? new Date() : null,
         })
+        if (!logged.ok) {
+          logFailures++
+          logErrorSample ??= logged.error
+        }
 
         if (result.ok) sent.push(toPhone as string)
         else {
@@ -252,30 +270,53 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
                 baseUrl,
                 fbTrackingId
               )
+              // Same lead resolution as the direct-email path: the fallback email is a real send to a
+              // real address, so the CRM should record it too.
+              const fbMatch = await resolveLeadByEmail(email)
+              const fbContext =
+                fbMatch.kind === 'matched'
+                  ? {
+                      leadId: fbMatch.zohoId,
+                      nudgeName: fallbackNudge.name,
+                      nudgeKey: fallbackNudge.key,
+                      messageNumber: 1,
+                      trackingId: fbTrackingId,
+                    }
+                  : undefined
+
               const fbResult = await sendEmail({
                 to: email,
                 subject: fbSubject,
                 html: fbHtml,
                 text: htmlToText(fbHtml),
+                ...(fbContext ? { context: fbContext } : {}),
               })
 
-              await db.messageLog.create({
-                data: {
-                  leadId: null,
-                  nudgeId: fallbackNudge.id,
-                  channel: 'email',
-                  messageNumber: 1,
-                  toEmail: email,
-                  subject: fbSubject,
-                  messageId: fbResult.messageId ?? null,
-                  trackingId: fbTrackingId,
-                  sheetRowRef: `fallback:${nudge.key}|${email}`.slice(0, 512),
-                  sentOk: fbResult.ok,
-                  sendError: fbResult.error ?? null,
-                  sentAt: fbResult.ok ? new Date() : null,
-                  engagementStatus: 'sent',
-                },
+              if (fbResult.note && !fbResult.note.ok) {
+                noteFailures++
+                noteErrorSample ??= fbResult.note.error
+              } else if (fbResult.ok && !fbContext) {
+                notesSkipped++
+              }
+
+              const fbLogged = await logMessageSafely({
+                leadId: null,
+                nudgeId: fallbackNudge.id,
+                channel: 'email',
+                messageNumber: 1,
+                toEmail: email,
+                subject: fbSubject,
+                messageId: fbResult.messageId ?? null,
+                trackingId: fbTrackingId,
+                sheetRowRef: `fallback:${nudge.key}|${email}`.slice(0, 512),
+                sentOk: fbResult.ok,
+                sendError: fbResult.error ?? null,
+                sentAt: fbResult.ok ? new Date() : null,
               })
+              if (!fbLogged.ok) {
+                logFailures++
+                logErrorSample ??= fbLogged.error
+              }
 
               if (fbResult.ok) {
                 fallbackEmails.push({
@@ -298,25 +339,62 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         trackingId
       )
 
-      const result = await sendEmail({ to: email, subject, html: bodyHtml, text: htmlToText(bodyHtml) })
+      // A sheet row carries an email address, not a lead — so resolve the CRM record id from the
+      // address, otherwise the note has nowhere to go and the send leaves no trace on the lead.
+      // Ambiguous addresses (several leads share one) are refused rather than guessed at.
+      const match = await resolveLeadByEmail(email)
+      // NOT pushed to `skipped`: the message is still sent. Only the note is withheld, so it belongs
+      // in the note counters — listing it as skipped would make the row look un-sent.
+      const noteAmbiguous = match.kind === 'ambiguous'
+      const noteContext =
+        match.kind === 'matched'
+          ? {
+              leadId: match.zohoId,
+              nudgeName: nudge.name,
+              nudgeKey: nudge.key,
+              messageNumber: 1,
+              trackingId,
+            }
+          : undefined
 
-      await db.messageLog.create({
-        data: {
-          leadId: null,
-          nudgeId: nudge.id,
-          channel: 'email',
-          messageNumber: 1,
-          toEmail: email,
-          subject,
-          messageId: result.messageId ?? null,
-          trackingId,
-          sheetRowRef,
-          sentOk: result.ok,
-          sendError: result.error ?? null,
-          sentAt: result.ok ? new Date() : null,
-          engagementStatus: 'sent',
-        },
+      const result = await sendEmail({
+        to: email,
+        subject,
+        html: bodyHtml,
+        text: htmlToText(bodyHtml),
+        ...(noteContext ? { context: noteContext } : {}),
       })
+
+      if (result.note && !result.note.ok) {
+        noteFailures++
+        noteErrorSample ??= result.note.error
+      } else if (result.ok && !noteContext) {
+        // Sent, but there is no single lead to write to — reported so "why is there no note?" is
+        // answerable instead of a mystery.
+        notesSkipped++
+        if (noteAmbiguous && !noteErrorSample) {
+          noteErrorSample = `email matches ${match.kind === 'ambiguous' ? match.count : 0} leads — ambiguous, note not written`
+        }
+      }
+
+      const logged = await logMessageSafely({
+        leadId: null,
+        nudgeId: nudge.id,
+        channel: 'email',
+        messageNumber: 1,
+        toEmail: email,
+        subject,
+        messageId: result.messageId ?? null,
+        trackingId,
+        sheetRowRef,
+        sentOk: result.ok,
+        sendError: result.error ?? null,
+        sentAt: result.ok ? new Date() : null,
+      })
+      if (!logged.ok) {
+        logFailures++
+        logErrorSample ??= logged.error
+      }
 
       if (result.ok) {
         sent.push(email)
@@ -328,8 +406,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       await new Promise((r) => setTimeout(r, 250))
     }
 
-    // Update nudge's lastRunAt
-    await db.nudge.update({ where: { id: nudge.id }, data: { lastRunAt: new Date() } })
+    // Update nudge's lastRunAt — bookkeeping, must not fail a run that already sent messages.
+    await db.nudge.update({ where: { id: nudge.id }, data: { lastRunAt: new Date() } }).catch((err) => {
+      console.error('[sheet-run] could not stamp lastRunAt:', err instanceof Error ? err.message : err)
+    })
 
     return NextResponse.json({
       ok: true,
@@ -342,6 +422,15 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         sent: sent.length,
         failed: failed.length,
         skipped: skipped.length,
+        /** Rows that WERE messaged but could not be recorded — see src/lib/message-log.ts. */
+        logFailures,
+        logErrorSample,
+        logWarning: logFailureWarning(logFailures, logErrorSample),
+        /** CRM notes: written, failed, and skipped-because-no-lead. */
+        notesWritten: sent.length - noteFailures - notesSkipped,
+        noteFailures,
+        noteErrorSample,
+        notesSkipped,
         fallbackEmails,
         sentEmails: sent,
         failedEntries: failed,

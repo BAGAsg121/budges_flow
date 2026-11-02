@@ -32,6 +32,8 @@ import { recalculateScores } from '@/lib/score-leads'
 import { isLeadWebhookAuthorized } from '@/lib/cron-auth'
 import { leadRecordId, leadStatusFrom, payloadFields, readWebhookPayload } from '@/lib/webhook-payload'
 import { deliverySummary, recentDeliveries, recordDelivery } from '@/lib/webhook-inbox'
+import { dispatchSandboxNudge, type DispatchResult } from '@/lib/sandbox-dispatch'
+import { getStaticBaseUrl } from '@/lib/base-url'
 import {
   attributionWindowHours,
   daysBetween,
@@ -201,6 +203,24 @@ export async function POST(req: NextRequest) {
   const action = !existing ? 'created_lead' : outcome.changed ? 'stage_changed' : 'no_change'
   const score = lead?.engagementScore ?? 0
 
+  // ---- send the nudge this lead now needs ----------------------------------
+  //
+  // This hook used to record the change and stop. It now also dispatches: the ONE sandbox WhatsApp
+  // nudge with the highest priority that applies to this lead. That is what makes the CRM webhook
+  // useful on its own — otherwise the CRM (or n8n) had to know which of eight endpoints to call.
+  //
+  // Opt out with ?dispatch=0. Deliberately NOT gated on `nudge.enabled` — see the note in
+  // src/lib/sandbox-dispatch.ts.
+  const dispatchFlag = (req.nextUrl.searchParams.get('dispatch') ?? '').toLowerCase()
+  const wantDispatch = dispatchFlag !== '0' && dispatchFlag !== 'false'
+  let dispatch: DispatchResult | null = null
+  if (wantDispatch) {
+    const leadRow = await db.lead.findUnique({ where: { id: outcome.leadId } })
+    if (leadRow) {
+      dispatch = await dispatchSandboxNudge(leadRow, getStaticBaseUrl())
+    }
+  }
+
   recordDelivery({
     hook: 'lead',
     status: 200,
@@ -239,6 +259,8 @@ export async function POST(req: NextRequest) {
     scoreBand: scoreBand(score),
     scoreBandLabel: SCORE_BAND_LABEL[scoreBand(score)],
     scoreBreakdown: breakdown,
+    /** What the dispatcher did: sent one nudge, or why nothing was sent. */
+    dispatch,
     summary: outcome.changed
       ? `${previous ?? '(first seen)'} → ${incoming}` +
         (outcome.attributedTo ? ` · attributed to ${outcome.attributedTo}` : ' · no nudge in the window, organic change')

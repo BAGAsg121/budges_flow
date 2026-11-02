@@ -139,6 +139,14 @@ export interface RunSummaryDto {
   failed: number
   /** Leads postponed because NUDGE_MAX_PER_RUN was hit; they resume next cycle. */
   deferred: number
+  /**
+   * Messages that went out but whose log row could not be saved.
+   *
+   * Non-zero means the database rejected the write: those sends are missing from the history, so
+   * open/click/reply attribution and the duplicate guard cannot see them.
+   */
+  logFailures?: number
+  logErrorSample?: string
   /** Per-run cap applied (null = unlimited). */
   batchLimit: number | null
   /**
@@ -195,6 +203,9 @@ export interface RunJobDto {
   syncedVia: 'mcp' | 'api' | null
   /** The LAST batch's skips, capped — what the operator sees instead of a raw deferred count. */
   skipped: RunJobSkipDto[]
+  /** Messages sent but NOT recorded, because the database rejected the log write. */
+  logFailures: number
+  logErrorSample?: string
   startedAt: string
   finishedAt?: string
   error?: string

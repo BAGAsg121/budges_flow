@@ -170,6 +170,14 @@ export function NudgesTab({
     sent: number; failed: number; skipped: number;
     failedEntries: { email: string; error: string }[];
     skippedEntries: { lead: string; email: string | null; reason: string; detail?: string }[];
+    /** Messages delivered but not recorded — the database rejected the log write. */
+    logFailures?: number;
+    logWarning?: string | null;
+    /** CRM notes: written / failed / skipped because no single lead matched the address. */
+    notesWritten?: number;
+    noteFailures?: number;
+    noteErrorSample?: string;
+    notesSkipped?: number;
   } | null>(null)
 
   /** V2: which category of nudge to show. Rides in filters.category, no schema change. */
@@ -959,6 +967,23 @@ export function NudgesTab({
                 </p>
               ) : null}
 
+              {/* Messages that went out but could not be recorded. Deliberately alarming: those
+                  sends are invisible to attribution AND to the duplicate guard. */}
+              {runJob.logFailures > 0 ? (
+                <div className="flex items-start gap-1.5 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                  <span>
+                    <b>{runJob.logFailures} message(s) were SENT but their log rows could not be saved</b> — the
+                    database rejected the write. They are missing from the history, so open/click/reply tracking and
+                    duplicate protection cannot see them. Do not run this nudge again until the database write
+                    permission is fixed.
+                    {runJob.logErrorSample ? (
+                      <span className="mt-1 block font-mono opacity-80">{runJob.logErrorSample}</span>
+                    ) : null}
+                  </span>
+                </div>
+              ) : null}
+
               {runJob.channel === 'email' && !runJob.smtpConfigured && (
                 <span className="flex items-start gap-1.5 text-warning">
                   <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
@@ -1121,6 +1146,30 @@ export function NudgesTab({
                   <span className="text-destructive">✗ {sheetResult.failed} failed</span>
                   <span className="text-muted-foreground">— {sheetResult.skipped} skipped</span>
                 </div>
+                {/* Sent but not recorded. Loud on purpose — see src/lib/message-log.ts. */}
+                {sheetResult.logWarning ? (
+                  <div className="flex items-start gap-1.5 rounded border border-destructive/40 bg-destructive/10 px-2 py-1.5 text-xs text-destructive">
+                    <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    <span>{sheetResult.logWarning}</span>
+                  </div>
+                ) : null}
+                {/* The CRM note is a separate write from the send, and it fails independently. */}
+                {sheetResult.notesWritten !== undefined ? (
+                  <div className="space-y-1 text-xs">
+                    <p className="text-muted-foreground">
+                      CRM notes: <span className="text-success">{sheetResult.notesWritten ?? 0} written</span>
+                      {sheetResult.noteFailures ? (
+                        <span className="text-destructive"> · {sheetResult.noteFailures} failed</span>
+                      ) : null}
+                      {sheetResult.notesSkipped ? (
+                        <span> · {sheetResult.notesSkipped} skipped (no single matching lead)</span>
+                      ) : null}
+                    </p>
+                    {sheetResult.noteErrorSample ? (
+                      <p className="font-mono text-warning">{sheetResult.noteErrorSample}</p>
+                    ) : null}
+                  </div>
+                ) : null}
                 {sheetResult.failedEntries.length > 0 && (
                   <div className="space-y-1">
                     <p className="text-xs font-medium text-destructive">Failed:</p>

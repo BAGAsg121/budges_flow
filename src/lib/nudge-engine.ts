@@ -25,6 +25,7 @@ import { buildWhatsAppParams } from '@/lib/whatsapp-params'
 import { isDeliveryCapError, capBackoffHours } from '@/lib/whatsapp-errors'
 import { decideSend, type SendDecision, type SequenceLog } from '@/lib/sequence'
 import { ctaSendParams } from '@/lib/cta'
+import { logMessageSafely } from '@/lib/message-log'
 import { ctaDestinationFor, expandZohoCriteria, zohoIstIso } from '@/lib/nudge-defaults'
 import { MCP_SEARCH_LIMIT, monthWindows, withCreatedWindow } from '@/lib/zoho-chunk'
 import { runGuard } from '@/lib/nudge-kind'
@@ -141,6 +142,15 @@ export interface RunSummary {
   failed: number
   /** Leads left over because the per-run batch cap was reached. */
   deferred: number
+  /**
+   * Messages that WENT OUT but whose log row could not be saved.
+   *
+   * Non-zero means the database rejected the write: those sends are missing from the history, so
+   * attribution and duplicate protection cannot see them. Surfaced loudly rather than swallowed.
+   */
+  logFailures: number
+  /** The first log-write error, so the operator sees the actual cause. */
+  logErrorSample?: string
   /** Per-run cap actually applied (null = unlimited). */
   batchLimit: number | null
   skipped: RunSkipped[]
@@ -557,6 +567,13 @@ export interface DeliveryResult {
   templateName?: string | null
   toPhone?: string | null
   toEmail?: string | null
+  /**
+   * Set when the message went out but its log row could not be written.
+   *
+   * The send is NOT undone — this is a reporting/attribution loss, and the caller must count it.
+   * See src/lib/message-log.ts for why this is not fatal.
+   */
+  logError?: string
 }
 
 /**
@@ -618,24 +635,23 @@ export async function deliverToLead(opts: {
           text: renderTemplate(nudge.bodyTemplate || '', vars),
         })
 
-    await db.messageLog.create({
-      data: {
-        leadId: lead.id,
-        nudgeId: nudge.id,
-        channel: 'whatsapp',
-        messageNumber,
-        toPhone,
-        // Record the template that ACTUALLY went out: a tracked template that Meta has not
-        // approved falls back to its base, and the log must not then claim attribution it lost.
-        templateName: result.usedFallbackTemplate ?? nudge.whatsappTemplateName,
-        messageId: result.waMessageId ?? null,
-        trackingId,
-        ctaUrl,
-        sentOk: result.ok,
-        sendError: result.error ?? null,
-        sentAt: result.ok ? new Date() : null,
-        engagementStatus: 'sent',
-      },
+    // Non-fatal on purpose: the WhatsApp message has ALREADY been delivered by now, so a failed
+    // write must not abort the run. The caller counts it and warns loudly.
+    const logged = await logMessageSafely({
+      leadId: lead.id,
+      nudgeId: nudge.id,
+      channel: 'whatsapp',
+      messageNumber,
+      toPhone,
+      // Record the template that ACTUALLY went out: a tracked template that Meta has not
+      // approved falls back to its base, and the log must not then claim attribution it lost.
+      templateName: result.usedFallbackTemplate ?? nudge.whatsappTemplateName,
+      messageId: result.waMessageId ?? null,
+      trackingId,
+      ctaUrl,
+      sentOk: result.ok,
+      sendError: result.error ?? null,
+      sentAt: result.ok ? new Date() : null,
     })
 
     return {
@@ -646,6 +662,7 @@ export async function deliverToLead(opts: {
       templateName: result.usedFallbackTemplate ?? nudge.whatsappTemplateName,
       toPhone,
       toEmail: lead.email,
+      logError: logged.ok ? undefined : logged.error,
     }
   }
 
@@ -676,21 +693,20 @@ export async function deliverToLead(opts: {
     },
   })
 
-  await db.messageLog.create({
-    data: {
-      leadId: lead.id,
-      nudgeId: nudge.id,
-      channel: 'email',
-      messageNumber,
-      toEmail: lead.email,
-      subject,
-      messageId: result.messageId ?? null,
-      trackingId,
-      sentOk: result.ok,
-      sendError: result.error ?? null,
-      sentAt: result.ok ? new Date() : null,
-      engagementStatus: 'sent',
-    },
+  // Non-fatal for the same reason as the WhatsApp branch: the email has already gone out (and the
+  // CRM note may already be written), so a rejected insert must not fail the send.
+  const logged = await logMessageSafely({
+    leadId: lead.id,
+    nudgeId: nudge.id,
+    channel: 'email',
+    messageNumber,
+    toEmail: lead.email,
+    subject,
+    messageId: result.messageId ?? null,
+    trackingId,
+    sentOk: result.ok,
+    sendError: result.error ?? null,
+    sentAt: result.ok ? new Date() : null,
   })
 
   return {
@@ -699,6 +715,7 @@ export async function deliverToLead(opts: {
     error: result.error ?? null,
     trackingId,
     toEmail: lead.email,
+    logError: logged.ok ? undefined : logged.error,
   }
 }
 
@@ -856,7 +873,12 @@ async function runMysqlNudge(nudge: Nudge, summary: RunSummary, batchLimit: numb
     await new Promise((r) => setTimeout(r, 250))
   }
 
-  await db.nudge.update({ where: { id: nudge.id }, data: { lastRunAt: new Date() } })
+  // Bookkeeping, not the work. If the write permission is broken this must not turn a run that
+  // already sent messages into a total failure.
+  await db.nudge.update({ where: { id: nudge.id }, data: { lastRunAt: new Date() } }).catch((err) => {
+    console.error('[nudge] could not stamp lastRunAt:', err instanceof Error ? err.message : err)
+  })
+  return summary
   return summary
 }
 
@@ -890,6 +912,7 @@ export async function runNudge(
     sent: 0,
     failed: 0,
     deferred: 0,
+    logFailures: 0,
     batchLimit,
     skipped: [],
     smtpConfigured: isMailerConfigured(),
@@ -1011,12 +1034,21 @@ export async function runNudge(
     attempts++
     if (delivery.ok) summary.sent++
     else summary.failed++
+    if (delivery.logError) {
+      summary.logFailures++
+      summary.logErrorSample ??= delivery.logError
+    }
 
     // small delay to stay API/SMTP-friendly
     await new Promise((r) => setTimeout(r, 250))
   }
 
-  await db.nudge.update({ where: { id: nudge.id }, data: { lastRunAt: new Date() } })
+  // Bookkeeping, not the work. If the write permission is broken this must not turn a run that
+  // already sent messages into a total failure.
+  await db.nudge.update({ where: { id: nudge.id }, data: { lastRunAt: new Date() } }).catch((err) => {
+    console.error('[nudge] could not stamp lastRunAt:', err instanceof Error ? err.message : err)
+  })
+  return summary
   return summary
 }
 
@@ -1086,6 +1118,8 @@ export async function runNudgeDrained(
     } else {
       merged.sent += summary.sent
       merged.failed += summary.failed
+      merged.logFailures += summary.logFailures
+      merged.logErrorSample ??= summary.logErrorSample
       merged.leadsConsidered = Math.max(merged.leadsConsidered, summary.leadsConsidered)
       // The latest batch's number is the true remainder.
       merged.deferred = summary.deferred

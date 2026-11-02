@@ -161,6 +161,7 @@ export async function enqueueRun(
     syncedFromZoho: null,
     syncedVia: null,
     skipped: [],
+    logFailures: 0,
     startedAt: new Date().toISOString(),
     stopRequested: false,
   }
@@ -220,6 +221,8 @@ async function runJob(job: RunJob): Promise<void> {
       job.batches++
       job.sent += summary.sent
       job.failed += summary.failed
+      job.logFailures += summary.logFailures
+      job.logErrorSample ??= summary.logErrorSample
       job.remaining = summary.deferred
       job.batchLimit = summary.batchLimit
       job.considered = Math.max(job.considered, summary.leadsConsidered)

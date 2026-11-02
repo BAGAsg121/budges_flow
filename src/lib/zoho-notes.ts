@@ -33,12 +33,37 @@ export const NOTE_TITLE = 'Nudge Engine — email sent'
 
 /** The CRM's timezone — notes must read in the operator's time, not UTC. */
 // 5h30m in milliseconds: (5*60+30) MINUTES, so ×60×1000. Writing ×60×60×1000 makes this 330 HOURS.
-const IST_OFFSET_MS = (5 * 60 + 30) * 60 * 1000
+const IST_ZONE = 'Asia/Kolkata'
 
-/** `yyyy-mm-dd HH:MM` in IST. */
+/**
+ * The timestamp as it appears in the CRM note:
+ *
+ *   3:31 PM
+ *   Monday, November 2, 2026
+ *   India Standard Time IST UTC+5:30
+ *
+ * Formatted with Intl in the CRM's timezone rather than by shifting the epoch by +5:30 by hand. The
+ * manual arithmetic had a real bug in it once (a ×60×60 that made the offset 330 HOURS), and an
+ * assertion only caught it because the output was absurd. `timeZone` cannot get that wrong.
+ *
+ * The zone name is spelled out because these notes are read by people in a CRM activity feed who
+ * may not know what "IST" means, and a bare "3:31 PM" is ambiguous across regions.
+ */
 export function istStamp(d: Date): string {
-  const shifted = new Date(d.getTime() + IST_OFFSET_MS)
-  return `${shifted.toISOString().slice(0, 10)} ${shifted.toISOString().slice(11, 16)}`
+  const time = new Intl.DateTimeFormat('en-US', {
+    timeZone: IST_ZONE,
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  }).format(d)
+  const date = new Intl.DateTimeFormat('en-US', {
+    timeZone: IST_ZONE,
+    weekday: 'long',
+    month: 'long',
+    day: 'numeric',
+    year: 'numeric',
+  }).format(d)
+  return `${time}\n${date}\nIndia Standard Time IST UTC+5:30`
 }
 
 /**
@@ -57,7 +82,9 @@ export function buildEmailNote(input: EmailNoteInput): { title: string; content:
     `To: ${input.to}`,
     `Subject: ${input.subject}`,
     `Tracking: ${input.trackingId || '—'}`,
-    `Sent: ${istStamp(at)} IST`,
+    // The stamp is multi-line, so the label sits on its own line rather than dangling before it.
+    `Sent:`,
+    istStamp(at),
   ]
   return { title: NOTE_TITLE, content: lines.join('\n') }
 }

@@ -1,15 +1,22 @@
 // The app's OWN store, now living in the Simplibank MySQL database.
 //
-// Three tables only, created once by scripts/create-nudge-tables.mjs:
-//   nudge_lead, nudge_config, nudge_message_log
+// FOUR tables are ours, and only these four. Nothing else in this database was created by this app:
+//   nudge_lead                 (model Lead)              — leads synced from Zoho CRM
+//   nudge_config               (model Nudge)             — the nudge DEFINITIONS
+//   nudge_message_log          (model MessageLog)        — one row per message actually attempted
+//   nudge_lead_stage_history   (model LeadStageHistory)  — V2: one row per CRM stage transition
+//
+// Created once by scripts/create-nudge-tables.mjs (the first three) and
+// scripts/create-stage-history-table.mjs (the fourth). Both are CREATE TABLE IF NOT EXISTS only.
+// Every later change has been an additive `ALTER TABLE ... ADD COLUMN` from a script in scripts/.
 //
 // They are deliberately prefixed `nudge_` so they cannot collide with the existing
 // business tables (that database already has its own `messagelog`).
 //
 // IMPORTANT: never run `prisma db push` / `prisma migrate` against this database.
 // This schema shares a database with live production data, and schema-push can propose
-// destructive changes to tables it does not know about. Any change to these three
-// tables must be a hand-reviewed, additive DDL statement.
+// destructive changes to tables it does not know about. Any change to these tables must be a
+// hand-reviewed, additive DDL statement.
 //
 // The external business data (csp_application, csp_docs, ...) is NOT modelled here and
 // is read read-only through src/lib/sb-db.ts.
@@ -95,7 +102,7 @@ model Lead {
  *
  * Written by the Zoho sync when a lead's Lead_Status differs from the stored one. Attribution is
  * PROBABILISTIC, not causal: it records which nudge was last sent before the change, and nothing
- * more. See src/lib/stage-attribution.ts for the rule and its window.
+ * more. See src/lib/journey.ts for the rule and its window.
  *
  * Table created with scripts/create-stage-history-table.mjs (CREATE TABLE IF NOT EXISTS only).
  */
