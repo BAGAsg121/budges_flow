@@ -154,6 +154,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ key
     messageNumber: verdict.messageNumber,
     baseUrl: getStaticBaseUrl(),
     now,
+    // The note this writes says so, instead of claiming a run did it.
+    crmNote: { trigger: 'CRM webhook (per-nudge)' },
   })
 
   if (delivery.skipped) {

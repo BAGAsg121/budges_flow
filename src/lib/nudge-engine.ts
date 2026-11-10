@@ -32,6 +32,8 @@ import { runGuard } from '@/lib/nudge-kind'
 import { upsertLeadWithJourney } from '@/lib/journey-sync'
 import { recalculateScores } from '@/lib/score-leads'
 import { splitByKycMatch, type KycCounts } from '@/lib/kyc-match'
+import { addNudgeNote } from '@/lib/zoho-notes'
+import { whyMatched } from '@/lib/nudge-why'
 import type { Lead, Nudge } from '@prisma/client'
 
 export type Channel = 'email' | 'whatsapp'
@@ -70,6 +72,11 @@ export interface NudgeFilters {
   kycMatchesExpected?: boolean
   /** Compare two columns of the same row: applied post-query, not in buildWhere. */
   kycCountRule?: 'equals' | 'less_than'
+  /**
+   * For `kycCountRule: 'less_than'` only: let a lead with uploads but NO expected count through as
+   * "still pending" instead of holding it on `kyc_expected_unknown`. See src/lib/kyc-match.ts.
+   */
+  kycTreatUnknownExpectedAsPending?: boolean
   /** Legacy spelling for `kycCountRule: 'equals'`. */
   kycCountRuleLegacy?: boolean
 
@@ -151,6 +158,16 @@ export interface RunSummary {
   logFailures: number
   /** The first log-write error, so the operator sees the actual cause. */
   logErrorSample?: string
+  /**
+   * CRM notes: how many "nudge sent" notes were written, and how many failed.
+   *
+   * Reported because a note is invisible when it silently fails — the message is delivered either
+   * way, so "the CRM has no note" is otherwise indistinguishable from "the send never happened".
+   */
+  notesWritten: number
+  noteFailures: number
+  /** The first note error, e.g. an OAuth scope mismatch. */
+  noteErrorSample?: string
   /** Per-run cap actually applied (null = unlimited). */
   batchLimit: number | null
   skipped: RunSkipped[]
@@ -684,6 +701,13 @@ export interface DeliveryResult {
    * See src/lib/message-log.ts for why this is not fatal.
    */
   logError?: string
+  /**
+   * Outcome of the "nudge sent" CRM note, when one was attempted.
+   *
+   * A failed note never fails the send: the message is already gone, and the note is the record OF
+   * the send, not a precondition for it.
+   */
+  note?: { ok: boolean; noteId?: string; error?: string }
 }
 
 /**
@@ -705,9 +729,20 @@ export async function deliverToLead(opts: {
   messageNumber: number
   baseUrl: string
   now?: Date
+  /**
+   * CRM note control. Omitted = write one (the default for every path). `false` switches it off for
+   * the caller that already writes its own note: the sandbox dispatcher records "nudge sent" AFTER
+   * checking the send, and two writers would put two notes on the same lead.
+   *
+   * `trigger` is the wording of the "Trigger:" line, so a note written by a batch run never claims
+   * the CRM sent us a webhook.
+   */
+  crmNote?: false | { trigger?: string }
 }): Promise<DeliveryResult> {
   const { nudge, lead, messageNumber, baseUrl } = opts
   const now = opts.now ?? new Date()
+  const crmNoteEnabled = opts.crmNote !== false
+  const noteTrigger = (opts.crmNote && opts.crmNote.trigger) || 'Nudge Engine run'
   const channel: Channel = nudge.channel === 'whatsapp' ? 'whatsapp' : 'email'
   const vars = buildLeadVars(lead, messageNumber, now)
 
@@ -764,6 +799,28 @@ export async function deliverToLead(opts: {
       sentAt: result.ok ? new Date() : null,
     })
 
+    // Records the send on the CRM lead — WHAT went out and WHY. Until now only the CRM-change
+    // dispatcher and the email path wrote a note, so a WhatsApp nudge sent by a batch run (or by the
+    // per-nudge webhook) left no trace on the lead: the operator could see the message in the nudge
+    // engine and nothing in the CRM they actually work in.
+    //
+    // Non-fatal by design: the message has ALREADY been delivered, so a rejected note cannot undo or
+    // fail it. It is returned so the caller can count and report it.
+    const note = crmNoteEnabled
+      ? await addNudgeNote({
+          leadId: lead.zohoId,
+          nudgeName: nudge.name,
+          nudgeKey: nudge.key,
+          channel,
+          templateName: result.usedFallbackTemplate ?? nudge.whatsappTemplateName ?? null,
+          why: whyMatched(nudge),
+          leadStatus: lead.leadStatus,
+          messageNumber,
+          at: now,
+          trigger: noteTrigger,
+        })
+      : undefined
+
     return {
       attempted: true,
       ok: result.ok,
@@ -773,6 +830,7 @@ export async function deliverToLead(opts: {
       toPhone,
       toEmail: lead.email,
       logError: logged.ok ? undefined : logged.error,
+      ...(note ? { note } : {}),
     }
   }
 
@@ -794,13 +852,18 @@ export async function deliverToLead(opts: {
     text: htmlToText(bodyHtml),
     // Records the send on the CRM lead AND carries the tracking id to the n8n webhook. The CRM is
     // where a salesperson looks; the tracking id ties the note to the open pixel and any CTA click.
-    context: {
-      leadId: lead.zohoId,
-      nudgeName: nudge.name,
-      nudgeKey: nudge.key,
-      messageNumber,
-      trackingId,
-    },
+    // `crmNote: false` disables it for the one caller that writes its own note (see the option).
+    ...(crmNoteEnabled
+      ? {
+          context: {
+            leadId: lead.zohoId,
+            nudgeName: nudge.name,
+            nudgeKey: nudge.key,
+            messageNumber,
+            trackingId,
+          },
+        }
+      : {}),
   })
 
   // Non-fatal for the same reason as the WhatsApp branch: the email has already gone out (and the
@@ -1039,6 +1102,8 @@ export async function runNudge(
     failed: 0,
     deferred: 0,
     logFailures: 0,
+    notesWritten: 0,
+    noteFailures: 0,
     batchLimit,
     skipped: [],
     smtpConfigured: isMailerConfigured(),
@@ -1164,6 +1229,13 @@ export async function runNudge(
       summary.logFailures++
       summary.logErrorSample ??= delivery.logError
     }
+    if (delivery.note) {
+      if (delivery.note.ok) summary.notesWritten++
+      else {
+        summary.noteFailures++
+        summary.noteErrorSample ??= delivery.note.error ?? 'note failed'
+      }
+    }
 
     // small delay to stay API/SMTP-friendly
     await new Promise((r) => setTimeout(r, 250))
@@ -1174,7 +1246,6 @@ export async function runNudge(
   await db.nudge.update({ where: { id: nudge.id }, data: { lastRunAt: new Date() } }).catch((err) => {
     console.error('[nudge] could not stamp lastRunAt:', err instanceof Error ? err.message : err)
   })
-  return summary
   return summary
 }
 
@@ -1246,6 +1317,9 @@ export async function runNudgeDrained(
       merged.failed += summary.failed
       merged.logFailures += summary.logFailures
       merged.logErrorSample ??= summary.logErrorSample
+      merged.notesWritten += summary.notesWritten
+      merged.noteFailures += summary.noteFailures
+      merged.noteErrorSample ??= summary.noteErrorSample
       merged.leadsConsidered = Math.max(merged.leadsConsidered, summary.leadsConsidered)
       // The latest batch's number is the true remainder.
       merged.deferred = summary.deferred

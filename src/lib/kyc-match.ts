@@ -29,6 +29,10 @@
  *
  * So both counts must be present, the expectation must be positive, and every refusal carries a
  * machine-readable reason.
+ *
+ * THE ONE SANCTIONED EXCEPTION is `kycTreatUnknownExpectedAsPending`, an explicit per-nudge flag
+ * that lets `less_than` accept a lead with uploads and no expectation. It is never implied: see the
+ * interface below for why the sandbox documents-pending rule needs it and why `equals` never may.
  */
 
 /** Which comparison to apply. */
@@ -44,6 +48,24 @@ export interface KycFilterShape {
   kycCountRule?: KycRule
   /** Legacy spelling for `kycCountRule: 'equals'`, kept so existing nudges keep working. */
   kycMatchesExpected?: boolean
+  /**
+   * OPT-IN, off by default: for `less_than` only, treat a missing expectation as "we do not know
+   * what complete looks like, so uploads are still pending" and let the lead through.
+   *
+   * Why this is opt-in rather than the default: `kyc_expected_unknown` is correct for a nudge that
+   * asserts something about completeness (`equals`), and it is also how the original
+   * `documents_pending_wa` flow behaved. But a "your upload is not finished" nudge only needs to
+   * know that SOMETHING was uploaded, and the sandbox documents-pending rule is specified as
+   * `upload > 0 AND upload < expected` — where a NULL expectation on a lead that HAS uploads was
+   * being dropped for a fact we never had. The operator asked for those to be messaged, so the
+   * relaxation is a named, auditable flag on that one nudge instead of a silent change for every
+   * rule user.
+   *
+   * It still requires a KNOWN, POSITIVE upload count: with nothing uploaded (or an unknown upload
+   * count) there is no upload in progress to remind anyone about, and the "pending" claim would be
+   * about documents that were never started.
+   */
+  kycTreatUnknownExpectedAsPending?: boolean
 }
 
 export type KycRefusalReason =
@@ -92,12 +114,28 @@ export function requiresKycMatch(filters: KycFilterShape): boolean {
  *
  * `equals` is deliberately not "at least": the nudge claims every document is in, so a lead that
  * uploaded MORE than expected is a data anomaly for a human rather than a "you're done".
+ *
+ * `treatUnknownExpectedAsPending` is honoured for `less_than` ONLY. `equals` can never accept it:
+ * "all your documents are in" is a claim an unknown expectation cannot support.
  */
-export function checkKycCounts(lead: KycCounts, rule: KycRule = 'equals'): KycMatchResult {
+export function checkKycCounts(
+  lead: KycCounts,
+  rule: KycRule = 'equals',
+  opts: { treatUnknownExpectedAsPending?: boolean } = {}
+): KycMatchResult {
   const upload = lead.kycDocumentUploadCount
   const expected = lead.kycDocumentsExpectedCount
 
-  if (expected === null || expected === undefined) return { matches: false, reason: 'kyc_expected_unknown' }
+  if (expected === null || expected === undefined) {
+    // Opt-in relaxation: an upload in progress is evidence enough that the expectation was not met,
+    // without inventing a number for it.
+    if (opts.treatUnknownExpectedAsPending === true && rule === 'less_than') {
+      if (upload === null || upload === undefined) return { matches: false, reason: 'kyc_upload_unknown' }
+      if (upload > 0) return { matches: true }
+      return { matches: false, reason: 'kyc_upload_unknown' }
+    }
+    return { matches: false, reason: 'kyc_expected_unknown' }
+  }
   if (expected <= 0) return { matches: false, reason: 'kyc_expected_zero' }
   if (upload === null || upload === undefined) return { matches: false, reason: 'kyc_upload_unknown' }
 
@@ -135,8 +173,9 @@ export function splitByKycMatch<T extends KycCounts>(
 
   const kept: T[] = []
   const rejected: { lead: T; reason: string }[] = []
+  const opts = { treatUnknownExpectedAsPending: filters.kycTreatUnknownExpectedAsPending === true }
   for (const lead of leads) {
-    const verdict = checkKycCounts(lead, rule)
+    const verdict = checkKycCounts(lead, rule, opts)
     if (verdict.matches) kept.push(lead)
     else rejected.push({ lead, reason: verdict.reason ?? 'kyc_counts_differ' })
   }

@@ -852,28 +852,43 @@ export const SANDBOX_WHATSAPP_NUDGES: Record<string, SandboxNudgeSpec> = {
   },
   sandbox_documents_pending: {
     key: 'sandbox_documents_pending',
-    title: 'Documents pending — upload not finished',
+    title: 'Documents pending — partly uploaded',
     description:
-      'EPS leads still in play (not Closed Won, Closed Lost or Unqualified (Junk)) whose ' +
-      'KYC_Document_Upload_Count holds a real value — i.e. they have started the KYC step and still ' +
-      'have documents outstanding. Asks them to finish the upload. NO creation-date bound: every ' +
-      'such lead is included, however old the record.',
+      'EPS leads still in play (not Closed Won, Closed Lost or Unqualified (Junk)) that have STARTED ' +
+      'uploading KYC documents but have not finished: KYC_Document_Upload_Count is MORE THAN 0 and ' +
+      'LESS THAN KYC_Documents_Expected_Count. Asks them to finish the upload. No creation-date ' +
+      'bound — every such lead is included, however old the record.',
     /**
-     * Zoho decides what is FETCHED, and this is deliberately narrow to keep the sync cheap:
-     * `KYC_Document_Upload_Count:greater_equal:0` excludes the ~5,500 leads whose count is empty,
-     * which is what turns "all 13k EPS leads" into a few hundred that have started KYC.
+     * Zoho decides what is FETCHED. `KYC_Document_Upload_Count:greater_than:0` is the half of the rule
+     * Zoho can express — and it is the half that shrinks the sync, since the thousands of leads with
+     * no count at all are excluded.
      *
-     * The status exclusions are applied by the LOCAL filters instead of here, because the value
-     * "Unqualified (Junk)" contains characters Zoho's criteria parser can reject — and the local
-     * filters are what decide who is messaged in any case.
+     * The OTHER half ("upload < expected") compares two columns of the same row, which Zoho search
+     * cannot express. It is applied locally by `kycCountRule: 'less_than'`, through kyc-match.ts —
+     * the same rule the existing documents-pending nudge uses, so the two cannot disagree.
      */
-    criteria: `((Business_vertical:equals:${EPS_BUSINESS_VERTICAL})and(KYC_Document_Upload_Count:greater_equal:0))`,
+    criteria: `((Business_vertical:equals:${EPS_BUSINESS_VERTICAL})and(KYC_Document_Upload_Count:greater_than:0))`,
     filters: {
       // "Lead Status is not Closed Won / Closed Lost / Unqualified (Junk)".
       excludeStatuses: ['Closed Won', 'Closed Lost', 'Unqualified (Junk)'],
-      // "KYC Document Upload Count >= 0". Supplying minKycCount makes buildWhere require a NON-NULL
-      // value, so a lead whose count is empty is not swept in — the same meaning as the criterion.
-      minKycCount: 0,
+      /**
+       * The rule, in two parts:
+       *   minKycCount: 1     -> KYC_Document_Upload_Count > 0  (also requires it to be non-null)
+       *   kycCountRule       -> KYC_Document_Upload_Count < KYC_Documents_Expected_Count
+       *
+       * `less_than` is the same comparison kyc-match.ts already applies for the existing
+       * documents-pending nudge, and by default it refuses a lead whose expected count is unknown.
+       * This nudge opts out of that with `kycTreatUnknownExpectedAsPending` (see the flag below).
+       */
+      minKycCount: 1,
+      kycCountRule: 'less_than' as const,
+      /**
+       * A lead that HAS uploads but no KYC_Documents_Expected_Count is messaged too, as "still
+       * pending". Chosen by the operator: the rule's intent is "started but not finished", and a
+       * blank expectation is a gap in the CRM, not evidence that the lead is complete. Without this
+       * flag 19 of the ~104 live leads were held on `kyc_expected_unknown`.
+       */
+      kycTreatUnknownExpectedAsPending: true,
     },
     templateName: 'documents_pending_upload',
     /**

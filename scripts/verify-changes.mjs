@@ -46,6 +46,7 @@ import { buildEmailNote, istStamp, NOTE_TITLE, buildNudgeNote, NUDGE_NOTE_TITLE 
 import { interpretWebhookResponse } from '../src/lib/email-webhook.ts'
 import { describeLogError, logFailureWarning } from '../src/lib/db-error-text.ts'
 import { SANDBOX_PRIORITY, sandboxRankOf, sortBySandboxPriority } from '../src/lib/sandbox-priority.ts'
+import { whyMatched } from '../src/lib/nudge-why.ts'
 import { istDay, istDateTime, istRangeToUtc, istDaysAgo, toCsv, exportStatus, logToExportRow, buildBreakdown, EXPORT_COLUMNS, EXPORT_WIDTHS } from '../src/lib/export-format.ts'
 import { readZip, validateXlsx } from './lib/read-zip.mjs'
 import {
@@ -557,6 +558,28 @@ check('less_than: an UNKNOWN expected count is refused, not coerced', checkKycCo
 check('less_than: unknown expected gives the unknown reason', checkKycCounts({ kycDocumentUploadCount: 6, kycDocumentsExpectedCount: null }, 'less_than').reason, 'kyc_expected_unknown')
 check('less_than: expected 0 is refused', checkKycCounts({ kycDocumentUploadCount: 0, kycDocumentsExpectedCount: 0 }, 'less_than').reason, 'kyc_expected_zero')
 check('less_than: a missing upload is refused', checkKycCounts({ kycDocumentUploadCount: null, kycDocumentsExpectedCount: 11 }, 'less_than').reason, 'kyc_upload_unknown')
+
+// --- the opt-in "unknown expectation still counts as pending" flag ------------
+// Added for the sandbox documents-pending nudge, whose rule is `upload > 0 AND upload < expected`:
+// a lead that HAS uploads but no stored expectation was being dropped on a fact the CRM never had.
+// It is opt-in, less_than only, and still needs a known positive upload count.
+const pendingOpts = { treatUnknownExpectedAsPending: true }
+check('opt-in: unknown expected is accepted for less_than', checkKycCounts({ kycDocumentUploadCount: 6, kycDocumentsExpectedCount: null }, 'less_than', pendingOpts).matches, true)
+check('opt-in: default is still to refuse it', checkKycCounts({ kycDocumentUploadCount: 6, kycDocumentsExpectedCount: null }, 'less_than').matches, false)
+check('opt-in: it never applies to the equals rule', checkKycCounts({ kycDocumentUploadCount: 6, kycDocumentsExpectedCount: null }, 'equals', pendingOpts).matches, false)
+check('opt-in: equals still says why it refused', checkKycCounts({ kycDocumentUploadCount: 6, kycDocumentsExpectedCount: null }, 'equals', pendingOpts).reason, 'kyc_expected_unknown')
+check('opt-in: nothing uploaded is NOT pending', checkKycCounts({ kycDocumentUploadCount: 0, kycDocumentsExpectedCount: null }, 'less_than', pendingOpts).matches, false)
+check('opt-in: an unknown upload count is NOT pending', checkKycCounts({ kycDocumentUploadCount: null, kycDocumentsExpectedCount: null }, 'less_than', pendingOpts).matches, false)
+// A KNOWN expectation still rules: the flag only covers the missing case.
+check('opt-in: a known, met expectation is still refused', checkKycCounts({ kycDocumentUploadCount: 11, kycDocumentsExpectedCount: 11 }, 'less_than', pendingOpts).matches, false)
+check('opt-in: a known shortfall still matches', checkKycCounts({ kycDocumentUploadCount: 6, kycDocumentsExpectedCount: 11 }, 'less_than', pendingOpts).matches, true)
+// Through the batch splitter, which is the only place a rule is applied.
+const unknownExpectedRows = [
+  { id: 'uploaded-no-expectation', kycDocumentUploadCount: 3, kycDocumentsExpectedCount: null },
+  { id: 'nothing-uploaded', kycDocumentUploadCount: 0, kycDocumentsExpectedCount: null },
+]
+check('opt-in: the splitter honours the filter flag', splitByKycMatch(unknownExpectedRows, { kycCountRule: 'less_than', kycTreatUnknownExpectedAsPending: true }).kept.map((r) => r.id).join(','), 'uploaded-no-expectation')
+check('opt-in: without the flag the splitter refuses both', splitByKycMatch(unknownExpectedRows, { kycCountRule: 'less_than' }).kept.length, 0)
 
 // --- rule resolution (enum, with the legacy boolean spelling) -----------------
 check('rule: no filter means no rule', kycRuleOf({}), null)
@@ -1126,6 +1149,32 @@ check('sandbox: under-review filter matches that value', JSON.stringify(sandboxF
 check('sandbox: only the time-bounded criteria carry a placeholder', SANDBOX_KEYS.filter((k) => hasUnexpandedPlaceholder(sandboxCriteria(k))).sort().join(','), 'sandbox_documents_resubmission,sandbox_old_website_lead,sandbox_placeholder_name_onboarding')
 check('sandbox: closed-won criteria uses the real status string', /\(Lead_Status:equals:Closed Won\)/.test(sandboxCriteria('sandbox_closed_won_live_credentials')), true)
 check('sandbox: closed-won filter matches the same status', JSON.stringify(sandboxFilters('sandbox_closed_won_live_credentials').includeStatuses), JSON.stringify([LEAD_STATUS.CLOSED_WON]))
+
+// --- the documents-pending sandbox nudge --------------------------------------
+// The rule the operator specified: "upload count is more than 0 but less than the expected count".
+// Zoho can only express the first half, so the second half is a local row predicate — and the pairing
+// is pinned here because a criterion without its filter messages everyone Zoho returns.
+const dpSandbox = DEFAULT_NUDGES.find((n) => n.key === 'sandbox_documents_pending')
+const dpSandboxFilters = JSON.parse(dpSandbox?.filters ?? '{}')
+check('dp sandbox: the nudge exists', Boolean(dpSandbox), true)
+check('dp sandbox: criteria requires an upload above zero', /\(KYC_Document_Upload_Count:greater_than:0\)/.test(dpSandbox?.zohoCriteria ?? ''), true)
+check('dp sandbox: criteria is scoped to EPS', /\(Business_vertical:equals:EPS\)/.test(dpSandbox?.zohoCriteria ?? ''), true)
+check('dp sandbox: the local filter also requires a count above zero', dpSandboxFilters.minKycCount, 1)
+check('dp sandbox: the local filter applies the less_than rule', dpSandboxFilters.kycCountRule, 'less_than')
+check('dp sandbox: uploads with no stored expectation still count as pending', dpSandboxFilters.kycTreatUnknownExpectedAsPending, true)
+check('dp sandbox: it excludes the finished statuses', JSON.stringify(dpSandboxFilters.excludeStatuses), JSON.stringify([LEAD_STATUS.CLOSED_WON, 'Closed Lost', LEAD_STATUS.UNQUALIFIED_JUNK]))
+check('dp sandbox: it has no creation-date bound', dpSandboxFilters.createdAfter === undefined && dpSandboxFilters.createdWithinDays === undefined, true)
+check('dp sandbox: criteria has no Created_Time bound', /Created_Time/.test(dpSandbox?.zohoCriteria ?? ''), false)
+check('dp sandbox: it sends on the click-tracked template', dpSandbox?.whatsappTemplateName, 'documents_pending_upload_cta')
+check('dp sandbox: the tracked template carries a button token', JSON.stringify(JSON.parse(dpSandbox?.whatsappParams ?? '{}').button), JSON.stringify(['mobile_digits']))
+check('dp sandbox: it renders progress, not a bare count', JSON.stringify(JSON.parse(dpSandbox?.whatsappParams ?? '{}').body), JSON.stringify(['pending_documents']))
+
+// The "why did we message this person?" wording, shared by the dispatcher and the run engine so the
+// two cannot describe the same condition differently.
+check('why: the criteria is preferred', whyMatched({ zohoCriteria: '(A:equals:1)', filters: '{"minKycCount":1}' }), '(A:equals:1)')
+check('why: a blank criteria falls back to the filters', whyMatched({ zohoCriteria: '  ', filters: '{"minKycCount":1}' }), 'minKycCount=1')
+check('why: bookkeeping keys are dropped', whyMatched({ zohoCriteria: null, filters: '{"category":"sandbox_whatsapp","requirePhone":true,"minKycCount":1}' }), 'minKycCount=1')
+check('why: an unreadable filter block still answers', whyMatched({ zohoCriteria: null, filters: 'not json' }), "matched this nudge's filters")
 
 // The real Zoho picklist values, so a typo in the criteria is caught here rather than in production.
 check('sandbox: the KYC picklist values are the real ones', JSON.stringify(KYC_UPLOAD_STATUS_VALUES), JSON.stringify(['-None-', 'Partial Done', 'All Done', 'Re-upload Requested', 'Accepted']))
@@ -2305,6 +2354,11 @@ check('nudge note: an email channel reads as Email', buildNudgeNote({ leadId: 'x
 // A missing reason must not print "undefined" into the CRM.
 check('nudge note: no why still reads sensibly', buildNudgeNote({ leadId: 'x', channel: 'whatsapp', at: noteAt }).content.includes('undefined'), false)
 check('nudge note: a missing template shows a dash', buildNudgeNote({ leadId: 'x', channel: 'whatsapp', at: noteAt }).content.includes('Template: —'), true)
+// The note is now written by EVERY send path (batch run, per-nudge webhook, CRM dispatch), so the
+// "Trigger" line must describe what actually caused the send instead of always claiming a webhook.
+check('nudge note: a run-written note says so', buildNudgeNote({ leadId: 'x', channel: 'whatsapp', at: noteAt, trigger: 'Nudge Engine run' }).content.includes('Trigger: Nudge Engine run'), true)
+check('nudge note: the trigger defaults to the CRM webhook', buildNudgeNote({ leadId: 'x', channel: 'whatsapp', at: noteAt }).content.includes('Trigger: CRM webhook'), true)
+check('nudge note: a blank trigger still prints a word', buildNudgeNote({ leadId: 'x', channel: 'whatsapp', at: noteAt, trigger: '' }).content.includes('Trigger: CRM webhook'), true)
 
 // --- the sandbox dispatch priority --------------------------------------------
 // Only ONE nudge is sent per CRM change, so this order is a product decision, not a detail. The

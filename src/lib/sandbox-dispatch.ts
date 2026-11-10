@@ -25,6 +25,7 @@ import { db } from '@/lib/db'
 import { deliverToLead, evaluateNudgeForLead, type Eligibility } from '@/lib/nudge-engine'
 import { sortBySandboxPriority } from './sandbox-priority.ts'
 import { addNudgeNote } from './zoho-notes.ts'
+import { whyMatched } from './nudge-why.ts'
 import type { Lead, Nudge } from '@prisma/client'
 
 // The ranking lives in a dependency-free module so the verification suite can assert that it covers
@@ -57,23 +58,10 @@ export interface DispatchResult {
 /**
  * The rule that matched, in words an operator can read in the CRM.
  *
- * Prefers the nudge's stored Zoho criteria, because that is literally the condition — falling back
- * to the filter JSON would be accurate but unreadable in a note.
+ * The wording itself now lives in src/lib/nudge-why.ts, because the run engine writes the same note
+ * for the sends the dispatcher never sees (batch runs, the per-nudge webhook). One definition, so the
+ * two paths cannot describe the same condition differently.
  */
-function whyMatched(nudge: Nudge): string {
-  const criteria = (nudge.zohoCriteria || '').trim()
-  if (criteria) return criteria
-  try {
-    const f = JSON.parse(nudge.filters || '{}')
-    delete f.category
-    delete f.requirePhone
-    const bits = Object.entries(f).map(([k, v]) => `${k}=${JSON.stringify(v)}`)
-    if (bits.length) return bits.join(', ')
-  } catch {
-    /* fall through */
-  }
-  return 'matched this nudge\'s filters'
-}
 
 function isSandbox(nudge: Nudge): boolean {
   try {
@@ -117,6 +105,9 @@ export async function dispatchSandboxNudge(
       messageNumber: verdict.messageNumber,
       baseUrl,
       now,
+      // This function writes its own note below (it also records the priority decision), so the
+      // engine must not add a second one.
+      crmNote: false,
     })
 
     if (delivery.skipped) {
@@ -152,6 +143,7 @@ export async function dispatchSandboxNudge(
       leadStatus: lead.leadStatus,
       messageNumber: verdict.messageNumber,
       at: now,
+      trigger: 'CRM webhook',
     })
 
     return {

@@ -134,6 +134,12 @@ export interface NudgeNoteInput {
   leadStatus?: string | null
   messageNumber?: number | null
   at?: Date
+  /**
+   * What caused the send, written verbatim into the note. Defaults to the CRM webhook because that is
+   * where this note started; the run engine passes its own wording so a note written by a batch run
+   * does not claim the CRM called us.
+   */
+  trigger?: string | null
 }
 
 export const NUDGE_NOTE_TITLE = 'Nudge Engine — nudge sent'
@@ -157,7 +163,7 @@ export function buildNudgeNote(input: NudgeNoteInput): { title: string; content:
     `Message: #${input.messageNumber ?? 1}`,
     `Lead status: ${input.leadStatus || '—'}`,
     `Why: ${input.why || 'matched this nudge\'s filters'}`,
-    `Trigger: CRM webhook`,
+    `Trigger: ${input.trigger || 'CRM webhook'}`,
     `Sent:`,
     istStamp(at),
   ]
