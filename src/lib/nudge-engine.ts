@@ -632,6 +632,11 @@ function buildLeadVars(lead: {
     lead_status: lead.leadStatus,
     kyc_document_upload_count: lead.kycDocumentUploadCount,
     kyc_documents_expected_count: lead.kycDocumentsExpectedCount,
+    // A human phrase for the documents-pending template's {{1}}:
+    //   "…are still pending: {{1}} Please upload them soon…"
+    // The CRM knows the counts, not which specific documents are outstanding, so this says how far
+    // along they are rather than inventing a list. A bare number would read "still pending: 0".
+    pending_documents: describePendingDocuments(lead.kycDocumentUploadCount, lead.kycDocumentsExpectedCount),
     // Needed by the resubmission template, which counts the rejected documents in its body
     // ("your {{2}} documents needs resubmission"). A null would render as the fallback "-", so the
     // nudge refuses to select a lead with no reject count in the first place.
@@ -985,6 +990,22 @@ async function runMysqlNudge(nudge: Nudge, summary: RunSummary, batchLimit: numb
   })
   return summary
   return summary
+}
+
+/**
+ * A readable stand-in for "which documents are still pending".
+ *
+ * The CRM stores how MANY were uploaded and how many were expected — never which specific ones are
+ * outstanding. Rather than invent a list, this reports progress. A template that renders a bare
+ * count reads "still pending: 0", which looks broken.
+ */
+export function describePendingDocuments(uploaded: number | null, expected: number | null): string {
+  if (uploaded !== null && expected !== null && expected > 0) {
+    return `${uploaded} of ${expected} documents uploaded`
+  }
+  if (uploaded !== null) return `${uploaded} document(s) uploaded`
+  if (expected !== null && expected > 0) return `0 of ${expected} documents uploaded`
+  return 'the required KYC documents'
 }
 
 /**

@@ -239,7 +239,7 @@ check('whatsapp_sample targets exactly one status', filtersOf('whatsapp_sample')
 checkTrue('whatsapp_sample asks for a phone', filtersOf('whatsapp_sample').requirePhone === true)
 check('whatsapp_sample is capped at 1 message/lead', wa.maxEmailsPerLead, 1)
 checkTrue('whatsapp_sample body renders first_name', renderTemplate(wa.bodyTemplate, { first_name: 'Asha' }).includes('Hi Asha'))
-check('whatsapp nudges: sample + legacy doc twin + 6 MySQL + 3 sheet + 1 CRM status + 8 sandbox', DEFAULT_NUDGES.filter((n) => n.channel === 'whatsapp').length, 20)
+check('whatsapp nudges: sample + legacy doc twin + 6 MySQL + 3 sheet + 1 CRM status + 9 sandbox', DEFAULT_NUDGES.filter((n) => n.channel === 'whatsapp').length, 21)
 const waDocs = byKey['documents_pending_wa']
 check('documents_pending_wa template language is en_US (not en)', waDocs.whatsappLanguage, 'en_US')
 check('documents_pending_wa supplies 3 params for its 3 variables', JSON.parse(waDocs.whatsappParams).length, countTemplateVars(waDocs.bodyTemplate))
@@ -1065,8 +1065,9 @@ const SANDBOX_KEYS = [
   'sandbox_closed_won_live_credentials',
   'sandbox_placeholder_name_onboarding',
   'sandbox_documents_resubmission',
+  'sandbox_documents_pending',
 ]
-check('sandbox: eight nudges are defined', Object.keys(SANDBOX_WHATSAPP_NUDGES).length, 8)
+check('sandbox: nine nudges are defined', Object.keys(SANDBOX_WHATSAPP_NUDGES).length, 9)
 for (const key of SANDBOX_KEYS) {
   const n = DEFAULT_NUDGES.find((x) => x.key === key)
   const f = JSON.parse(n?.filters ?? '{}')
@@ -2063,8 +2064,8 @@ const waNudges = DEFAULT_NUDGES.filter((n) => n.channel === 'whatsapp' && n.what
 const shouldTrack = waNudges.filter((n) => templateHasButton(n.whatsappTemplateName))
 check('every button template is tracked', shouldTrack.every((n) => isTrackedTemplate(n.whatsappTemplateName)), true)
 check('templates without a button stay untracked', waNudges.filter((n) => !templateHasButton(n.whatsappTemplateName)).every((n) => !isTrackedTemplate(n.whatsappTemplateName)), true)
-// 9 pre-existing (6 console flows + 2 pay + the review nudge) + all 8 sandbox nudges.
-check('17 templates are tracked', shouldTrack.length, 17)
+// 9 pre-existing (6 console flows + 2 pay + the review nudge) + all 9 sandbox nudges.
+check('18 templates are tracked', shouldTrack.length, 18)
 // The retired MARKETING templates must not be resurrected by this change.
 check(
   'no nudge points at a retired MARKETING template',

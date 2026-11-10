@@ -17,6 +17,8 @@ export const SANDBOX_PRIORITY: string[] = [
   'sandbox_closed_won_live_credentials',
   // Documents were rejected: the application cannot progress until they act.
   'sandbox_documents_resubmission',
+  // Documents outstanding — also an action they must take, and time-critical for activation.
+  'sandbox_documents_pending',
   // Documents approved; e-sign is the next step.
   'sandbox_documents_accepted',
   // Eko Code issued, agreement unsigned.

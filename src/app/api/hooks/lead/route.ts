@@ -221,6 +221,20 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // Say what the dispatcher did, in the delivery inbox as well as the response.
+  //
+  // Without this the inbox could only report "the webhook arrived", so "I changed the status and got
+  // no message" was unanswerable from here — you had to guess between "no nudge matched", "it matched
+  // but the sequence cap skipped it", and "it was sent and WhatsApp dropped it". Those need very
+  // different fixes, so the reason belongs next to the delivery.
+  const dispatchDetail = !dispatch
+    ? ' · dispatch off (?dispatch=0)'
+    : dispatch.action === 'sent'
+      ? ` · NUDGE SENT ${dispatch.nudgeKey}${dispatch.note && !dispatch.note.ok ? ' (note failed)' : ''}`
+      : dispatch.action === 'failed'
+        ? ` · NUDGE FAILED ${dispatch.nudgeKey}: ${String(dispatch.error ?? '').slice(0, 120)}`
+        : ` · no nudge matched (${dispatch.evaluated.map((e) => `${e.nudgeKey}:${e.reason}`).join(', ').slice(0, 300)})`
+
   recordDelivery({
     hook: 'lead',
     status: 200,
@@ -228,12 +242,12 @@ export async function POST(req: NextRequest) {
     leadId: zohoId,
     fields: payloadFields(payload),
     detail:
-      outcome.changed
+      (outcome.changed
         ? `${action}: ${previous ?? '(first seen)'} → ${incoming}` +
           (outcome.attributedTo ? ` (attributed to ${outcome.attributedTo})` : ' (no nudge in the window)')
         : action === 'created_lead'
           ? 'created_lead: first sighting, no transition recorded'
-          : `no_change: already ${previous ?? 'unset'}`,
+          : `no_change: already ${previous ?? 'unset'}`) + dispatchDetail,
   })
 
   return NextResponse.json({

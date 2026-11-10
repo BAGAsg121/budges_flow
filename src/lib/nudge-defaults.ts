@@ -850,6 +850,46 @@ export const SANDBOX_WHATSAPP_NUDGES: Record<string, SandboxNudgeSpec> = {
       'The reason could be as simple as they are not clear. Please go to EPS console and resubmit ' +
       'the documents highlighted there.',
   },
+  sandbox_documents_pending: {
+    key: 'sandbox_documents_pending',
+    title: 'Documents pending — upload not finished',
+    description:
+      'EPS leads still in play (not Closed Won, Closed Lost or Unqualified (Junk)) whose ' +
+      'KYC_Document_Upload_Count holds a real value — i.e. they have started the KYC step and still ' +
+      'have documents outstanding. Asks them to finish the upload. NO creation-date bound: every ' +
+      'such lead is included, however old the record.',
+    /**
+     * Zoho decides what is FETCHED, and this is deliberately narrow to keep the sync cheap:
+     * `KYC_Document_Upload_Count:greater_equal:0` excludes the ~5,500 leads whose count is empty,
+     * which is what turns "all 13k EPS leads" into a few hundred that have started KYC.
+     *
+     * The status exclusions are applied by the LOCAL filters instead of here, because the value
+     * "Unqualified (Junk)" contains characters Zoho's criteria parser can reject — and the local
+     * filters are what decide who is messaged in any case.
+     */
+    criteria: `((Business_vertical:equals:${EPS_BUSINESS_VERTICAL})and(KYC_Document_Upload_Count:greater_equal:0))`,
+    filters: {
+      // "Lead Status is not Closed Won / Closed Lost / Unqualified (Junk)".
+      excludeStatuses: ['Closed Won', 'Closed Lost', 'Unqualified (Junk)'],
+      // "KYC Document Upload Count >= 0". Supplying minKycCount makes buildWhere require a NON-NULL
+      // value, so a lead whose count is empty is not swept in — the same meaning as the criterion.
+      minKycCount: 0,
+    },
+    templateName: 'documents_pending_upload',
+    /**
+     * ONE body variable and it is not optional: the template reads
+     * "…are still pending: {{1}} Please upload them soon…", so sending no parameter fails every send
+     * with 132000. `pending_documents` renders progress ("1 of 3 documents uploaded") because the CRM
+     * records how many, never which ones.
+     */
+    bodyVars: ['pending_documents'],
+    hasButton: true,
+    buttonText: 'Upload Now',
+    buttonUrl: `${CONSOLE_URL}?mobile={{1}}`,
+    body:
+      'Hi 👋 A few mandatory documents for your Eko partner account are still pending: {{1}} ' +
+      'Please upload them soon to avoid any delay in activation.',
+  },
 }
 
 // ---------------------------------------------------------------------------
