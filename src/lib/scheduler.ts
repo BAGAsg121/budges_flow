@@ -3,8 +3,9 @@
  *
  * Started from src/instrumentation.ts when the Next server boots. Every
  * SCHEDULE_INTERVAL_MINUTES it:
- *   1. runs every enabled nudge (optionally syncing leads from Zoho first), and
- *   2. polls for email replies over IMAP when IMAP_ENABLED=true.
+ *   1. runs every enabled nudge that is due (optionally syncing leads from Zoho first),
+ *   2. runs the daily SHEET flows whose IST slot has arrived, and
+ *   3. polls for email replies over IMAP when IMAP_ENABLED=true.
  *
  * Each nudge is run through runNudgeDrained(), which keeps starting cap-sized batches
  * (NUDGE_MAX_PER_RUN) until the eligible pool is exhausted or the run budget expires — so a cycle
@@ -20,12 +21,20 @@ import { expandZohoCriteria } from '@/lib/nudge-defaults'
 import { getStaticBaseUrl } from '@/lib/base-url'
 import { isImapConfigured, syncRepliesFromImap, type ImapSyncResult } from '@/lib/reply-tracker'
 import { nudgeSourceOf } from '@/lib/nudge-kind'
+import { runSheetNudge, type SheetRunSummary } from '@/lib/sheet-run'
+import { dailyGate, dailyHourOf, sheetScheduleOf, type SheetSchedule } from '@/lib/daily-schedule'
 
 export interface NudgeRunResult {
   nudgeKey: string
   name: string
   channel: string
   summary?: RunSummary
+  /**
+   * Set instead of `summary` when this was a daily SHEET flow: the sheet run reports rows read
+   * rather than leads considered, so it is a different shape and is surfaced separately rather than
+   * forced into RunSummary with zeros that would read as "nothing happened".
+   */
+  sheet?: SheetRunSummary
   error?: string
   /**
    * Set when the nudge has its own cadence (`filters.everyHours`) and was not due yet, so the
@@ -33,6 +42,8 @@ export interface NudgeRunResult {
    * must be answerable from the cycle result.
    */
   notDue?: string
+  /** The daily slot this sheet flow waited for / used, when it has one. */
+  scheduledAt?: string
 }
 
 /**
@@ -124,11 +135,18 @@ export function schedulerStatus(): SchedulerStatus {
 }
 
 /**
- * Run every enabled, RUN-BASED nudge once. Never throws; per-nudge errors are captured.
+ * Run every enabled nudge that is due once. Never throws; per-nudge errors are captured.
  *
- * "Run-based" means lead-driven (a Zoho criteria) OR MySQL-driven (reads the business database).
- * Only SHEET nudges are excluded: they are meant to be triggered by pasting a Google Sheet URL,
- * and running one on a timer would message a list nobody supplied.
+ * Two kinds of work, and they are asked different questions:
+ *
+ *   • LEAD/MySQL drives (a Zoho criteria, or `filters.source="mysql"`): "is this nudge due by its
+ *     interval?" (`filters.everyHours` → cadenceDue), then runNudgeDrained.
+ *   • DAILY SHEET flows (`filters.sheetUrl` is set): "has today's 11:00 IST slot passed and not been
+ *     used?" (dailyGate), then runSheetNudge against the stored Google Sheet URL. This is what makes
+ *     the activation-fee reminders go out every day with nobody clicking anything.
+ *
+ * A sheet nudge with NO stored URL is still manual-only and never runs here: a timer must not message
+ * a list nobody supplied.
  *
  * THE BUG THIS FIXES: the filter used to be `zohoCriteria: { not: null }`, written when a null
  * criteria meant "sheet nudge". The MySQL flows were later given a null criteria too — they are
@@ -141,6 +159,16 @@ export function schedulerStatus(): SchedulerStatus {
  * code pulled the same CRM window N times per cycle. One sync per distinct criteria, then every
  * nudge runs with `sync:false`.
  */
+/** Parse a nudge's filters JSON without ever throwing (a corrupt row must not kill the cycle). */
+function filtersOf(nudge: { filters: string }): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(nudge.filters || '{}')
+    return typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : {}
+  } catch {
+    return {}
+  }
+}
+
 export async function runAllEnabledNudges(opts?: { sync?: boolean; limit?: number | null }): Promise<NudgeRunResult[]> {
   const sync = opts?.sync ?? (process.env.SCHEDULE_SYNC_FROM_ZOHO ?? 'true') === 'true'
   const limit = opts?.limit === undefined ? getBatchLimit() : opts.limit
@@ -153,7 +181,22 @@ export async function runAllEnabledNudges(opts?: { sync?: boolean; limit?: numbe
     where: { enabled: true },
     orderBy: { createdAt: 'asc' },
   })
-  const nudges = enabled.filter((n) => nudgeSourceOf(n) !== 'sheet')
+
+  // SHEET nudges are split in two, and the split is the whole safety story:
+  //   • with `filters.sheetUrl` — a daily flow whose source was deliberately stored. It runs on its
+  //     own clock (dailyGate), not on the Zoho/MySQL loop, because it reads a Google Sheet.
+  //   • without one — manual only, exactly as before: triggering it on a timer would message a list
+  //     nobody supplied.
+  const sheetFlows: { nudge: (typeof enabled)[number]; schedule: SheetSchedule }[] = []
+  const nudges = enabled.filter((n) => {
+    if (nudgeSourceOf(n) !== 'sheet') return true
+    const schedule = sheetScheduleOf(filtersOf(n))
+    if (schedule) {
+      sheetFlows.push({ nudge: n, schedule })
+      return false
+    }
+    return false
+  })
   const results: NudgeRunResult[] = []
   const now = new Date()
 
@@ -249,6 +292,62 @@ export async function runAllEnabledNudges(opts?: { sync?: boolean; limit?: numbe
     endMysqlSnapshot()
   }
 
+  // 2. The daily SHEET flows — one run per nudge per day, at their own IST slot.
+  //
+  // They are outside the loop above on purpose: they have no Zoho criteria to sync, they read a
+  // Google Sheet, and their "due?" question is a clock time (dailyGate), not an interval. They also
+  // do NOT consult message history — every row in the sheet is sent on every daily run, which is the
+  // operator's chosen policy for the activation-fee reminders ("remind them daily until they pay").
+  //
+  // One flow failing must not stop the other, so each is wrapped separately.
+  for (const { nudge, schedule } of sheetFlows) {
+    const gate = dailyGate({ lastRunAt: nudge.lastRunAt, dailyAtHour: schedule.dailyAtHour ?? 11, now })
+    if (!gate.due) {
+      results.push({
+        nudgeKey: nudge.key,
+        name: nudge.name,
+        channel: nudge.channel,
+        notDue: gate.reason,
+        scheduledAt: gate.scheduledAt,
+      })
+      continue
+    }
+
+    try {
+      const outcome = await runSheetNudge({
+        nudge,
+        sheetUrl: schedule.sheetUrl,
+        ...(schedule.gid ? { gid: schedule.gid } : {}),
+        baseUrl,
+      })
+      if (!outcome.ok) {
+        results.push({
+          nudgeKey: nudge.key,
+          name: nudge.name,
+          channel: nudge.channel,
+          error: `sheet run refused (HTTP ${outcome.status}): ${outcome.error}`,
+          scheduledAt: gate.scheduledAt,
+        })
+        continue
+      }
+      results.push({
+        nudgeKey: nudge.key,
+        name: nudge.name,
+        channel: nudge.channel,
+        sheet: outcome.summary,
+        scheduledAt: gate.scheduledAt,
+      })
+    } catch (err) {
+      results.push({
+        nudgeKey: nudge.key,
+        name: nudge.name,
+        channel: nudge.channel,
+        error: err instanceof Error ? err.message : String(err),
+        scheduledAt: gate.scheduledAt,
+      })
+    }
+  }
+
   return results
 }
 
@@ -311,6 +410,9 @@ const SCORE_BATCH = 500
         if (r.error) acc.errors++
         acc.sent += r.summary?.sent ?? 0
         acc.failed += r.summary?.failed ?? 0
+        // Daily sheet flows report a different summary shape; they still count.
+        acc.sent += r.sheet?.sent ?? 0
+        acc.failed += r.sheet?.failed ?? 0
         return acc
       },
       { sent: 0, failed: 0, errors: 0 }

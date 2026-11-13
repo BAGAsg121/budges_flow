@@ -443,6 +443,40 @@ export function ctaDestinationFor(templateName: string | null | undefined, mobil
   return url.replace('{{1}}', encodeURIComponent(mobileDigits))
 }
 
+/**
+ * The daily activation-fee reminders: their sheet source, in their filters.
+ *
+ * These two are the only SHEET nudges that run on a timer. The URL + tab live here so a seeded nudge
+ * is ready to run unattended (see src/lib/daily-schedule.ts for why `sheetUrl` in the filters is what
+ * marks a sheet nudge as scheduled), and `dailyAtHour` is the IST hour the scheduler waits for.
+ *
+ * The two tabs are two different populations of the SAME spreadsheet: partners who have transacted,
+ * and partners who have not. Sending the wrong copy to either is a real-world error, which is why the
+ * gid is spelled out per nudge rather than derived from whatever tab the link happens to point at.
+ */
+export const ACTIVATION_FEE_SHEET_URL =
+  'https://docs.google.com/spreadsheets/d/1dMlpmaRnQsaaVXaSZLy5oMP8Q7dyqo4ZJMXXEQEI-IE/edit'
+
+export interface DailySheetSource {
+  sheetUrl: string
+  sheetGid: string
+  /** Hour of day in IST at which the daily run goes out. */
+  dailyAtHour: number
+}
+
+export const WA_DAILY_SHEET: Record<string, DailySheetSource> = {
+  whatsapp_onboarded_transacting: {
+    sheetUrl: ACTIVATION_FEE_SHEET_URL,
+    sheetGid: '102394202',
+    dailyAtHour: 11,
+  },
+  whatsapp_onboarded_not_transacting: {
+    sheetUrl: ACTIVATION_FEE_SHEET_URL,
+    sheetGid: '0',
+    dailyAtHour: 11,
+  },
+}
+
 /** One manual, sheet-driven WhatsApp nudge's approved copy. */
 export interface WaSheetFlowTemplate {
   templateName: string
@@ -1163,15 +1197,27 @@ export const DEFAULT_NUDGES: NudgeSeed[] = [
     // every export. Strip the redundant suffix.
     name: `WhatsApp · ${t.title.replace(/\s*\(WhatsApp\)\s*$/, '')}`,
     description:
-      `MANUAL — paste a Google Sheet URL in the UI (Send from Sheet). WhatsApp nudge for this list. ` +
-      `The sheet needs an email or mobile column; the mobile drives the button when the template has one ` +
-      `(${PAY_ACTIVATION_FEE_URL}?mobile=<mobile>). ` +
+      (WA_DAILY_SHEET[key]
+        ? `DAILY, AUTOMATIC — reads its Google Sheet tab automatically (${WA_DAILY_SHEET[key].sheetGid}) ` +
+          `and sends once a day at ${WA_DAILY_SHEET[key].dailyAtHour}:00 IST, with no manual step. ` +
+          `Every row in the sheet is messaged on every daily run, so a partner who has not paid is ` +
+          `reminded again the next day; the run reports any that it could not send. `
+        : `MANUAL — paste a Google Sheet URL in the UI (Send from Sheet). `) +
+      `WhatsApp nudge for this list. The sheet needs an email or mobile column; the mobile drives ` +
+      `the button when the template has one (${PAY_ACTIVATION_FEE_URL}?mobile=<mobile>). ` +
       `Sends the approved Meta template "${templateHasButton(t.templateName) ? trackedTemplateName(t.templateName) : t.templateName}" in ${WHATSAPP_TEMPLATE_LANGUAGE_DEFAULT}. ` +
       `Ships disabled until that template is approved.`,
     enabled: false,
     channel: 'whatsapp',
     zohoCriteria: null,
-    filters: json({ source: 'sheet', requirePhone: true, emailFallback: WA_EMAIL_TWIN[key] }),
+    filters: json({
+      source: 'sheet',
+      requirePhone: true,
+      emailFallback: WA_EMAIL_TWIN[key],
+      // Present ONLY on the two activation-fee reminders — this is what makes them run daily with
+      // no interaction. Absent here means "manual only", which is still true of the IP notice.
+      ...(WA_DAILY_SHEET[key] ?? {}),
+    }),
     bodyTemplate: t.body,
     // A tracked variant exists only where there is a button to track — the IP notice has none, so
     // it keeps its plain template.

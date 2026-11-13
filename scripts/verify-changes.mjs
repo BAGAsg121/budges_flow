@@ -47,6 +47,7 @@ import { interpretWebhookResponse } from '../src/lib/email-webhook.ts'
 import { describeLogError, logFailureWarning } from '../src/lib/db-error-text.ts'
 import { SANDBOX_PRIORITY, sandboxRankOf, sortBySandboxPriority } from '../src/lib/sandbox-priority.ts'
 import { whyMatched } from '../src/lib/nudge-why.ts'
+import { dailyGate, dailyHourOf, formatHour, sheetScheduleOf } from '../src/lib/daily-schedule.ts'
 import { istDay, istDateTime, istRangeToUtc, istDaysAgo, toCsv, exportStatus, logToExportRow, buildBreakdown, EXPORT_COLUMNS, EXPORT_WIDTHS } from '../src/lib/export-format.ts'
 import { readZip, validateXlsx } from './lib/read-zip.mjs'
 import {
@@ -2378,6 +2379,70 @@ const unsorted = [{ key: 'sandbox_email_missing' }, { key: 'sandbox_closed_won_l
 const sorted = sortBySandboxPriority(unsorted)
 check('dispatch: sorting puts priority first and unknown last', sorted.map((x) => x.key).join(','), 'sandbox_closed_won_live_credentials,sandbox_email_missing,unknown_key')
 check('dispatch: sorting does not mutate the input', unsorted[0].key, 'sandbox_email_missing')
+
+// --- the daily sheet scheduler -------------------------------------------------
+// The two activation-fee reminders are the only sheet nudges that run unattended, so both halves are
+// pinned: the SOURCE stored on the nudge, and the CLOCK that decides when it fires. A gate that is
+// wrong here either sends at the wrong time or silently never sends at all, and "never sends" is
+// indistinguishable from "nobody was eligible" without an assertion.
+const at = (iso) => new Date(iso)
+// 05:30 UTC is 11:00 IST — the exact slot.
+check('daily: 10:59 IST is not due yet', dailyGate({ lastRunAt: null, dailyAtHour: 11, now: at('2026-11-10T05:29:00Z') }).due, false)
+check('daily: and says it is waiting for the slot', dailyGate({ lastRunAt: null, dailyAtHour: 11, now: at('2026-11-10T05:29:00Z') }).reason, 'waiting for 11:00 IST')
+check('daily: 11:00 IST exactly is due', dailyGate({ lastRunAt: null, dailyAtHour: 11, now: at('2026-11-10T05:30:00Z') }).due, true)
+check('daily: 11:01 IST is due', dailyGate({ lastRunAt: null, dailyAtHour: 11, now: at('2026-11-10T05:31:00Z') }).due, true)
+// A restart at 21:40 must still send today: a missed slot is honoured, not skipped.
+check('daily: a late evening tick still sends today', dailyGate({ lastRunAt: null, dailyAtHour: 11, now: at('2026-11-10T16:10:00Z') }).due, true)
+// ONE send per day: a run at/after the slot consumes it, so the next tick does nothing.
+check('daily: a run after the slot blocks a second run today', dailyGate({ lastRunAt: at('2026-11-10T05:35:00Z'), dailyAtHour: 11, now: at('2026-11-10T05:45:00Z') }).due, false)
+check('daily: the block explains itself', dailyGate({ lastRunAt: at('2026-11-10T05:35:00Z'), dailyAtHour: 11, now: at('2026-11-10T05:45:00Z') }).reason, 'already ran today (slot 11:00 IST)')
+// A morning run BEFORE the slot must not cancel the scheduled one.
+check('daily: an early manual run does not consume the slot', dailyGate({ lastRunAt: at('2026-11-10T03:30:00Z'), dailyAtHour: 11, now: at('2026-11-10T05:30:00Z') }).due, true)
+// Yesterday's run is irrelevant to today.
+check('daily: yesterday does not block today', dailyGate({ lastRunAt: at('2026-11-09T05:35:00Z'), dailyAtHour: 11, now: at('2026-11-10T05:30:00Z') }).due, true)
+// The slot is an IST wall-clock time, not the server's: 05:30 UTC is 11:00 IST whenever the server is.
+check('daily: the slot is computed in IST', dailyGate({ lastRunAt: null, dailyAtHour: 11, now: at('2026-11-10T05:30:00Z') }).scheduledAt, '2026-11-10T05:30:00.000Z')
+check('daily: 00:30 UTC is 06:00 IST, before the slot', dailyGate({ lastRunAt: null, dailyAtHour: 11, now: at('2026-11-10T00:30:00Z') }).due, false)
+check('daily: the scheduled instant is 11:00 IST on the same IST day', dailyGate({ lastRunAt: null, dailyAtHour: 11, now: at('2026-11-10T00:30:00Z') }).scheduledAt, '2026-11-10T05:30:00.000Z')
+check('daily: a later hour waits longer', dailyGate({ lastRunAt: null, dailyAtHour: 18, now: at('2026-11-10T05:30:00Z') }).due, false)
+check('daily: and fires after it', dailyGate({ lastRunAt: null, dailyAtHour: 18, now: at('2026-11-10T12:30:00Z') }).due, true)
+// The hour comes from the filters, and junk must not silently become "hour 0".
+check('daily: the hour is read from filters', dailyHourOf({ dailyAtHour: 11 }), 11)
+check('daily: a numeric string is accepted', dailyHourOf({ dailyAtHour: '11' }), 11)
+check('daily: a missing hour means no daily job', dailyHourOf({}), null)
+check('daily: an unparseable hour means no daily job', dailyHourOf({ dailyAtHour: 'later' }), null)
+check('daily: an out-of-range hour is refused', dailyHourOf({ dailyAtHour: 24 }), null)
+check('daily: a negative hour is refused', dailyHourOf({ dailyAtHour: -1 }), null)
+check('daily: the hour formats for reporting', formatHour(9), '09:00')
+
+// What marks a sheet nudge as SCHEDULED: a stored sheetUrl. Without one it stays manual-only, which
+// is what makes enabling a sheet nudge safe.
+const actTransacting = DEFAULT_NUDGES.find((n) => n.key === 'whatsapp_onboarded_transacting')
+const actNotTransacting = DEFAULT_NUDGES.find((n) => n.key === 'whatsapp_onboarded_not_transacting')
+const actIp = DEFAULT_NUDGES.find((n) => n.key === 'whatsapp_ip_whitelisting')
+const transactingSource = sheetScheduleOf(JSON.parse(actTransacting?.filters ?? '{}'))
+const notTransactingSource = sheetScheduleOf(JSON.parse(actNotTransacting?.filters ?? '{}'))
+check('daily sheet: the transacting nudge has a stored sheet url', Boolean(transactingSource?.sheetUrl.includes('1dMlpmaRnQsaaVXaSZLy5oMP8Q7dyqo4ZJMXXEQEI-IE')), true)
+check('daily sheet: it reads the transacting tab', transactingSource?.gid, '102394202')
+check('daily sheet: the not-transacting nudge reads the other tab', notTransactingSource?.gid, '0')
+check('daily sheet: both point at the same spreadsheet', transactingSource?.sheetUrl, notTransactingSource?.sheetUrl)
+// The two tabs are different populations — same gid on both would send the wrong copy to everyone.
+check('daily sheet: the two tabs are different', transactingSource?.gid === notTransactingSource?.gid, false)
+check('daily sheet: it fires at 11:00 IST', transactingSource?.dailyAtHour, 11)
+check('daily sheet: the not-transacting flow fires at the same time', notTransactingSource?.dailyAtHour, 11)
+check('daily sheet: the IP notice stays manual-only', sheetScheduleOf(JSON.parse(actIp?.filters ?? '{}')), null)
+check('daily sheet: an empty filters bag is not scheduled', sheetScheduleOf({}), null)
+check('daily sheet: a blank sheet url is not scheduled', sheetScheduleOf({ sheetUrl: '   ' }), null)
+check('daily sheet: the gid may be a number', sheetScheduleOf({ sheetUrl: 'x', sheetGid: 0 })?.gid, '0')
+// Both must still be sheet-driven, or the scheduler would hand them to the Zoho/MySQL path instead.
+check('daily sheet: the transacting nudge is sheet-driven', nudgeSourceOf(actTransacting), 'sheet')
+check('daily sheet: the not-transacting nudge is sheet-driven', nudgeSourceOf(actNotTransacting), 'sheet')
+// The email fallback survives: a Meta-capped recipient still gets the twin email.
+check('daily sheet: the transacting fallback is its email twin', JSON.parse(actTransacting?.filters ?? '{}').emailFallback, 'onboarded_transacting')
+check('daily sheet: the not-transacting fallback is its email twin', JSON.parse(actNotTransacting?.filters ?? '{}').emailFallback, 'onboarded_not_transacting')
+// Neither may claim a multi-message cap: they are sheet nudges, so the cap is inert, and claiming one
+// would make the UI promise a limit that nothing enforces.
+check('daily sheet: the transacting flow claims no interval-based cap', actTransacting?.followUpDays, 0)
 
 console.log(
   `\n${total - failures}/${total} assertions passed` +
